@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["game-engine", "game-server", "snapshot-service"]
+exclude = ["achievement-service", "docker-manager", "gateway-dev", "deploy"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.dependencies]
+itertools = "0.14"
+dotenv = "0.15"
+tokio = { version = "1", features = ["full"] }
+tonic = "0.14.2"
+prost = "0.14.1"
