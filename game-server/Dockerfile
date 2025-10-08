@@ -33,7 +33,7 @@ WORKDIR /usr/local/bin
 COPY --from=builder /usr/src/app/target/release/game-server .
 
 # Copy the required resources from the builder stage
-COPY --from=builder /usr/src/app/game-server/resources .
+COPY --from=builder /usr/src/app/game-server/resources* ./resources
 
 # Remove source code (it never exists in final image)
 # Expose port if your server uses one (optional)
