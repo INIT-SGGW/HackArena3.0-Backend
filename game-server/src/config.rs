@@ -1,7 +1,6 @@
 use http::{HeaderName, HeaderValue};
 use std::env;
 use std::net::SocketAddr;
-
 use tower_http::cors::{AllowOrigin, ExposeHeaders};
 
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
@@ -30,10 +29,10 @@ impl AppEnv {
 
 #[derive(Debug)]
 pub struct Config {
+    pub env: AppEnv,
     pub listen_addr: SocketAddr,
     pub allow_origin: AllowOrigin,
     pub expose_headers: ExposeHeaders,
-    pub env: AppEnv,
 }
 
 impl Config {
@@ -69,10 +68,10 @@ impl Config {
         };
 
         Ok(Self {
+            env,
             listen_addr,
             allow_origin,
             expose_headers,
-            env,
         })
     }
 }

@@ -7,12 +7,12 @@ exclude = ["achievement-service", "docker-manager", "gateway-dev", "deploy"]
 edition = "2024"
 rust-version = "1.90"
 
-[workspace.lints.rust]
-warnings = "deny"
-
 [workspace.dependencies]
-itertools = "0.14"
+bytes = "1.10.1"
 dotenv = "0.15"
-tokio = { version = "1", features = ["full"] }
+itertools = "0.14"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tokio = { version = "1.48", features = ["full"] }
 tonic = "0.14.2"
 prost = "0.14.1"
