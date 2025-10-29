@@ -3,6 +3,10 @@ name = "game-server"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = []
+proto-local = ["proto/proto-local"]
+
 [dependencies]
 bytes = { workspace = true }
 dotenv = { workspace = true}
@@ -14,6 +18,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 game-engine = { path = "../game-engine" }
+proto = { path = "../proto", default-features = false }
 
 async-stream = "0.3.6"
 futures-core = "0.3.31"
@@ -23,3 +28,4 @@ tokio-stream = "0.1.17"
 tonic-health = "0.14.2"
 tonic-web = "0.14.2"
 tower-http = { version = "0.6.6", features = ["cors"] }
+
