@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
-        .with_target(false)
+        .with_target(cfg.env.is_production())
         .with_file(!cfg.env.is_production())
         .with_line_number(!cfg.env.is_production())
         .compact()

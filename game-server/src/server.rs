@@ -6,7 +6,7 @@ use tower_http::cors::{AllowHeaders, Any, CorsLayer};
 use crate::config::Config;
 
 pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!(listen = %cfg.listen_addr, env = ?cfg.env, "game-server: starting up");
+    tracing::info!(%cfg.listen_addr, ?cfg.env, "starting");
 
     let (_reporter, health_service) = health_reporter();
     let grpc_web = GrpcWebLayer::new();
@@ -20,7 +20,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_shutdown(cfg.listen_addr, shutdown_signal())
         .await?;
 
-    tracing::info!("game-server: shutdown gracefully");
+    tracing::info!("shutdown gracefully");
     Ok(())
 }
 
@@ -34,5 +34,5 @@ fn build_cors(cfg: &Config) -> CorsLayer {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("game-server: shutdown signal received");
+    tracing::info!("shutdown signal received");
 }
