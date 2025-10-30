@@ -1,5 +1,6 @@
 mod config;
 mod server;
+mod services;
 
 use dotenv::dotenv;
 use tracing_subscriber::filter::EnvFilter;
@@ -8,16 +9,26 @@ use tracing_subscriber::filter::EnvFilter;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
-    let cfg = config::Config::load_or_exit();
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    let is_prod = matches!(
+        std::env::var("APP_ENV")
+            .unwrap_or_else(|_| "development".to_string())
+            .to_ascii_lowercase()
+            .as_str(),
+        "prod" | "production"
+    );
+
+    let env_filter: EnvFilter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
-        .with_target(cfg.env.is_production())
-        .with_file(!cfg.env.is_production())
-        .with_line_number(!cfg.env.is_production())
+        .with_target(is_prod)
+        .with_file(!is_prod)
+        .with_line_number(!is_prod)
         .compact()
         .init();
+
+    let cfg = config::Config::load_or_exit();
 
     server::run(cfg).await
 }

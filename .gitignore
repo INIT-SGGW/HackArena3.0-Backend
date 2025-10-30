@@ -25,3 +25,6 @@ target
 
 # Generated protobuf code
 proto/gen/
+
+# Assets
+game-server/assets/
