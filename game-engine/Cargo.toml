@@ -7,3 +7,7 @@ edition.workspace = true
 itertools = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+bevy={version="0.16", default-features=true}
+bevy_rapier3d="0.31"
+
