@@ -17,7 +17,6 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-game-engine = { path = "../game-engine" }
 hash-cache = { path = "../libs/hash-cache" }
 proto = { path = "../proto", default-features = false }
 

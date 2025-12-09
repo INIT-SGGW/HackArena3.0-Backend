@@ -275,15 +275,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "game-engine"
-version = "0.1.0"
-dependencies = [
- "itertools",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "game-server"
 version = "0.1.0"
 dependencies = [
@@ -293,7 +284,6 @@ dependencies = [
  "dashmap",
  "dotenv",
  "futures-core",
- "game-engine",
  "hash-cache",
  "http",
  "itertools",
