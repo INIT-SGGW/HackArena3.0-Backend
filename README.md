@@ -6,14 +6,14 @@ To use local `.proto` files from a separate repository, set the `PROTO_PATH` env
 Example (Windows PowerShell):
 
 ```powershell
-$env:PROTO_PATH = "..\..\HackArena3.0-proto\proto"
+$env:PROTO_PATH = "..\..\HackArena3.0-Proto\proto"
 cargo run --bin game-server --features proto-local
 ```
 
 On Linux/macOS:
 
 ```bash
-export PROTO_PATH="../../HackArena3.0-proto/proto"
+export PROTO_PATH="../../HackArena3.0-Proto/proto"
 cargo run --bin game-server --features proto-local
 ```
 
