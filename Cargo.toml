@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["game-server", "libs/*", "snapshot-service"]
+members = ["game-server", "game-engine/boink-ffi", "libs/*", "snapshot-service"]
 exclude = ["achievement-service", "docker-manager", "gateway-dev", "deploy"]
 
 [workspace.package]

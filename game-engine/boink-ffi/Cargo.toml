@@ -1,0 +1,12 @@
+[package]
+name = "boink-ffi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+libc = "0.2.177"
+
+[build-dependencies]
+cbindgen = "0.29.2"
+
