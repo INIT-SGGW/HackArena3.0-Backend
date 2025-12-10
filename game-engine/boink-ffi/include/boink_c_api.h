@@ -30,6 +30,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define BOINK_C_API_VERSION_MAJOR 0
+
+#define BOINK_C_API_VERSION_MINOR 1
+
+#define BOINK_C_API_VERSION_PATCH 0
+
 /**
  * Indicates successful operation.
  */
@@ -211,6 +217,38 @@ typedef struct BoinkCarState {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Retrieves the version of the Boink C API.
+ *
+ * Parameters:
+ * - `out_major` – pointer to receive the major version number.
+ * - `out_minor` – pointer to receive the minor version number.
+ * - `out_patch` – pointer to receive the patch version number.
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - An error code on failure.
+ */
+BOINK_API int boink_get_c_api_version(unsigned int *out_major,
+                                   unsigned int *out_minor,
+                                   unsigned int *out_patch);
+
+/**
+ * Retrieves the version of the Boink engine library.
+ *
+ * Parameters:
+ * - `out_major` – pointer to receive the major version number.
+ * - `out_minor` – pointer to receive the minor version number.
+ * - `out_patch` – pointer to receive the patch version number.
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - An error code on failure.
+ */
+BOINK_API int boink_get_engine_version(unsigned int *out_major,
+                                    unsigned int *out_minor,
+                                    unsigned int *out_patch);
 
 /**
  * Initializes the Boink engine library.

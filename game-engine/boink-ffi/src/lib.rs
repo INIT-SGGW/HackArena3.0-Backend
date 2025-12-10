@@ -10,7 +10,11 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
 
-use libc::{c_double, c_int, c_void};
+use libc::{c_double, c_int, c_uint, c_void};
+
+pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 1;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
@@ -141,6 +145,38 @@ pub struct BoinkCarState {
 }
 
 unsafe extern "C" {
+    /// Retrieves the version of the Boink C API.
+    ///
+    /// Parameters:
+    /// - `out_major` – pointer to receive the major version number.
+    /// - `out_minor` – pointer to receive the minor version number.
+    /// - `out_patch` – pointer to receive the patch version number.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - An error code on failure.
+    pub fn boink_get_c_api_version(
+        out_major: *mut c_uint,
+        out_minor: *mut c_uint,
+        out_patch: *mut c_uint,
+    ) -> c_int;
+
+    /// Retrieves the version of the Boink engine library.
+    ///
+    /// Parameters:
+    /// - `out_major` – pointer to receive the major version number.
+    /// - `out_minor` – pointer to receive the minor version number.
+    /// - `out_patch` – pointer to receive the patch version number.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - An error code on failure.
+    pub fn boink_get_engine_version(
+        out_major: *mut c_uint,
+        out_minor: *mut c_uint,
+        out_patch: *mut c_uint,
+    ) -> c_int;
+
     /// Initializes the Boink engine library.
     ///
     /// This function must be called before any other Boink API is used.
