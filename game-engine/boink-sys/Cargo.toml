@@ -1,0 +1,13 @@
+[package]
+name = "boink-sys"
+version = "0.1.0"
+edition = "2024"
+links = "boink"
+
+[features]
+default = ["dynamic"]
+dynamic = []
+static = []
+
+[dependencies]
+boink-ffi = { path = "../boink-ffi" }

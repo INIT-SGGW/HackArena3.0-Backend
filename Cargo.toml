@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["game-server", "game-engine/boink-ffi", "libs/*", "snapshot-service"]
+members = ["game-server", "game-engine/boink-ffi", "game-engine/boink-sys", "libs/*", "snapshot-service"]
 exclude = ["achievement-service", "docker-manager", "gateway-dev", "deploy"]
 
 [workspace.package]
@@ -8,11 +8,11 @@ edition = "2024"
 rust-version = "1.90"
 
 [workspace.dependencies]
-bytes = "1.10.1"
+bytes = "1.11"
 dotenv = "0.15"
 itertools = "0.14"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.48", features = ["full"] }
-tonic = "0.14.2"
-prost = "0.14.1"
+tonic = "0.14"
+prost = "0.14"
