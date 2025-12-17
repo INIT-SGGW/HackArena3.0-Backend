@@ -1,0 +1,11 @@
+[package]
+name = "boink"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tracing = { workspace = true }
+
+boink-sys = { path = "../boink-sys" }
+
+thiserror = "2.0.17"
