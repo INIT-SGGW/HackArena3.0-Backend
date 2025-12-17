@@ -13,7 +13,7 @@
 use libc::{c_double, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 1;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 2;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -83,16 +83,14 @@ pub struct BoinkCarModel {
     pub max_steer_angle: c_double,
 }
 
-/// Represents roll–pitch–yaw orientation in radians.
+/// Represents a quaternion rotation (x, y, z, w).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct BoinkEulerRPY {
-    /// Roll angle in radians.
-    pub roll: c_double,
-    /// Pitch angle in radians.
-    pub pitch: c_double,
-    /// Yaw angle in radians.
-    pub yaw: c_double,
+pub struct BoinkQuaternion {
+    pub x: c_double,
+    pub y: c_double,
+    pub z: c_double,
+    pub w: c_double,
 }
 
 /// Represents the full state of a car at a specific simulation instant.
@@ -105,8 +103,8 @@ pub struct BoinkCarState {
     /// World position of the car in meters.
     pub position: BoinkVec3,
 
-    /// Orientation of the car in roll–pitch–yaw angles (radians).
-    pub orientation: BoinkEulerRPY,
+    /// Orientation of the car as a quaternion (x, y, z, w).
+    pub orientation: BoinkQuaternion,
 
     /// Linear speed magnitude of the car in meters per second.
     pub speed: c_double,

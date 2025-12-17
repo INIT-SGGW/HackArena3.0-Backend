@@ -32,7 +32,7 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 1
+#define BOINK_C_API_VERSION_MINOR 2
 
 #define BOINK_C_API_VERSION_PATCH 0
 
@@ -137,22 +137,14 @@ typedef struct BoinkControls {
 } BoinkControls;
 
 /**
- * Represents roll–pitch–yaw orientation in radians.
+ * Represents a quaternion rotation (x, y, z, w).
  */
-typedef struct BoinkEulerRPY {
-  /**
-   * Roll angle in radians.
-   */
-  double roll;
-  /**
-   * Pitch angle in radians.
-   */
-  double pitch;
-  /**
-   * Yaw angle in radians.
-   */
-  double yaw;
-} BoinkEulerRPY;
+typedef struct BoinkQuaternion {
+  double x;
+  double y;
+  double z;
+  double w;
+} BoinkQuaternion;
 
 /**
  * Represents the full state of a car at a specific simulation instant.
@@ -167,9 +159,9 @@ typedef struct BoinkCarState {
    */
   struct BoinkVec3 position;
   /**
-   * Orientation of the car in roll–pitch–yaw angles (radians).
+   * Orientation of the car as a quaternion (x, y, z, w).
    */
-  struct BoinkEulerRPY orientation;
+  struct BoinkQuaternion orientation;
   /**
    * Linear speed magnitude of the car in meters per second.
    */
