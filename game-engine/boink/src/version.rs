@@ -9,6 +9,7 @@ use core::fmt;
 use crate::error::{Error, Result};
 
 use boink_sys as sys;
+use tracing::{info, warn};
 
 /// Semantic version triple reported by the Boink engine.
 ///
@@ -80,13 +81,7 @@ pub fn query_c_api_version() -> Result<Version> {
     let mut minor: u32 = 0;
     let mut patch: u32 = 0;
 
-    let code = unsafe {
-        sys::boink_get_c_api_version(
-            &mut major as *mut u32,
-            &mut minor as *mut u32,
-            &mut patch as *mut u32,
-        )
-    };
+    let code = unsafe { sys::boink_get_c_api_version(&mut major, &mut minor, &mut patch) };
 
     if code == sys::BOINK_OK {
         Ok(Version::new(major, minor, patch))
@@ -101,13 +96,7 @@ pub fn query_engine_version() -> Result<Version> {
     let mut minor: u32 = 0;
     let mut patch: u32 = 0;
 
-    let code = unsafe {
-        sys::boink_get_engine_version(
-            &mut major as *mut u32,
-            &mut minor as *mut u32,
-            &mut patch as *mut u32,
-        )
-    };
+    let code = unsafe { sys::boink_get_engine_version(&mut major, &mut minor, &mut patch) };
 
     if code == sys::BOINK_OK {
         Ok(Version::new(major, minor, patch))
@@ -132,13 +121,24 @@ pub fn query_engine_version() -> Result<Version> {
 /// This function is intended to be called early (e.g., during service startup)
 /// to fail fast when the wrong native library is deployed.
 pub fn ensure_c_api_compatible() -> Result<()> {
-    let actual = query_c_api_version()?;
     let required = REQUIRED_C_API_VERSION;
+    match query_c_api_version() {
+        Ok(actual) => {
+            info!(
+                "Loaded Boink C API version {} (required {})",
+                actual, required
+            );
 
-    if is_compatible(required, actual) {
-        Ok(())
-    } else {
-        Err(Error::IncompatibleVersion { required, actual })
+            if is_compatible(required, actual) {
+                Ok(())
+            } else {
+                Err(Error::IncompatibleVersion { required, actual })
+            }
+        }
+        Err(err) => {
+            warn!("Unable to query Boink C API version from native library: {err}");
+            Err(err)
+        }
     }
 }
 

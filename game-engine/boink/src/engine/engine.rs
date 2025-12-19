@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
 use crate::model::{CarState, Controls};
+use crate::version::ensure_c_api_compatible;
 
 use tracing::{debug, instrument};
 
@@ -53,11 +54,13 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error if:
+    /// - the native library exposes an incompatible C-API version,
     /// - the car model contains invalid values,
     /// - the native world cannot be created,
     /// - the world fails to start at the given simulation time.
     #[instrument(skip(car_model))]
     pub(crate) fn new(car_model: CarModelConfig, start_time_seconds: f64) -> Result<Self> {
+        ensure_c_api_compatible()?;
         Self::validate_car_model(&car_model)?;
 
         let ffi_model = Self::to_ffi_car_model(&car_model);
