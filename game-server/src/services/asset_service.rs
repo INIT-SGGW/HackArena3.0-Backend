@@ -1,29 +1,32 @@
+//! gRPC AssetService implementation for track metadata and streaming.
+
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use async_stream::try_stream;
 use bytes::{Bytes, BytesMut};
-use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
-use tonic::{Request, Response, Status};
-
 use hash_cache::HashCache;
 use proto::race::v1::asset_service_server::AssetService;
 use proto::race::v1::{
     GetTrackMetaRequest, GetTrackMetaResponse, GetTrackRequest, GetTrackResponse, MimeType,
     TrackMeta,
 };
+use tokio::fs::{self, File};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
+use tonic::{Request, Response, Status};
 
 type BoxStream<T> = Pin<Box<dyn tokio_stream::Stream<Item = Result<T, Status>> + Send + 'static>>;
 
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 const MAX_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB
 
+/// gRPC AssetService implementation.
 pub struct AssetServiceImpl {
     tracks_dir: PathBuf,
     hash_cache: HashCache,
 }
 impl AssetServiceImpl {
+    /// Builds the service with the given track directory.
     pub fn new(tracks_dir: PathBuf) -> Self {
         let sidecars = tracks_dir.join(".hashes");
         let hash_cache = HashCache::new(Some(sidecars));
@@ -87,7 +90,7 @@ impl AssetService for AssetServiceImpl {
 
         let track_meta = TrackMeta {
             id: id.clone(),
-            content_type: MimeType::MimeGltfBinary as i32,
+            content_type: MimeType::GltfBinary as i32,
             size_bytes: size,
             content_hash: hash,
             version: 1, // TODO : Versioning
@@ -176,6 +179,12 @@ impl AssetService for AssetServiceImpl {
 
                 if n == 0 {
                     if pos == offset {
+                        yield GetTrackResponse {
+                            offset: pos,
+                            data: Bytes::new(),
+                            eof: true,
+                        };
+                    } else {
                         yield GetTrackResponse {
                             offset: pos,
                             data: Bytes::new(),
