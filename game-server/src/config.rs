@@ -59,6 +59,9 @@ impl Config {
             std::env::var("CORS_ALLOWED_ORIGINS"),
         ) {
             (true, Err(_)) => return Err("CORS_ALLOWED_ORIGINS must be set in production".into()),
+            (true, Ok(v)) if v.trim().is_empty() => {
+                return Err("CORS_ALLOWED_ORIGINS cannot be empty in production".into());
+            }
             (_, Ok(v)) => parse_allow_origin(&v)?,
             (false, Err(_)) => AllowOrigin::any(),
         };
