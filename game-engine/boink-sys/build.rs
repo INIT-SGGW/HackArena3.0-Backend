@@ -32,8 +32,7 @@ fn emit_rerun_for_dir(dir: &Path) {
 }
 
 fn setup_windows(manifest_dir: &PathBuf) {
-    let lib_dir = manifest_dir.join("native").join("windows");
-
+    let lib_dir = determine_lib_dir(manifest_dir, "windows");
     emit_rerun_for_dir(&lib_dir);
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
@@ -42,23 +41,63 @@ fn setup_windows(manifest_dir: &PathBuf) {
         println!("cargo:rustc-link-lib=static=boink");
     } else {
         println!("cargo:rustc-link-lib=dylib=boink");
+        copy_runtime_lib(&lib_dir, "boink.dll");
     }
 }
 
 fn setup_linux(manifest_dir: &PathBuf) {
-    let lib_dir = manifest_dir.join("native").join("linux");
+    let lib_dir = determine_lib_dir(manifest_dir, "linux");
 
     emit_rerun_for_dir(&lib_dir);
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=boink");
+    copy_runtime_lib(&lib_dir, "libboink.so");
 }
 
 fn setup_macos(manifest_dir: &PathBuf) {
-    let lib_dir = manifest_dir.join("native").join("macos");
+    let lib_dir = determine_lib_dir(manifest_dir, "macos");
 
     emit_rerun_for_dir(&lib_dir);
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=boink");
+    copy_runtime_lib(&lib_dir, "libboink.dylib");
+}
+
+fn determine_lib_dir(manifest_dir: &Path, platform: &str) -> PathBuf {
+    println!("cargo:rerun-if-env-changed=BOINK_NATIVE_LIB_DIR");
+
+    env::var_os("BOINK_NATIVE_LIB_DIR")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| manifest_dir.join("native").join(platform))
+}
+
+fn copy_runtime_lib(lib_dir: &Path, file_name: &str) {
+    let source = lib_dir.join(file_name);
+
+    if !source.exists() {
+        println!(
+            "cargo:warning=boink-sys: runtime artifact {} missing at {}",
+            file_name,
+            source.display()
+        );
+        return;
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("Unexpected OUT_DIR layout (target/<profile>/build/..)");
+
+    if let Err(err) = fs::copy(&source, profile_dir.join(file_name)) {
+        panic!(
+            "Failed to copy {} to {}: {}",
+            source.display(),
+            profile_dir.display(),
+            err
+        );
+    }
 }
