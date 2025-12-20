@@ -5,7 +5,6 @@
 //! checking compatibility against the wrapper's expected C-API version.
 
 use core::fmt;
-
 #[cfg(feature = "legacy-native-lib")]
 use std::sync::Once;
 
@@ -13,6 +12,7 @@ use boink_sys as sys;
 use tracing::{info, warn};
 
 use crate::error::{Error, Result};
+
 #[cfg(feature = "legacy-native-lib")]
 use super::api::NativeApi;
 

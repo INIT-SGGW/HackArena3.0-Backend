@@ -4,12 +4,12 @@
 //! cars at a higher level before delegating the actual FFI work to
 //! [`crate::engine::Engine`].
 
+use tracing::instrument;
+
 use crate::engine::Engine;
 use crate::engine::engine::CarModelConfig;
 use crate::error::Result;
 use crate::model::math::Vec3;
-
-use tracing::instrument;
 
 /// Fluent helper that prepares high-level simulation configuration before
 /// handing off to [`Engine`].

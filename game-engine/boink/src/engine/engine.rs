@@ -4,16 +4,14 @@
 //! this module provides high-level methods to drive the simulation and interact
 //! with cars while ensuring resources are released correctly.
 
+use boink_sys as sys;
 use std::marker::PhantomData;
+use tracing::{debug, instrument};
 
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
 use crate::model::{CarState, Controls};
 use crate::version::ensure_c_api_compatible;
-
-use tracing::{debug, instrument};
-
-use boink_sys as sys;
 
 /// Domain-level configuration of the car model used by the engine.
 ///

@@ -2,10 +2,10 @@
 //!
 //! Defines the `Error` enum mapping native status codes to descriptive variants.
 
-use crate::version::Version;
-
 use boink_sys as sys;
 use thiserror::Error;
+
+use crate::version::Version;
 
 /// Convenient alias for results returned by this crate.
 pub type Result<T, E = Error> = core::result::Result<T, E>;

@@ -12,9 +12,7 @@ pub enum NativeLoadError {
         source: Arc<libloading::Error>,
     },
     /// Failed to load the library from the default search path.
-    LibraryNotFound {
-        source: Arc<libloading::Error>,
-    },
+    LibraryNotFound { source: Arc<libloading::Error> },
 }
 
 impl fmt::Display for NativeLoadError {

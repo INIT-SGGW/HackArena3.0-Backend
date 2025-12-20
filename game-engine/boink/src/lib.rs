@@ -7,7 +7,6 @@ pub mod error;
 pub mod model;
 pub mod native;
 
-pub use crate::native::version;
-
 pub use crate::engine::Engine;
 pub use crate::error::{Error, Result};
+pub use crate::native::version;
