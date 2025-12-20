@@ -33,7 +33,7 @@ pub async fn serve_grpc(
         .await;
 
     let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
-    let race_impl = RaceServiceImpl::new(engine);
+    let race_impl = RaceServiceImpl::new(engine, cfg.simulation_hz);
 
     let cors = cors_layer(&cfg);
 

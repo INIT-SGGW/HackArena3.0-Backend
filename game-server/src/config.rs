@@ -33,6 +33,7 @@ pub struct Config {
     pub allow_origin: AllowOrigin,
     pub expose_headers: ExposeHeaders,
     pub tracks_dir: PathBuf,
+    pub simulation_hz: u32,
 }
 
 impl Config {
@@ -87,12 +88,23 @@ impl Config {
             tracing::warn!(path=%tracks_dir.display(), "tracks directory is empty");
         }
 
+        let simulation_hz = std::env::var("SIMULATION_HZ")
+            .unwrap_or_else(|_| "60".to_string())
+            .parse::<u32>()
+            .map_err(|e| format!("Invalid SIMULATION_HZ: {}", e))?;
+        if simulation_hz == 0 {
+            return Err("SIMULATION_HZ must be >= 1".into());
+        }
+
+        tracing::info!(simulation_hz, "server config");
+
         Ok(Self {
             env: app_env,
             listen_addr,
             allow_origin,
             expose_headers,
             tracks_dir,
+            simulation_hz,
         })
     }
 }

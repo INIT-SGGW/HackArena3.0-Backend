@@ -27,8 +27,6 @@ use super::commands::EngineCommand;
 
 /// Maximum number of queued commands. Keep small enough to apply backpressure.
 const COMMAND_QUEUE_CAPACITY: usize = 256;
-const SIMULATION_HZ: f64 = 60.0;
-const SIMULATION_DT_SECONDS: f64 = 1.0 / SIMULATION_HZ;
 
 /// Errors returned by the engine worker boundary.
 ///
@@ -107,6 +105,19 @@ impl EngineClient {
             .await
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
+
+    /// Despawns a car, releasing it from the engine world.
+    pub async fn despawn_car(&self, car_id: u64) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::DespawnCar { car_id, reply_tx })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
 }
 
 /// Spawns the engine worker task.
@@ -120,8 +131,9 @@ pub async fn spawn(
     let client = EngineClient { tx };
 
     let engine = build_engine(&cfg)?;
+    let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f64;
     let handle = tokio::task::spawn_local(async move {
-        run_worker(engine, &mut rx, &mut shutdown_rx).await;
+        run_worker(engine, &mut rx, &mut shutdown_rx, simulation_dt_seconds).await;
     });
 
     Ok((client, handle))
@@ -131,9 +143,10 @@ async fn run_worker(
     mut engine: Engine,
     rx: &mut mpsc::Receiver<EngineCommand>,
     shutdown_rx: &mut broadcast::Receiver<()>,
+    simulation_dt_seconds: f64,
 ) {
     let mut ticker =
-        tokio::time::interval(tokio::time::Duration::from_secs_f64(SIMULATION_DT_SECONDS));
+        tokio::time::interval(tokio::time::Duration::from_secs_f64(simulation_dt_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -144,7 +157,7 @@ async fn run_worker(
             }
 
             _ = ticker.tick() => {
-                if let Err(err) = engine.step(SIMULATION_DT_SECONDS) {
+                if let Err(err) = engine.step(simulation_dt_seconds) {
                     tracing::warn!(error = ?err, "engine worker: tick failed");
                 }
             }
@@ -188,6 +201,13 @@ fn handle_command(engine: &mut Engine, cmd: EngineCommand) -> Result<(), EngineW
         EngineCommand::ReadCarState { car_id, reply_tx } => {
             let result = engine
                 .read_car_state(car_id)
+                .map_err(EngineWorkerError::Engine);
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::DespawnCar { car_id, reply_tx } => {
+            let result = engine
+                .despawn_car(car_id)
                 .map_err(EngineWorkerError::Engine);
             let _ = reply_tx.send(result);
             Ok(())

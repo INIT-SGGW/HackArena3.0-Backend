@@ -22,4 +22,8 @@ pub enum EngineCommand {
         car_id: u64,
         reply_tx: oneshot::Sender<Result<CarState, EngineWorkerError>>,
     },
+    DespawnCar {
+        car_id: u64,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
 }
