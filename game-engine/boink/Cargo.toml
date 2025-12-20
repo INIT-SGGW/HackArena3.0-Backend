@@ -8,4 +8,9 @@ tracing = { workspace = true }
 
 boink-sys = { path = "../boink-sys" }
 
+libloading = { version = "0.9", optional = true }
 thiserror = "2.0.17"
+
+[features]
+default = []
+legacy-native-lib = ["libloading"]

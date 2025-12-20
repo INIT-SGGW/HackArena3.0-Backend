@@ -6,10 +6,15 @@
 
 use core::fmt;
 
-use crate::error::{Error, Result};
+#[cfg(feature = "legacy-native-lib")]
+use std::sync::Once;
 
 use boink_sys as sys;
 use tracing::{info, warn};
+
+use crate::error::{Error, Result};
+#[cfg(feature = "legacy-native-lib")]
+use super::api::NativeApi;
 
 /// Semantic version triple reported by the Boink engine.
 ///
@@ -58,9 +63,9 @@ pub struct VersionInfo {
 /// This is sourced from the generated FFI constants (mirroring the header
 /// macros in `boink_c_api.h`).
 pub const REQUIRED_C_API_VERSION: Version = Version::new(
-    sys::BOINK_C_API_VERSION_MAJOR as u32,
-    sys::BOINK_C_API_VERSION_MINOR as u32,
-    sys::BOINK_C_API_VERSION_PATCH as u32,
+    sys::BOINK_C_API_VERSION_MAJOR,
+    sys::BOINK_C_API_VERSION_MINOR,
+    sys::BOINK_C_API_VERSION_PATCH,
 );
 
 /// Queries the loaded native library for the Boink C-API and engine versions.
@@ -76,6 +81,7 @@ pub fn query_versions() -> Result<VersionInfo> {
 }
 
 /// Queries the loaded native library for the Boink C-API version.
+#[cfg(not(feature = "legacy-native-lib"))]
 pub fn query_c_api_version() -> Result<Version> {
     let mut major: u32 = 0;
     let mut minor: u32 = 0;
@@ -90,7 +96,36 @@ pub fn query_c_api_version() -> Result<Version> {
     }
 }
 
+/// Queries the loaded native library for the Boink C-API version.
+#[cfg(feature = "legacy-native-lib")]
+pub fn query_c_api_version() -> Result<Version> {
+    match try_dynamic_version_query(b"boink_get_c_api_version\0")? {
+        Some(version) => {
+            info!(
+                "Legacy native C API version: {} (min {})",
+                version, REQUIRED_C_API_VERSION
+            );
+            Ok(version)
+        }
+        None => {
+            static ASSUMED_C_API_WARN_ONCE: Once = Once::new();
+            ASSUMED_C_API_WARN_ONCE.call_once(|| {
+                warn!(
+                    concat!(
+                        "Unable to query legacy Boink C API version; assuming {} ",
+                        "(min required {}). Missing version info may indicate newer APIs ",
+                        "are unavailable."
+                    ),
+                    REQUIRED_C_API_VERSION, REQUIRED_C_API_VERSION
+                );
+            });
+            Ok(REQUIRED_C_API_VERSION)
+        }
+    }
+}
+
 /// Queries the loaded native library for the Boink engine library version.
+#[cfg(not(feature = "legacy-native-lib"))]
 pub fn query_engine_version() -> Result<Version> {
     let mut major: u32 = 0;
     let mut minor: u32 = 0;
@@ -102,6 +137,28 @@ pub fn query_engine_version() -> Result<Version> {
         Ok(Version::new(major, minor, patch))
     } else {
         Err(Error::from_code(code))
+    }
+}
+
+/// Queries the loaded native library for the Boink engine library version.
+#[cfg(feature = "legacy-native-lib")]
+pub fn query_engine_version() -> Result<Version> {
+    match try_dynamic_version_query(b"boink_get_engine_version\0")? {
+        Some(version) => {
+            info!(
+                "Legacy native engine version: {} (min {})",
+                version, REQUIRED_C_API_VERSION
+            );
+            Ok(version)
+        }
+        None => {
+            let assumed = Version::new(0, 0, 0);
+            warn!(
+                "Unable to query legacy engine implementation version; falling back to {}",
+                assumed
+            );
+            Ok(assumed)
+        }
     }
 }
 
@@ -120,12 +177,13 @@ pub fn query_engine_version() -> Result<Version> {
 ///
 /// This function is intended to be called early (e.g., during service startup)
 /// to fail fast when the wrong native library is deployed.
+#[cfg(not(feature = "legacy-native-lib"))]
 pub fn ensure_c_api_compatible() -> Result<()> {
     let required = REQUIRED_C_API_VERSION;
     match query_c_api_version() {
         Ok(actual) => {
             info!(
-                "Loaded Boink C API version {} (required {})",
+                "Loaded Boink C API version {} (min required {})",
                 actual, required
             );
 
@@ -142,6 +200,48 @@ pub fn ensure_c_api_compatible() -> Result<()> {
     }
 }
 
+#[cfg(feature = "legacy-native-lib")]
+pub fn ensure_c_api_compatible() -> Result<()> {
+    static LEGACY_WARN_ONCE: Once = Once::new();
+    LEGACY_WARN_ONCE.call_once(|| {
+        warn!("Legacy compatibility mode enabled; native symbols will be resolved dynamically");
+    });
+
+    let _ = query_c_api_version()?;
+    Ok(())
+}
+
+#[cfg(feature = "legacy-native-lib")]
+fn try_dynamic_version_query(symbol: &[u8]) -> Result<Option<Version>> {
+    let api = match NativeApi::instance() {
+        Ok(api) => api,
+        Err(_) => return Ok(None),
+    };
+
+    let func = match symbol {
+        b"boink_get_c_api_version\0" => api.boink_get_c_api_version(),
+        b"boink_get_engine_version\0" => api.boink_get_engine_version(),
+        _ => None,
+    };
+
+    let func = match func {
+        Some(func) => func,
+        None => return Ok(None),
+    };
+
+    let mut major: u32 = 0;
+    let mut minor: u32 = 0;
+    let mut patch: u32 = 0;
+
+    let code = unsafe { func(&mut major, &mut minor, &mut patch) };
+    if code == sys::BOINK_OK {
+        Ok(Some(Version::new(major, minor, patch)))
+    } else {
+        Err(Error::from_code(code))
+    }
+}
+
+#[cfg(not(feature = "legacy-native-lib"))]
 fn is_compatible(required: Version, actual: Version) -> bool {
     if actual.major != required.major {
         return false;
