@@ -1,12 +1,16 @@
 //! gRPC RaceService implementation and transport mapping.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use boink::model::Controls;
 use dashmap::DashMap;
 use proto::race::v1::{
-    GetCarStateRequest, GetCarStateStreamResponse, QuickJoinRequest, QuickJoinResponse,
-    SetControlsRequest, SetControlsResponse, StreamSettings,
-    get_car_state_stream_response::Payload, race_service_server::RaceService,
+    FrontendSpectatorEvent, FrontendSpectatorSnapshot, GetFrontendSpectatorRequest,
+    GetParticipantRaceRequest, ParticipantRaceEvent, QuickJoinRequest, QuickJoinResponse,
+    SetControlsDevRequest, SetControlsRequest, SetControlsResponse, StreamClampReason,
+    StreamSettings, frontend_spectator_event::Payload as FrontendSpectatorPayload,
+    race_service_server::RaceService,
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::Duration;
@@ -16,7 +20,7 @@ use tonic::{Request, Response, Status, server::NamedService};
 use crate::runtime::engine_worker::EngineClient;
 
 use super::error_map::map_worker_err;
-use super::mappers::{car_state_to_proto, proto_to_controls};
+use super::mappers::{frontend_full_state, proto_to_controls};
 
 const DEFAULT_STREAM_HZ: u32 = 20;
 const MIN_STREAM_HZ: u32 = 1;
@@ -28,6 +32,8 @@ pub struct RaceServiceImpl {
     engine: EngineClient,
     simulation_hz: u32,
     active_streams: DashMap<u64, ()>,
+    known_cars: DashMap<u64, ()>,
+    last_client_seq: DashMap<u64, u64>,
     // Optional shared state for future extensions.
     _state: Arc<Mutex<()>>,
 }
@@ -39,18 +45,21 @@ impl RaceServiceImpl {
             engine,
             simulation_hz,
             active_streams: DashMap::new(),
+            known_cars: DashMap::new(),
+            last_client_seq: DashMap::new(),
             _state: Arc::new(Mutex::new(())),
         }
     }
 }
 
 impl NamedService for RaceServiceImpl {
-    const NAME: &'static str = "proto.race.v1.RaceService";
+    const NAME: &'static str = "race.v1.RaceService";
 }
 
 #[tonic::async_trait]
 impl RaceService for RaceServiceImpl {
-    type GetCarStateStream = ReceiverStream<Result<GetCarStateStreamResponse, Status>>;
+    type StreamFrontendSpectatorStream = ReceiverStream<Result<FrontendSpectatorEvent, Status>>;
+    type StreamParticipantRaceStream = ReceiverStream<Result<ParticipantRaceEvent, Status>>;
 
     async fn quick_join(
         &self,
@@ -64,6 +73,8 @@ impl RaceService for RaceServiceImpl {
             car_id,
             map_id: "test".into(),
         };
+        self.known_cars.insert(car_id, ());
+        self.last_client_seq.insert(car_id, 0);
 
         Ok(Response::new(resp))
     }
@@ -73,121 +84,223 @@ impl RaceService for RaceServiceImpl {
         request: Request<SetControlsRequest>,
     ) -> Result<Response<SetControlsResponse>, Status> {
         let req = request.into_inner();
+        let car_id = self.resolve_single_car_id()?;
         let controls = proto_to_controls(&req);
 
         self.engine
-            .set_controls(req.car_id, controls)
+            .set_controls(car_id, controls)
             .await
             .map_err(map_worker_err)?;
 
-        Ok(Response::new(SetControlsResponse {}))
+        self.last_client_seq.insert(car_id, req.client_seq);
+        let resp = SetControlsResponse {
+            client_seq: req.client_seq,
+            accepted_throttle: req.throttle,
+            accepted_brake: req.brake,
+            accepted_steering: req.steering,
+            applies_from_tick: 0,
+        };
+
+        Ok(Response::new(resp))
     }
 
-    async fn get_car_state(
+    async fn set_controls_dev(
         &self,
-        request: Request<GetCarStateRequest>,
-    ) -> Result<Response<Self::GetCarStateStream>, Status> {
+        request: Request<SetControlsDevRequest>,
+    ) -> Result<Response<SetControlsResponse>, Status> {
         let req = request.into_inner();
+        let controls = Controls {
+            throttle: req.throttle,
+            brake: req.brake,
+            steer: req.steering,
+        };
 
-        if self.active_streams.contains_key(&req.car_id) {
-            tracing::warn!(
-                car_id = req.car_id,
-                "car state stream already active; rejecting new stream"
-            );
-            return Err(Status::already_exists("car state stream already active"));
-        }
-        self.active_streams.insert(req.car_id, ());
+        self.engine
+            .set_controls(req.target_car_id, controls)
+            .await
+            .map_err(map_worker_err)?;
+
+        self.last_client_seq
+            .insert(req.target_car_id, req.client_seq);
+        let resp = SetControlsResponse {
+            client_seq: req.client_seq,
+            accepted_throttle: req.throttle,
+            accepted_brake: req.brake,
+            accepted_steering: req.steering,
+            applies_from_tick: 0,
+        };
+
+        Ok(Response::new(resp))
+    }
+
+    async fn stream_frontend_spectator(
+        &self,
+        request: Request<GetFrontendSpectatorRequest>,
+    ) -> Result<Response<Self::StreamFrontendSpectatorStream>, Status> {
+        let req = request.into_inner();
 
         let engine = self.engine.clone();
         let simulation_hz = self.simulation_hz;
         let active_streams = self.active_streams.clone();
+        let known_cars = self.known_cars.clone();
+        let last_client_seq = self.last_client_seq.clone();
         let (tx, rx) = mpsc::channel(16);
 
         tokio::spawn(async move {
-            let requested_hz = if req.hz == 0 {
+            static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+            let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
+            active_streams.insert(stream_id, ());
+            let requested_hz = if req.requested_hz == 0 {
                 DEFAULT_STREAM_HZ
             } else {
-                req.hz
+                req.requested_hz
             };
             let max_hz = MAX_STREAM_HZ.min(simulation_hz);
             let effective_hz = requested_hz.clamp(MIN_STREAM_HZ, max_hz);
-            let clamped = effective_hz != requested_hz;
+            let clamp_reason = if effective_hz == requested_hz {
+                StreamClampReason::None
+            } else {
+                StreamClampReason::ServerLimit
+            };
             let period = Duration::from_secs_f64(1.0 / effective_hz as f64);
             let mut ticker = tokio::time::interval(period);
+            let mut tick: u64 = 0;
 
             tracing::info!(
-                car_id = req.car_id,
                 requested_hz,
                 effective_hz,
-                clamped,
-                "car state stream started"
+                clamp_reason = ?clamp_reason,
+                "frontend spectator stream started"
             );
 
             let settings = StreamSettings {
                 requested_hz,
                 effective_hz,
-                clamped,
+                clamp_reason: clamp_reason as i32,
             };
-            let settings_msg = GetCarStateStreamResponse {
-                payload: Some(Payload::Settings(settings)),
+            let settings_msg = FrontendSpectatorEvent {
+                payload: Some(FrontendSpectatorPayload::Settings(settings)),
             };
             if tx.try_send(Ok(settings_msg)).is_err() {
-                active_streams.remove(&req.car_id);
+                active_streams.remove(&stream_id);
                 return;
             }
 
             loop {
                 ticker.tick().await;
+                tick = tick.wrapping_add(1);
 
-                let state = match engine.read_car_state(req.car_id).await {
-                    Ok(state) => state,
-                    Err(err) => {
-                        tracing::warn!(
-                            car_id = req.car_id,
-                            error = %err,
-                            "car state stream stopped due to engine error"
-                        );
-                        let _ = engine.despawn_car(req.car_id).await;
-                        let _ = tx.send(Err(map_worker_err(err))).await;
-                        break;
+                let car_ids: Vec<u64> = known_cars.iter().map(|entry| *entry.key()).collect();
+                let mut cars = Vec::with_capacity(car_ids.len());
+
+                for car_id in car_ids {
+                    let seq = last_client_seq.get(&car_id).map(|v| *v).unwrap_or(0);
+                    match engine.read_car_state(car_id).await {
+                        Ok(state) => cars.push(frontend_full_state(car_id, state, seq)),
+                        Err(err) => {
+                            tracing::warn!(
+                                car_id,
+                                error = %err,
+                                "failed to read car state for spectator snapshot"
+                            );
+                            known_cars.remove(&car_id);
+                            last_client_seq.remove(&car_id);
+                        }
                     }
-                };
+                }
 
-                let resp = car_state_to_proto(req.car_id, state);
-                let msg = GetCarStateStreamResponse {
-                    payload: Some(Payload::State(resp)),
+                let snapshot = FrontendSpectatorSnapshot {
+                    tick,
+                    server_time_ms: current_time_ms(),
+                    cars,
+                };
+                let msg = FrontendSpectatorEvent {
+                    payload: Some(FrontendSpectatorPayload::Snapshot(snapshot)),
                 };
                 match tx.try_send(Ok(msg)) {
                     Ok(_) => {}
                     Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        tracing::debug!(
-                            car_id = req.car_id,
-                            "car state stream stopped (client disconnected)"
-                        );
-                        if let Err(err) = engine.despawn_car(req.car_id).await {
-                            tracing::warn!(
-                                car_id = req.car_id,
-                                error = %err,
-                                "failed to despawn car after client disconnect"
-                            );
-                        }
+                        tracing::debug!("frontend spectator stream stopped (client disconnected)");
+                        cleanup_frontend_cars("disconnect", &engine, &known_cars, &last_client_seq)
+                            .await;
                         break;
                     }
                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(
-                            car_id = req.car_id,
-                            "car state stream backpressure; dropping stream"
-                        );
-                        let _ = engine.despawn_car(req.car_id).await;
+                        tracing::warn!("frontend spectator stream backpressure; dropping stream");
+                        cleanup_frontend_cars(
+                            "backpressure",
+                            &engine,
+                            &known_cars,
+                            &last_client_seq,
+                        )
+                        .await;
                         break;
                     }
                 }
             }
 
-            tracing::info!(car_id = req.car_id, "car state stream ended");
-            active_streams.remove(&req.car_id);
+            tracing::info!("frontend spectator stream ended");
+            active_streams.remove(&stream_id);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn stream_participant_race(
+        &self,
+        _request: Request<GetParticipantRaceRequest>,
+    ) -> Result<Response<Self::StreamParticipantRaceStream>, Status> {
+        Err(Status::unimplemented(
+            "participant race stream requires validated car identity",
+        ))
+    }
+}
+
+impl RaceServiceImpl {
+    fn resolve_single_car_id(&self) -> Result<u64, Status> {
+        let mut iter = self.known_cars.iter();
+        let Some(first) = iter.next() else {
+            return Err(Status::not_found("no car assigned to this client"));
+        };
+        if iter.next().is_some() {
+            return Err(Status::failed_precondition(
+                "multiple cars active; use dev controls",
+            ));
+        }
+        Ok(*first.key())
+    }
+}
+
+fn current_time_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+async fn cleanup_frontend_cars(
+    reason: &'static str,
+    engine: &EngineClient,
+    known_cars: &DashMap<u64, ()>,
+    last_client_seq: &DashMap<u64, u64>,
+) {
+    let car_ids: Vec<u64> = known_cars.iter().map(|entry| *entry.key()).collect();
+    tracing::info!(
+        reason,
+        car_count = car_ids.len(),
+        "frontend cleanup: despawning cars"
+    );
+    for car_id in car_ids {
+        if let Err(err) = engine.despawn_car(car_id).await {
+            tracing::warn!(
+                car_id,
+                error = %err,
+                "failed to despawn car during frontend cleanup"
+            );
+        }
+        known_cars.remove(&car_id);
+        last_client_seq.remove(&car_id);
+        tracing::info!(car_id, reason, "frontend cleanup: car removed");
     }
 }
