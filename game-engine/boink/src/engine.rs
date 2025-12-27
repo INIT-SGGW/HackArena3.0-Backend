@@ -9,7 +9,7 @@
 //! compatibility checks live in [`crate::version`].
 
 mod builder;
-mod engine;
+mod core;
 
 pub use builder::EngineBuilder;
-pub use engine::Engine;
+pub use core::Engine;

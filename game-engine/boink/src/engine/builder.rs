@@ -7,7 +7,7 @@
 use tracing::instrument;
 
 use crate::engine::Engine;
-use crate::engine::engine::CarModelConfig;
+use crate::engine::core::CarModelConfig;
 use crate::error::Result;
 use crate::model::math::Vec3;
 
