@@ -9,6 +9,7 @@ const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEnv {
     Development,
+    Preprod,
     Production,
 }
 
@@ -16,6 +17,7 @@ impl AppEnv {
     pub fn from_env() -> Self {
         let v = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
         match v.to_ascii_lowercase().as_str() {
+            "preprod" => AppEnv::Preprod,
             "production" | "prod" => AppEnv::Production,
             _ => AppEnv::Development,
         }
