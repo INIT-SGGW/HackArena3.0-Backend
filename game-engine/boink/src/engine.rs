@@ -12,4 +12,4 @@ mod builder;
 mod core;
 
 pub use builder::EngineBuilder;
-pub use core::Engine;
+pub use core::{Engine, VehicleMesh, VehicleModelConfig};

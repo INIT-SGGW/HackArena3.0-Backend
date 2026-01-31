@@ -10,16 +10,16 @@ use boink_sys as sys;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Controls {
     /// Throttle demand (0 = idle, 1 = full power).
-    pub throttle: f64,
+    pub throttle: f32,
     /// Brake demand (0 = no braking, 1 = full brakes).
-    pub brake: f64,
+    pub brake: f32,
     /// Steering input (negative = left, positive = right).
-    pub steer: f64,
+    pub steer: f32,
 }
 
 impl Controls {
     /// Creates clamped controls from raw values.
-    pub fn new(throttle: f64, brake: f64, steer: f64) -> Self {
+    pub fn new(throttle: f32, brake: f32, steer: f32) -> Self {
         Self {
             throttle: throttle.clamp(0.0, 1.0),
             brake: brake.clamp(0.0, 1.0),

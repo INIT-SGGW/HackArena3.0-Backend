@@ -6,11 +6,11 @@ use boink_sys as sys;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3 {
     /// X component in meters.
-    pub x: f64,
+    pub x: f32,
     /// Y component in meters.
-    pub y: f64,
+    pub y: f32,
     /// Z component in meters.
-    pub z: f64,
+    pub z: f32,
 }
 
 impl From<sys::BoinkVec3> for Vec3 {
@@ -38,10 +38,10 @@ impl From<Vec3> for sys::BoinkVec3 {
 /// Expected to be normalized (unit quaternion).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Quaternion {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub w: f64,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
 }
 
 impl Quaternion {

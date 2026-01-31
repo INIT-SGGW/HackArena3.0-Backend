@@ -1,6 +1,6 @@
 //! Transport-layer mapping helpers.
 
-use boink::model::{CarState, Controls, Gear};
+use boink::model::{Controls, Gear, VehicleState};
 use proto::race::v1::{
     CarKinematics, CarParticipantState, CarRenderState, FrontendCarFullState, Quaternion,
     SetControlsRequest, Vector3, WheelAngles, WheelSpeeds,
@@ -15,62 +15,40 @@ pub(crate) fn proto_to_controls(req: &SetControlsRequest) -> Controls {
     }
 }
 
-fn wheel_speeds_from_state(state: &CarState) -> WheelSpeeds {
-    let front_left_speed = *state.wheel_speeds.get(0).unwrap_or(&0.0);
-    let front_right_speed = *state.wheel_speeds.get(1).unwrap_or(&0.0);
-    let rear_left_speed = *state.wheel_speeds.get(2).unwrap_or(&0.0);
-    let rear_right_speed = *state.wheel_speeds.get(3).unwrap_or(&0.0);
-
-    if state.wheel_speeds.len() < 4 {
-        tracing::warn!(
-            wheel_speeds_len = state.wheel_speeds.len(),
-            "engine returned incomplete wheel speed data; defaulting to zeros"
-        );
-    }
-
+fn wheel_speeds_from_state(state: &VehicleState) -> WheelSpeeds {
     WheelSpeeds {
-        front_left_rps: front_left_speed,
-        front_right_rps: front_right_speed,
-        rear_left_rps: rear_left_speed,
-        rear_right_rps: rear_right_speed,
+        front_left_rps: state.wheel_speeds[0],
+        front_right_rps: state.wheel_speeds[1],
+        rear_left_rps: state.wheel_speeds[2],
+        rear_right_rps: state.wheel_speeds[3],
     }
 }
 
-fn wheel_angles_from_state(state: &CarState) -> WheelAngles {
-    let front_left_angle = *state.wheel_angles.get(0).unwrap_or(&0.0);
-    let front_right_angle = *state.wheel_angles.get(1).unwrap_or(&0.0);
-
-    if state.wheel_angles.len() < 2 {
-        tracing::warn!(
-            wheel_angles_len = state.wheel_angles.len(),
-            "engine returned incomplete wheel angle data; defaulting to zeros"
-        );
-    }
-
+fn wheel_angles_from_state(_state: &VehicleState) -> WheelAngles {
     WheelAngles {
-        front_left_rad: front_left_angle,
-        front_right_rad: front_right_angle,
+        front_left_rad: 0.0,
+        front_right_rad: 0.0,
     }
 }
 
-fn kinematics_from_state(state: &CarState) -> CarKinematics {
+fn kinematics_from_state(state: &VehicleState) -> CarKinematics {
     CarKinematics {
         position: Some(Vector3 {
-            x: state.position.x,
-            y: state.position.y,
-            z: state.position.z,
+            x: state.chassis_position.x,
+            y: state.chassis_position.y,
+            z: state.chassis_position.z,
         }),
         orientation: Some(Quaternion {
-            x: state.orientation.x,
-            y: state.orientation.y,
-            z: state.orientation.z,
-            w: state.orientation.w,
+            x: state.vehicle_orientation.x,
+            y: state.vehicle_orientation.y,
+            z: state.vehicle_orientation.z,
+            w: state.vehicle_orientation.w,
         }),
     }
 }
 
 fn participant_state_from_state(
-    state: &CarState,
+    state: &VehicleState,
     last_applied_client_seq: u64,
 ) -> CarParticipantState {
     CarParticipantState {
@@ -88,16 +66,16 @@ fn participant_state_from_state(
     }
 }
 
-fn render_state_from_state(state: &CarState) -> CarRenderState {
+fn render_state_from_state(state: &VehicleState) -> CarRenderState {
     CarRenderState {
         wheel_speeds: Some(wheel_speeds_from_state(state)),
     }
 }
 
-/// Convert engine `CarState` into frontend spectator/participant full state.
+/// Convert engine `VehicleState` into frontend spectator/participant full state.
 pub(crate) fn frontend_full_state(
     car_id: u64,
-    state: CarState,
+    state: VehicleState,
     last_applied_client_seq: u64,
 ) -> FrontendCarFullState {
     FrontendCarFullState {

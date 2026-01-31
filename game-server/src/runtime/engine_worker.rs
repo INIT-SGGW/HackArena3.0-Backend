@@ -11,12 +11,11 @@
 use std::fmt;
 use std::sync::Arc;
 
-use boink::engine::Engine;
-use boink::engine::EngineBuilder;
+use boink::engine::{Engine, EngineBuilder, VehicleMesh, VehicleModelConfig};
 use boink::error::Error as BoinkError;
 use boink::model::control::Controls;
 use boink::model::math::Vec3;
-use boink::model::state::CarState;
+use boink::model::state::VehicleState;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -59,7 +58,7 @@ impl fmt::Display for EngineWorkerError {
 impl std::error::Error for EngineWorkerError {}
 
 impl EngineClient {
-    /// Spawns a car and returns its engine-assigned ID.
+    /// Spawns a vehicle and returns its engine-assigned ID.
     pub async fn spawn_car(&self) -> Result<u64, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
@@ -93,8 +92,8 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
-    /// Reads the latest state for a given car.
-    pub async fn read_car_state(&self, car_id: u64) -> Result<CarState, EngineWorkerError> {
+    /// Reads the latest state for a given vehicle.
+    pub async fn read_car_state(&self, car_id: u64) -> Result<VehicleState, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::ReadCarState { car_id, reply_tx })
@@ -131,7 +130,7 @@ pub async fn spawn(
     let client = EngineClient { tx };
 
     let engine = build_engine(&cfg)?;
-    let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f64;
+    let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f32;
     let handle = tokio::task::spawn_local(async move {
         run_worker(engine, &mut rx, &mut shutdown_rx, simulation_dt_seconds).await;
     });
@@ -143,10 +142,10 @@ async fn run_worker(
     mut engine: Engine,
     rx: &mut mpsc::Receiver<EngineCommand>,
     shutdown_rx: &mut broadcast::Receiver<()>,
-    simulation_dt_seconds: f64,
+    simulation_dt_seconds: f32,
 ) {
     let mut ticker =
-        tokio::time::interval(tokio::time::Duration::from_secs_f64(simulation_dt_seconds));
+        tokio::time::interval(tokio::time::Duration::from_secs_f32(simulation_dt_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -159,6 +158,10 @@ async fn run_worker(
             _ = ticker.tick() => {
                 if let Err(err) = engine.step(simulation_dt_seconds) {
                     tracing::warn!(error = ?err, "engine worker: tick failed");
+                }
+                if engine.should_close_debug() {
+                    tracing::info!("engine worker: debug drawer requested close");
+                    break;
                 }
             }
 
@@ -181,7 +184,7 @@ async fn run_worker(
 fn handle_command(engine: &mut Engine, cmd: EngineCommand) -> Result<(), EngineWorkerError> {
     match cmd {
         EngineCommand::SpawnCar { reply_tx } => {
-            let result = engine.spawn_car().map_err(EngineWorkerError::Engine);
+            let result = engine.spawn_vehicle().map_err(EngineWorkerError::Engine);
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -200,14 +203,14 @@ fn handle_command(engine: &mut Engine, cmd: EngineCommand) -> Result<(), EngineW
 
         EngineCommand::ReadCarState { car_id, reply_tx } => {
             let result = engine
-                .read_car_state(car_id)
+                .read_vehicle_state(car_id)
                 .map_err(EngineWorkerError::Engine);
             let _ = reply_tx.send(result);
             Ok(())
         }
         EngineCommand::DespawnCar { car_id, reply_tx } => {
             let result = engine
-                .despawn_car(car_id)
+                .despawn_vehicle(car_id)
                 .map_err(EngineWorkerError::Engine);
             let _ = reply_tx.send(result);
             Ok(())
@@ -219,35 +222,24 @@ fn handle_command(engine: &mut Engine, cmd: EngineCommand) -> Result<(), EngineW
 fn build_engine(cfg: &Config) -> Result<Engine, EngineWorkerError> {
     tracing::info!(env = ?cfg.env, "initializing engine world");
 
-    let (front_left, front_right, rear_left, rear_right) = default_car_layout();
-    let builder = EngineBuilder::new(front_left, front_right, rear_left, rear_right, 30.0);
-    let builder = builder.with_start_time_seconds(0.0);
+    let track_glb = cfg.tracks_dir.join("test.glb");
+    let mesh_glb = cfg.bolids_dir.join("test.glb");
+    let mesh = VehicleMesh::load(&mesh_glb).map_err(EngineWorkerError::Engine)?;
 
+    let vehicle_model = VehicleModelConfig {
+        mesh: Arc::new(mesh),
+        center_of_mass: Vec3 {
+            x: 0.0,
+            y: -1.0,
+            z: 0.0,
+        },
+        wheel_radius: 0.36,
+        suspension_rest_length: 0.52,
+        mass: 800.0,
+        max_steer_angle_deg: 30.0,
+    };
+
+    let builder =
+        EngineBuilder::new(track_glb, vehicle_model).with_debug_drawer(cfg.debug_drawer_enabled);
     builder.build().map_err(EngineWorkerError::Engine)
-}
-
-/// Default wheel layout used for new engine instances.
-fn default_car_layout() -> (Vec3, Vec3, Vec3, Vec3) {
-    let front_left = Vec3 {
-        x: 1.25,
-        y: 0.0,
-        z: 0.75,
-    };
-    let front_right = Vec3 {
-        x: 1.25,
-        y: 0.0,
-        z: -0.75,
-    };
-    let rear_left = Vec3 {
-        x: -1.35,
-        y: 0.0,
-        z: 0.75,
-    };
-    let rear_right = Vec3 {
-        x: -1.35,
-        y: 0.0,
-        z: -0.75,
-    };
-
-    (front_left, front_right, rear_left, rear_right)
 }

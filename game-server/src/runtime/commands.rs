@@ -1,6 +1,6 @@
 //! Command types sent to the engine worker.
 
-use boink::model::{CarState, Controls};
+use boink::model::{Controls, VehicleState};
 use tokio::sync::oneshot;
 
 use super::engine_worker::EngineWorkerError;
@@ -20,7 +20,7 @@ pub enum EngineCommand {
     },
     ReadCarState {
         car_id: u64,
-        reply_tx: oneshot::Sender<Result<CarState, EngineWorkerError>>,
+        reply_tx: oneshot::Sender<Result<VehicleState, EngineWorkerError>>,
     },
     DespawnCar {
         car_id: u64,

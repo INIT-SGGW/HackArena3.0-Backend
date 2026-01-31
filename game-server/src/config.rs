@@ -35,7 +35,9 @@ pub struct Config {
     pub allow_origin: AllowOrigin,
     pub expose_headers: ExposeHeaders,
     pub tracks_dir: PathBuf,
+    pub bolids_dir: PathBuf,
     pub simulation_hz: u32,
+    pub debug_drawer_enabled: bool,
 }
 
 impl Config {
@@ -90,6 +92,10 @@ impl Config {
             tracing::warn!(path=%tracks_dir.display(), "tracks directory is empty");
         }
 
+        let bolids_rel = PathBuf::from("assets").join("bolids");
+        let bolids_dir = resolve_dir("BOLIDS_DIR", bolids_rel)
+            .map_err(|e| format!("Failed to resolve bolids directory: {}", e))?;
+
         let simulation_hz = std::env::var("SIMULATION_HZ")
             .unwrap_or_else(|_| "60".to_string())
             .parse::<u32>()
@@ -100,13 +106,21 @@ impl Config {
 
         tracing::info!(simulation_hz, "server config");
 
+        let debug_drawer_enabled = if cfg!(debug_assertions) {
+            parse_bool_env("BOINK_DEBUG_DRAWER").unwrap_or(false)
+        } else {
+            false
+        };
+
         Ok(Self {
             env: app_env,
             listen_addr,
             allow_origin,
             expose_headers,
             tracks_dir,
+            bolids_dir,
             simulation_hz,
+            debug_drawer_enabled,
         })
     }
 }
@@ -227,4 +241,15 @@ fn parse_expose_headers(raw: &str) -> Result<ExposeHeaders, String> {
     }
 
     Ok(ExposeHeaders::list(list))
+}
+
+fn parse_bool_env(name: &str) -> Option<bool> {
+    match std::env::var(name) {
+        Ok(value) => match value.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON" => Some(true),
+            "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF" => Some(false),
+            _ => None,
+        },
+        Err(_) => None,
+    }
 }

@@ -8,4 +8,4 @@ pub mod state;
 
 pub use control::Controls;
 pub use math::{Quaternion, Vec3};
-pub use state::{CarState, Gear};
+pub use state::{Gear, VehicleState};

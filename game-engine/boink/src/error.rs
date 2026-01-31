@@ -21,6 +21,10 @@ pub enum Error {
     #[error("invalid car model: {0}")]
     InvalidCarModel(String),
 
+    /// The provided string contains an interior null byte.
+    #[error("invalid string: {0}")]
+    InvalidString(String),
+
     /// An argument passed to the native layer was invalid.
     #[error("invalid argument")]
     InvalidArg,
@@ -32,6 +36,14 @@ pub enum Error {
     /// A requested resource or identifier could not be found.
     #[error("resource not found")]
     NotFound,
+
+    /// The file format is not supported by the native engine.
+    #[error("unsupported format")]
+    UnsupportedFormat,
+
+    /// An input/output error occurred in the native engine.
+    #[error("I/O error")]
+    Io,
 
     /// The native engine reported an internal error or the wrapper hit an unexpected condition.
     #[error("internal error: {0}")]
@@ -73,6 +85,8 @@ impl Error {
             x if x == sys::BOINK_ERR_INVALID_ARG => Self::InvalidArg,
             x if x == sys::BOINK_ERR_BUFFER_TOO_SMALL => Self::BufferTooSmall,
             x if x == sys::BOINK_ERR_NOT_FOUND => Self::NotFound,
+            x if x == sys::BOINK_ERR_UNSUPPORTED_FORMAT => Self::UnsupportedFormat,
+            x if x == sys::BOINK_ERR_IO => Self::Io,
             x if x == sys::BOINK_ERR_INTERNAL => {
                 Self::Internal("native engine reported an internal error".to_string())
             }
@@ -98,6 +112,8 @@ impl Error {
             x if x == sys::BOINK_ERR_INVALID_ARG => Self::InvalidArg,
             x if x == sys::BOINK_ERR_BUFFER_TOO_SMALL => Self::BufferTooSmall,
             x if x == sys::BOINK_ERR_NOT_FOUND => Self::NotFound,
+            x if x == sys::BOINK_ERR_UNSUPPORTED_FORMAT => Self::UnsupportedFormat,
+            x if x == sys::BOINK_ERR_IO => Self::Io,
             x if x == sys::BOINK_ERR_INTERNAL => {
                 Self::Internal(format!("{func} reported an internal error"))
             }

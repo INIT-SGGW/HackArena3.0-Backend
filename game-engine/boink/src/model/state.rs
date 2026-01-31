@@ -1,4 +1,4 @@
-//! Car state exposed by the safe wrapper.
+//! Vehicle state exposed by the safe wrapper.
 
 use boink_sys as sys;
 
@@ -40,45 +40,45 @@ impl Gear {
     }
 }
 
-/// State of a car at a single simulation instant.
+/// State of a vehicle at a single simulation instant.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CarState {
-    /// Unique car identifier.
-    pub car_id: u64,
-    /// World position in meters.
-    pub position: Vec3,
+pub struct VehicleState {
+    /// Unique vehicle identifier.
+    pub vehicle_id: u64,
+    /// World position of the chassis in meters.
+    pub chassis_position: Vec3,
     /// Orientation as a quaternion.
-    pub orientation: Quaternion,
+    pub vehicle_orientation: Quaternion,
     /// Linear speed magnitude in m/s.
-    pub speed: f64,
+    pub speed: f32,
     /// Engine speed in RPM.
-    pub engine_rpm: f64,
+    pub engine_rpm: f32,
     /// Current transmission gear.
     pub gear: Gear,
     /// Effective throttle actually applied `[0,1]`.
-    pub throttle_applied: f64,
+    pub throttle_applied: f32,
     /// Effective brake actually applied `[0,1]`.
-    pub brake_applied: f64,
-    /// Steering angles of the front wheels (radians): [front-left, front-right].
-    pub wheel_angles: [f64; 2],
+    pub brake_applied: f32,
+    /// World-space wheel positions: [FL, FR, RL, RR].
+    pub wheel_position: [Vec3; 4],
     /// Wheel angular speeds in RPM: [FL, FR, RL, RR].
-    pub wheel_speeds: [f64; 4],
+    pub wheel_speeds: [f32; 4],
 }
 
-impl TryFrom<sys::BoinkCarState> for CarState {
+impl TryFrom<sys::BoinkVehicleState> for VehicleState {
     type Error = Error;
 
-    fn try_from(raw: sys::BoinkCarState) -> Result<Self> {
+    fn try_from(raw: sys::BoinkVehicleState) -> Result<Self> {
         Ok(Self {
-            car_id: raw.car_id,
-            position: raw.position.into(),
-            orientation: raw.orientation.into(),
+            vehicle_id: raw.vehicle_id,
+            chassis_position: raw.chassis_position.into(),
+            vehicle_orientation: raw.vehicle_orientation.into(),
             speed: raw.speed,
             engine_rpm: raw.engine_rpm,
             gear: Gear::from_c(raw.gear)?,
             throttle_applied: raw.throttle_applied,
             brake_applied: raw.brake_applied,
-            wheel_angles: raw.wheel_angles,
+            wheel_position: raw.wheel_position.map(Into::into),
             wheel_speeds: raw.wheel_speeds,
         })
     }
