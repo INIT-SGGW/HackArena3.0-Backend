@@ -7,6 +7,7 @@ mod services;
 
 use std::error::Error;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use tokio::sync::broadcast;
 use tokio::task::{JoinHandle, LocalSet};
@@ -30,37 +31,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
-    // Broadcast-based shutdown channel shared by all background tasks.
-    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(16);
+    // Separate shutdown channels so we can grace gRPC before stopping the engine.
+    let (grpc_shutdown_tx, grpc_shutdown_rx) = broadcast::channel::<()>(16);
+    let (engine_shutdown_tx, engine_shutdown_rx) = broadcast::channel::<()>(16);
 
     // Start the engine worker (owns the boink wrapper).
-    let (engine, engine_task) = start_engine_worker(cfg.clone(), shutdown_tx.subscribe()).await?;
+    let (engine, engine_task) = start_engine_worker(cfg.clone(), engine_shutdown_rx).await?;
 
     // Run gRPC server until shutdown.
-    let shutdown_tx_grpc = shutdown_tx.clone();
+    let active_connections = Arc::new(AtomicUsize::new(0));
+    let shutdown_tx_grpc = grpc_shutdown_tx.clone();
     let grpc_task = tokio::task::spawn_local({
         let cfg = cfg.clone();
+        let active_connections = active_connections.clone();
         async move {
             info!("Starting gRPC server on {}", cfg.listen_addr);
-            if let Err(e) = crate::server::serve_grpc(cfg, engine, shutdown_rx).await {
+            if let Err(e) =
+                crate::server::serve_grpc(cfg, engine, grpc_shutdown_rx, active_connections).await
+            {
                 error!("gRPC server terminated with error: {e}");
                 let _ = shutdown_tx_grpc.send(());
             }
         }
     });
-
-    // Wait for either Ctrl+C (handled in server shutdown) or a task failure.
-    tokio::select! {
-        _ = grpc_task => {
-            info!("gRPC server task finished");
-        }
-        _ = engine_task => {
-            info!("engine worker task finished");
-        }
-    }
-
-    // Best-effort: notify remaining tasks to stop.
-    let _ = shutdown_tx.send(());
+    crate::server::shutdown::orchestrate_shutdown(
+        grpc_task,
+        engine_task,
+        grpc_shutdown_tx,
+        engine_shutdown_tx,
+        active_connections,
+    )
+    .await;
 
     Ok(())
 }

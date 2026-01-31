@@ -96,6 +96,17 @@ impl Config {
         let bolids_dir = resolve_dir("BOLIDS_DIR", bolids_rel)
             .map_err(|e| format!("Failed to resolve bolids directory: {}", e))?;
 
+        tracing::info!(path = %bolids_dir.display(), "using bolids directory");
+
+        if bolids_dir
+            .read_dir()
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_none()
+        {
+            tracing::warn!(path=%bolids_dir.display(), "bolids directory is empty");
+        }
+
         let simulation_hz = std::env::var("SIMULATION_HZ")
             .unwrap_or_else(|_| "60".to_string())
             .parse::<u32>()
@@ -111,6 +122,10 @@ impl Config {
         } else {
             false
         };
+
+        if debug_drawer_enabled {
+            tracing::info!("debug drawer enabled");
+        }
 
         Ok(Self {
             env: app_env,
@@ -142,7 +157,7 @@ fn resolve_dir<P: AsRef<Path>>(env_var: &str, default_rel: P) -> anyhow::Result<
 
         if p.is_dir() {
             let p = p.canonicalize().unwrap_or(p);
-            tracing::info!(path = %p.display(), source = "env", "dir resolved");
+            tracing::debug!(path = %p.display(), source = "env", "dir resolved");
             return Ok(p);
         }
 
@@ -158,7 +173,7 @@ fn resolve_dir<P: AsRef<Path>>(env_var: &str, default_rel: P) -> anyhow::Result<
         tried.push((p.clone(), "exe_dir"));
         if p.is_dir() {
             let p = p.canonicalize().unwrap_or(p);
-            tracing::info!(path = %p.display(), source = "exe_dir", "dir resolved");
+            tracing::debug!(path = %p.display(), source = "exe_dir", "dir resolved");
             return Ok(p);
         }
 
@@ -174,7 +189,7 @@ fn resolve_dir<P: AsRef<Path>>(env_var: &str, default_rel: P) -> anyhow::Result<
                 tried.push((m.clone(), "manifest_dev"));
                 if m.is_dir() {
                     let m = m.canonicalize().unwrap_or(m);
-                    tracing::info!(path = %m.display(), source = "manifest_dev", "dir resolved");
+                    tracing::debug!(path = %m.display(), source = "manifest_dev", "dir resolved");
                     return Ok(m);
                 }
             }

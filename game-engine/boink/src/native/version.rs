@@ -182,9 +182,17 @@ pub fn ensure_c_api_compatible() -> Result<()> {
     let required = REQUIRED_C_API_VERSION;
     match query_c_api_version() {
         Ok(actual) => {
+            let engine_version = match query_engine_version() {
+                Ok(engine) => engine.to_string(),
+                Err(err) => {
+                    warn!("Unable to query Boink engine version: {err}");
+                    "unknown".to_string()
+                }
+            };
+
             info!(
-                "Loaded Boink C API version {} (min required {})",
-                actual, required
+                "Boink versions: c_api={} (min {}), engine={}",
+                actual, required, engine_version
             );
 
             if is_compatible(required, actual) {
@@ -207,7 +215,14 @@ pub fn ensure_c_api_compatible() -> Result<()> {
         warn!("Legacy compatibility mode enabled; native symbols will be resolved dynamically");
     });
 
-    let _ = query_c_api_version()?;
+    let c_api = query_c_api_version()?;
+    let engine_version = query_engine_version()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    info!(
+        "Boink versions: c_api={} (min {}), engine={}",
+        c_api, REQUIRED_C_API_VERSION, engine_version
+    );
     Ok(())
 }
 

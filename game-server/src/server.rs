@@ -2,6 +2,6 @@
 
 mod cors;
 mod grpc;
-mod shutdown;
+pub mod shutdown;
 
 pub use grpc::serve_grpc;
