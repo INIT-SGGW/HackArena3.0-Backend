@@ -9,6 +9,7 @@
 //!   avoiding shared mutable state and complex locking.
 
 use std::fmt;
+use std::time::Instant;
 use std::sync::Arc;
 
 use boink::engine::{Engine, EngineBuilder, VehicleMesh, VehicleModelConfig};
@@ -156,8 +157,22 @@ async fn run_worker(
             }
 
             _ = ticker.tick() => {
+                let tick_start = Instant::now();
                 if let Err(err) = engine.step(simulation_dt_seconds) {
                     tracing::warn!(error = ?err, "engine worker: tick failed");
+                }
+                let elapsed = tick_start.elapsed();
+                let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+                tracing::debug!(
+                    elapsed_ms = format!("{:.3}", elapsed_ms),
+                    "engine worker: tick duration"
+                );
+                if elapsed.as_secs_f32() > simulation_dt_seconds {
+                    tracing::warn!(
+                        elapsed_ms = format!("{:.3}", elapsed_ms),
+                        budget_ms = format!("{:.3}", simulation_dt_seconds as f64 * 1000.0),
+                        "engine worker: tick exceeded budget"
+                    );
                 }
                 if engine.should_close_debug() {
                     tracing::info!("engine worker: debug drawer requested close");
