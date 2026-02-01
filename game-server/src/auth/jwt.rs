@@ -16,8 +16,10 @@ use tonic::metadata::MetadataMap;
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const JWKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-pub const DEFAULT_AUDIENCE: [&str; 2] = ["ha3-official", "ha3-local"];
-pub const DEFAULT_ISSUERS: [&str; 2] = ["ha3-dev-auth", "ha3-auth"];
+pub const DEFAULT_AUDIENCE_OFFICIAL: &str = "ha3-official";
+pub const DEFAULT_ISSUERS_OFFICIAL: [&str; 1] = ["ha3-auth"];
+pub const DEFAULT_AUDIENCE_LOCAL: &str = "ha3-dev-auth";
+pub const DEFAULT_ISSUERS_LOCAL: [&str; 1] = ["ha3-local"];
 
 #[derive(Clone, Deserialize)]
 struct Jwks {

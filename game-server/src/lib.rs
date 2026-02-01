@@ -1,10 +1,10 @@
-//! Game server entrypoint and process orchestration.
+//! Game server library entrypoints and shared runtime helpers.
 
-mod auth;
-mod config;
-mod runtime;
-mod server;
-mod services;
+pub mod auth;
+pub mod config;
+pub mod runtime;
+pub mod server;
+pub mod services;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -18,17 +18,18 @@ use runtime::engine_worker::EngineClient;
 
 use crate::config::Config;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
-    init_tracing();
-
-    let cfg = Arc::new(Config::load_or_exit());
-
-    tracing::info!("game-server starting");
+/// Run the game server using the provided configuration.
+pub async fn run(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
     tracing::info!("gRPC bind address: {}", cfg.listen_addr);
-
     let local = LocalSet::new();
     local.run_until(async move { run_app(cfg).await }).await
+}
+
+/// Initialize tracing with environment-configured filters.
+pub fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 }
 
 async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
@@ -65,13 +66,6 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
     .await;
 
     Ok(())
-}
-
-fn init_tracing() {
-    // Keep this minimal and production-safe. Configure via RUST_LOG.
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
 }
 
 /// Starts the engine worker and returns the client handle plus its task join handle.

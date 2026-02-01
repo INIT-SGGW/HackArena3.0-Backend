@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use http::{HeaderName, HeaderValue};
 use tower_http::cors::{AllowOrigin, ExposeHeaders};
 
-use crate::auth::jwt::{DEFAULT_AUDIENCE, DEFAULT_ISSUERS};
+use crate::auth::jwt::{
+    DEFAULT_AUDIENCE_LOCAL, DEFAULT_AUDIENCE_OFFICIAL, DEFAULT_ISSUERS_LOCAL,
+    DEFAULT_ISSUERS_OFFICIAL,
+};
 
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
 
@@ -45,9 +48,40 @@ pub struct Config {
     pub jwt_issuers: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct JwtDefaults {
+    pub jwks_url: Option<String>,
+    pub audience: Vec<String>,
+    pub issuers: Vec<String>,
+}
+
+impl JwtDefaults {
+    pub fn official() -> Self {
+        Self {
+            jwks_url: None,
+            audience: vec![DEFAULT_AUDIENCE_OFFICIAL.to_string()],
+            issuers: DEFAULT_ISSUERS_OFFICIAL
+                .iter()
+                .map(|iss| (*iss).to_string())
+                .collect(),
+        }
+    }
+
+    pub fn local() -> Self {
+        Self {
+            jwks_url: None,
+            audience: vec![DEFAULT_AUDIENCE_LOCAL.to_string()],
+            issuers: DEFAULT_ISSUERS_LOCAL
+                .iter()
+                .map(|iss| (*iss).to_string())
+                .collect(),
+        }
+    }
+}
+
 impl Config {
-    pub fn load_or_exit() -> Self {
-        match Self::load() {
+    pub fn load_or_exit_with_defaults(jwt_defaults: JwtDefaults) -> Self {
+        match Self::load_with_defaults(jwt_defaults) {
             Ok(cfg) => cfg,
             Err(err) => {
                 tracing::error!("Failed to load config: {:#}", err);
@@ -56,64 +90,89 @@ impl Config {
         }
     }
 
-    fn load() -> Result<Self, String> {
+    fn load_with_defaults(jwt_defaults: JwtDefaults) -> Result<Self, String> {
         let app_env = AppEnv::from_env();
+        let JwtDefaults {
+            jwks_url: default_jwks_url,
+            audience: default_audience,
+            issuers: default_issuers,
+        } = jwt_defaults;
 
         let jwks_url = match read_env_string("JWT_JWKS_URL").or_else(|| read_env_string("JWKS_URL"))
         {
             Some(value) => value,
-            None => match app_env {
-                AppEnv::Development => {
-                    let url = "https://ha3-api-dev.hackarena.pl/auth-helper/.well-known/jwks.json"
-                        .to_string();
-                    tracing::warn!(
+            None => {
+                if let Some(url) = default_jwks_url {
+                    tracing::debug!(
                         jwks_url = %url,
-                        "using temporary JWKS endpoint"
+                        "JWT_JWKS_URL not set; using binary default"
                     );
                     url
+                } else {
+                    match app_env {
+                        AppEnv::Development => {
+                            let url =
+                                "https://ha3-api-dev.hackarena.pl/auth-helper/.well-known/jwks.json"
+                                    .to_string();
+                            tracing::warn!(
+                                jwks_url = %url,
+                                "Using temporary JWKS endpoint; expected to be replaced"
+                            );
+                            url
+                        }
+                        AppEnv::Preprod => {
+                            let url =
+                                "https://ha3-api-preprod.hackarena.pl/auth-helper/.well-known/jwks.json"
+                                    .to_string();
+                            tracing::warn!(
+                                jwks_url = %url,
+                                "Using temporary JWKS endpoint; expected to be replaced"
+                            );
+                            url
+                        }
+                        AppEnv::Production => {
+                            return Err(
+                                "JWT_JWKS_URL must be set in production (temporary; will be hardcoded later)"
+                                    .into(),
+                            );
+                        }
+                    }
                 }
-                AppEnv::Preprod => {
-                    let url =
-                        "https://ha3-api-preprod.hackarena.pl/auth-helper/.well-known/jwks.json"
-                            .to_string();
-                    tracing::warn!(
-                        jwks_url = %url,
-                        "using temporary JWKS endpoint"
-                    );
-                    url
-                }
-                AppEnv::Production => {
-                    return Err("JWT_JWKS_URL must be set in production".into());
-                }
-            },
+            }
         };
 
         let jwt_audience = match parse_list_env("JWT_AUDIENCE")? {
             Some(list) => list,
             None => {
-                if app_env.is_production() {
-                    return Err("JWT_AUDIENCE must be set in production".into());
+                if !default_audience.is_empty() {
+                    tracing::debug!(
+                        audience = ?default_audience,
+                        "JWT_AUDIENCE not set; using binary default"
+                    );
+                    default_audience
+                } else {
+                    if app_env.is_production() {
+                        return Err("JWT_AUDIENCE must be set in production".into());
+                    }
+                    return Err("JWT_AUDIENCE default is not configured".into());
                 }
-                let audience = DEFAULT_AUDIENCE
-                    .iter()
-                    .map(|aud| (*aud).to_string())
-                    .collect::<Vec<_>>();
-                tracing::debug!(audience = ?audience, "JWT_AUDIENCE not set; using default");
-                audience
             }
         };
         let jwt_issuers = match parse_list_env("JWT_ISSUERS")? {
             Some(list) => list,
             None => {
-                if app_env.is_production() {
-                    return Err("JWT_ISSUERS must be set in production".into());
+                if !default_issuers.is_empty() {
+                    tracing::debug!(
+                        issuers = ?default_issuers,
+                        "JWT_ISSUERS not set; using binary default"
+                    );
+                    default_issuers
+                } else {
+                    if app_env.is_production() {
+                        return Err("JWT_ISSUERS must be set in production".into());
+                    }
+                    return Err("JWT_ISSUERS default is not configured".into());
                 }
-                let issuers = DEFAULT_ISSUERS
-                    .iter()
-                    .map(|iss| (*iss).to_string())
-                    .collect::<Vec<_>>();
-                tracing::debug!(issuers = ?issuers, "JWT_ISSUERS not set; using default");
-                issuers
             }
         };
 

@@ -3,6 +3,14 @@ name = "game-server"
 version = "0.1.0"
 edition.workspace = true
 
+[[bin]]
+name = "ha3-backend-official"
+path = "src/bin/ha3-backend-official.rs"
+
+[[bin]]
+name = "ha3-backend-local"
+path = "src/bin/ha3-backend-local.rs"
+
 [features]
 default = []
 proto-local = ["proto/proto-local"]
