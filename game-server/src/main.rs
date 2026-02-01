@@ -1,5 +1,6 @@
 //! Game server entrypoint and process orchestration.
 
+mod auth;
 mod config;
 mod runtime;
 mod server;

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use http::{HeaderName, HeaderValue};
 use tower_http::cors::{AllowOrigin, ExposeHeaders};
 
+use crate::auth::jwt::{DEFAULT_AUDIENCE, DEFAULT_ISSUERS};
+
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,9 @@ pub struct Config {
     pub bolids_dir: PathBuf,
     pub simulation_hz: u32,
     pub debug_drawer_enabled: bool,
+    pub jwks_url: String,
+    pub jwt_audience: Vec<String>,
+    pub jwt_issuers: Vec<String>,
 }
 
 impl Config {
@@ -53,6 +58,64 @@ impl Config {
 
     fn load() -> Result<Self, String> {
         let app_env = AppEnv::from_env();
+
+        let jwks_url = match read_env_string("JWT_JWKS_URL").or_else(|| read_env_string("JWKS_URL"))
+        {
+            Some(value) => value,
+            None => match app_env {
+                AppEnv::Development => {
+                    let url = "https://ha3-api-dev.hackarena.pl/auth-helper/.well-known/jwks.json"
+                        .to_string();
+                    tracing::warn!(
+                        jwks_url = %url,
+                        "using temporary JWKS endpoint"
+                    );
+                    url
+                }
+                AppEnv::Preprod => {
+                    let url =
+                        "https://ha3-api-preprod.hackarena.pl/auth-helper/.well-known/jwks.json"
+                            .to_string();
+                    tracing::warn!(
+                        jwks_url = %url,
+                        "using temporary JWKS endpoint"
+                    );
+                    url
+                }
+                AppEnv::Production => {
+                    return Err("JWT_JWKS_URL must be set in production".into());
+                }
+            },
+        };
+
+        let jwt_audience = match parse_list_env("JWT_AUDIENCE")? {
+            Some(list) => list,
+            None => {
+                if app_env.is_production() {
+                    return Err("JWT_AUDIENCE must be set in production".into());
+                }
+                let audience = DEFAULT_AUDIENCE
+                    .iter()
+                    .map(|aud| (*aud).to_string())
+                    .collect::<Vec<_>>();
+                tracing::debug!(audience = ?audience, "JWT_AUDIENCE not set; using default");
+                audience
+            }
+        };
+        let jwt_issuers = match parse_list_env("JWT_ISSUERS")? {
+            Some(list) => list,
+            None => {
+                if app_env.is_production() {
+                    return Err("JWT_ISSUERS must be set in production".into());
+                }
+                let issuers = DEFAULT_ISSUERS
+                    .iter()
+                    .map(|iss| (*iss).to_string())
+                    .collect::<Vec<_>>();
+                tracing::debug!(issuers = ?issuers, "JWT_ISSUERS not set; using default");
+                issuers
+            }
+        };
 
         let listen_addr = std::env::var("LISTEN_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
@@ -136,6 +199,9 @@ impl Config {
             bolids_dir,
             simulation_hz,
             debug_drawer_enabled,
+            jwks_url,
+            jwt_audience,
+            jwt_issuers,
         })
     }
 }
@@ -267,4 +333,34 @@ fn parse_bool_env(name: &str) -> Option<bool> {
         },
         Err(_) => None,
     }
+}
+
+fn read_env_string(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn parse_list_env(name: &str) -> Result<Option<Vec<String>>, String> {
+    let Some(raw) = read_env_string(name) else {
+        return Ok(None);
+    };
+    let list = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.to_string())
+        .collect::<Vec<_>>();
+    if list.is_empty() {
+        return Err(format!("{name} cannot be empty"));
+    }
+    Ok(Some(list))
 }
