@@ -92,6 +92,7 @@ impl Config {
 
     fn load_with_defaults(jwt_defaults: JwtDefaults) -> Result<Self, String> {
         let app_env = AppEnv::from_env();
+        tracing::debug!(app_env = ?app_env, "resolved APP_ENV");
         let JwtDefaults {
             jwks_url: default_jwks_url,
             audience: default_audience,
@@ -100,7 +101,10 @@ impl Config {
 
         let jwks_url = match read_env_string("JWT_JWKS_URL").or_else(|| read_env_string("JWKS_URL"))
         {
-            Some(value) => value,
+            Some(value) => {
+                tracing::debug!(jwks_url = %value, "JWT_JWKS_URL set via env");
+                value
+            }
             None => {
                 if let Some(url) = default_jwks_url {
                     tracing::debug!(
@@ -142,7 +146,10 @@ impl Config {
         };
 
         let jwt_audience = match parse_list_env("JWT_AUDIENCE")? {
-            Some(list) => list,
+            Some(list) => {
+                tracing::debug!(audience = ?list, "JWT_AUDIENCE set via env");
+                list
+            }
             None => {
                 if !default_audience.is_empty() {
                     tracing::debug!(
@@ -159,7 +166,10 @@ impl Config {
             }
         };
         let jwt_issuers = match parse_list_env("JWT_ISSUERS")? {
-            Some(list) => list,
+            Some(list) => {
+                tracing::debug!(issuers = ?list, "JWT_ISSUERS set via env");
+                list
+            }
             None => {
                 if !default_issuers.is_empty() {
                     tracing::debug!(
