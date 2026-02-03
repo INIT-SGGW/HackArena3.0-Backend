@@ -1,10 +1,10 @@
 //! Error handling surface for the Boink safe wrapper.
 //!
 //! Defines the `Error` enum mapping native status codes to descriptive variants.
-
 use boink_sys as sys;
 use thiserror::Error;
 
+use crate::native::raw::query_last_error_raw;
 use crate::version::Version;
 
 /// Convenient alias for results returned by this crate.
@@ -67,6 +67,20 @@ pub enum Error {
     Native(i32),
 }
 
+fn log_last_error_if_available() {
+    match query_last_error_raw() {
+        Ok(Some(last_error)) => {
+            if !last_error.is_empty() {
+                tracing::warn!("Boink last error: {}", last_error);
+            }
+        }
+        Ok(None) => {}
+        Err(code) => {
+            tracing::warn!("Boink last error query failed (code {code})");
+        }
+    }
+}
+
 impl Error {
     /// Converts a raw native status code into an [`Error`].
     ///
@@ -119,5 +133,12 @@ impl Error {
             }
             other => Self::FfiStatus { code: other, func },
         }
+    }
+
+    /// Converts a raw native status code into an [`Error`], logging
+    /// `boink_get_last_error` when available.
+    pub(crate) fn from_code_with_last_error(code: i32) -> Self {
+        log_last_error_if_available();
+        Self::from_code(code)
     }
 }

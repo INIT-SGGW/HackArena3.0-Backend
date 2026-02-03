@@ -10,4 +10,7 @@ pub(crate) mod error;
 pub mod info;
 #[cfg(feature = "legacy-native-lib")]
 pub(crate) mod loader;
+pub(crate) mod macros;
+pub(crate) mod raw;
+pub(crate) mod strings;
 pub mod version;

@@ -4,7 +4,7 @@
 //! versions reported by the loaded native library (via `boink-sys`) and
 //! checking compatibility against the wrapper's expected C-API version.
 
-use core::fmt;
+use std::fmt;
 #[cfg(feature = "legacy-native-lib")]
 use std::sync::Once;
 
@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 
 #[cfg(feature = "legacy-native-lib")]
 use super::api::NativeApi;
+use super::info::query_engine_profile;
 
 /// Semantic version triple reported by the Boink engine.
 ///
@@ -194,6 +195,11 @@ pub fn ensure_c_api_compatible() -> Result<()> {
                 "Boink versions: c_api={} (min {}), engine={}",
                 actual, required, engine_version
             );
+            match query_engine_profile() {
+                Ok(Some(profile)) => info!("Boink engine profile: {}", profile),
+                Ok(None) => {}
+                Err(err) => warn!("Failed to query Boink engine profile: {err}"),
+            }
 
             if is_compatible(required, actual) {
                 Ok(())
@@ -215,14 +221,25 @@ pub fn ensure_c_api_compatible() -> Result<()> {
         warn!("Legacy compatibility mode enabled; native symbols will be resolved dynamically");
     });
 
-    let c_api = query_c_api_version()?;
+    let c_api = match query_c_api_version() {
+        Ok(version) => version,
+        Err(err) => return Err(err),
+    };
     let engine_version = query_engine_version()
         .map(|v| v.to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
+        .unwrap_or_else(|err| {
+            warn!("Unable to query Boink engine version: {err}");
+            "unknown".to_string()
+        });
     info!(
         "Boink versions: c_api={} (min {}), engine={}",
         c_api, REQUIRED_C_API_VERSION, engine_version
     );
+    match query_engine_profile() {
+        Ok(Some(profile)) => info!("Boink engine profile: {}", profile),
+        Ok(None) => {}
+        Err(err) => warn!("Failed to query Boink engine profile: {err}"),
+    }
     Ok(())
 }
 
