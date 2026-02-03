@@ -28,3 +28,6 @@ proto/gen/
 
 # Assets
 game-server/assets/
+
+# Native boink artifacts (platform-specific binaries)
+game-engine/boink-sys/native/

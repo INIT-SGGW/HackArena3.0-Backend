@@ -6,11 +6,13 @@ use std::{
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS not set");
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH not set");
+    let profile = env::var("PROFILE").expect("PROFILE not set");
 
     match target_os.as_str() {
-        "windows" => setup_windows(&manifest_dir),
-        "linux" => setup_linux(&manifest_dir),
-        "macos" => setup_macos(&manifest_dir),
+        "windows" => setup_windows(&manifest_dir, &target_arch, &profile),
+        "linux" => setup_linux(&manifest_dir, &target_arch, &profile),
+        "macos" => setup_macos(&manifest_dir, &target_arch, &profile),
         other => {
             println!(
                 "cargo:warning=boink-sys: no native library configuration for target_os={}",
@@ -31,8 +33,8 @@ fn emit_rerun_for_dir(dir: &Path) {
     }
 }
 
-fn setup_windows(manifest_dir: &PathBuf) {
-    let lib_dir = determine_lib_dir(manifest_dir, "windows");
+fn setup_windows(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
+    let lib_dir = determine_lib_dir(manifest_dir, "windows", target_arch, profile);
     emit_rerun_for_dir(&lib_dir);
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
@@ -45,8 +47,8 @@ fn setup_windows(manifest_dir: &PathBuf) {
     }
 }
 
-fn setup_linux(manifest_dir: &PathBuf) {
-    let lib_dir = determine_lib_dir(manifest_dir, "linux");
+fn setup_linux(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
+    let lib_dir = determine_lib_dir(manifest_dir, "linux", target_arch, profile);
 
     emit_rerun_for_dir(&lib_dir);
 
@@ -55,8 +57,8 @@ fn setup_linux(manifest_dir: &PathBuf) {
     copy_runtime_lib(&lib_dir, "libboink.so");
 }
 
-fn setup_macos(manifest_dir: &PathBuf) {
-    let lib_dir = determine_lib_dir(manifest_dir, "macos");
+fn setup_macos(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
+    let lib_dir = determine_lib_dir(manifest_dir, "macos", target_arch, profile);
 
     emit_rerun_for_dir(&lib_dir);
 
@@ -65,13 +67,31 @@ fn setup_macos(manifest_dir: &PathBuf) {
     copy_runtime_lib(&lib_dir, "libboink.dylib");
 }
 
-fn determine_lib_dir(manifest_dir: &Path, platform: &str) -> PathBuf {
+fn determine_lib_dir(
+    manifest_dir: &Path,
+    platform: &str,
+    target_arch: &str,
+    profile: &str,
+) -> PathBuf {
     println!("cargo:rerun-if-env-changed=BOINK_NATIVE_LIB_DIR");
 
     env::var_os("BOINK_NATIVE_LIB_DIR")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| manifest_dir.join("native").join(platform))
+        .unwrap_or_else(|| {
+            let arch_dir = match target_arch {
+                "x86_64" => "x86_64",
+                "aarch64" => "aarch64",
+                other => {
+                    panic!("boink-sys: unsupported arch {}", other);
+                }
+            };
+            manifest_dir
+                .join("native")
+                .join(platform)
+                .join(arch_dir)
+                .join(profile)
+        })
 }
 
 fn copy_runtime_lib(lib_dir: &Path, file_name: &str) {
