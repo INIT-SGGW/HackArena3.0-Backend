@@ -9,12 +9,16 @@ use std::sync::OnceLock;
 use tracing::trace;
 
 use crate::native::error::NativeLoadError;
-use crate::native::loader::{LegacyVersionFn, load_native_library, resolve_optional};
+use crate::native::loader::{
+    LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
+};
 
 /// Lazily resolved optional symbols exposed by a potentially old native library.
 pub struct NativeApi {
     get_c_api_version: Option<LegacyVersionFn>,
     get_engine_version: Option<LegacyVersionFn>,
+    get_engine_profile: Option<LegacyStringFn>,
+    get_last_error: Option<LegacyStringFn>,
 }
 
 impl NativeApi {
@@ -39,21 +43,39 @@ impl NativeApi {
         self.get_engine_version
     }
 
+    /// Returns the function pointer for `boink_get_engine_profile`, when exported.
+    #[must_use]
+    pub fn boink_get_engine_profile(&self) -> Option<LegacyStringFn> {
+        self.get_engine_profile
+    }
+
+    /// Returns the function pointer for `boink_get_last_error`, when exported.
+    #[must_use]
+    pub fn boink_get_last_error(&self) -> Option<LegacyStringFn> {
+        self.get_last_error
+    }
+
     fn load() -> Result<NativeApi, NativeLoadError> {
         let lib = load_native_library()?;
 
         let get_c_api_version = resolve_optional(lib, b"boink_get_c_api_version\0");
         let get_engine_version = resolve_optional(lib, b"boink_get_engine_version\0");
+        let get_engine_profile = resolve_optional(lib, b"boink_get_engine_profile\0");
+        let get_last_error = resolve_optional(lib, b"boink_get_last_error\0");
 
         trace!(
-            "Resolved legacy version query methods: c_api_version={}, engine_version={}",
+            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}",
             get_c_api_version.is_some(),
-            get_engine_version.is_some()
+            get_engine_version.is_some(),
+            get_engine_profile.is_some(),
+            get_last_error.is_some()
         );
 
         Ok(NativeApi {
             get_c_api_version,
             get_engine_version,
+            get_engine_profile,
+            get_last_error,
         })
     }
 }

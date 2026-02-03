@@ -7,6 +7,7 @@
 pub(crate) mod api;
 #[cfg(feature = "legacy-native-lib")]
 pub(crate) mod error;
+pub mod info;
 #[cfg(feature = "legacy-native-lib")]
 pub(crate) mod loader;
 pub mod version;
