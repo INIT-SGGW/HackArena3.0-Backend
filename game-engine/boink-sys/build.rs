@@ -9,6 +9,10 @@ fn main() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH not set");
     let profile = env::var("PROFILE").expect("PROFILE not set");
 
+    println!("cargo:rerun-if-env-changed=PROFILE");
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_OS");
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_ARCH");
+
     match target_os.as_str() {
         "windows" => setup_windows(&manifest_dir, &target_arch, &profile),
         "linux" => setup_linux(&manifest_dir, &target_arch, &profile),
@@ -44,6 +48,8 @@ fn setup_windows(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
     } else {
         println!("cargo:rustc-link-lib=dylib=boink");
         copy_runtime_lib(&lib_dir, "boink.dll");
+        // TODO: remove release GLFW copy once boink.dll stops depending on it.
+        copy_runtime_lib(&lib_dir, "glfw3.dll");
     }
 }
 
@@ -98,12 +104,20 @@ fn copy_runtime_lib(lib_dir: &Path, file_name: &str) {
     let source = lib_dir.join(file_name);
 
     if !source.exists() {
-        println!(
-            "cargo:warning=boink-sys: runtime artifact {} missing at {}",
-            file_name,
-            source.display()
-        );
-        return;
+        if env::var("PROFILE").as_deref() == Ok("release") {
+            panic!(
+                "boink-sys: required runtime artifact {} missing at {}",
+                file_name,
+                source.display()
+            );
+        } else {
+            println!(
+                "cargo:warning=boink-sys: runtime artifact {} missing at {}",
+                file_name,
+                source.display()
+            );
+            return;
+        }
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
