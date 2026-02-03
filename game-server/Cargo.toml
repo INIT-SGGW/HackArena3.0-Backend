@@ -13,6 +13,8 @@ path = "src/bin/ha3-backend-local.rs"
 
 [features]
 default = []
+official = []
+local = []
 proto-local = ["proto/proto-local"]
 
 [dependencies]
