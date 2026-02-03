@@ -32,7 +32,7 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 3
+#define BOINK_C_API_VERSION_MINOR 4
 
 #define BOINK_C_API_VERSION_PATCH 0
 
@@ -282,6 +282,36 @@ BOINK_API int boink_get_c_api_version(unsigned int *out_major,
 BOINK_API int boink_get_engine_version(unsigned int *out_major,
                                     unsigned int *out_minor,
                                     unsigned int *out_patch);
+
+/**
+ * Retrieves the build profile string of the Boink engine library.
+ *
+ * Parameters:
+ * - `out_buf` - destination buffer for a null-terminated string.
+ * - `in_out_len` - in: buffer size in bytes; out: required size (incl. null).
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - `BOINK_ERR_BUFFER_TOO_SMALL` if the buffer is too small.
+ * - `BOINK_ERR_INVALID_ARG` on invalid pointers.
+ */
+BOINK_API int boink_get_engine_profile(char *out_buf, unsigned int *in_out_len);
+
+/**
+ * Retrieves a human-readable description of the last engine error.
+ *
+ * The error string is thread-local and is updated when a Boink API call fails.
+ *
+ * Parameters:
+ * - `out_buf` - destination buffer for a null-terminated string.
+ * - `in_out_len` - in: buffer size in bytes; out: required size (incl. null).
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - `BOINK_ERR_BUFFER_TOO_SMALL` if the buffer is too small.
+ * - `BOINK_ERR_INVALID_ARG` on invalid pointers.
+ */
+BOINK_API int boink_get_last_error(char *out_buf, unsigned int *in_out_len);
 
 /**
  * Initializes the Boink engine library.

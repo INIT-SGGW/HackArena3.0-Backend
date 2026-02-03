@@ -13,7 +13,7 @@
 use libc::{c_char, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 3;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 4;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -187,6 +187,32 @@ unsafe extern "C" {
         out_minor: *mut c_uint,
         out_patch: *mut c_uint,
     ) -> c_int;
+
+    /// Retrieves the build profile string of the Boink engine library.
+    ///
+    /// Parameters:
+    /// - `out_buf` - destination buffer for a null-terminated string.
+    /// - `in_out_len` - in: buffer size in bytes; out: required size (incl. null).
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_BUFFER_TOO_SMALL` if the buffer is too small.
+    /// - `BOINK_ERR_INVALID_ARG` on invalid pointers.
+    pub fn boink_get_engine_profile(out_buf: *mut c_char, in_out_len: *mut c_uint) -> c_int;
+
+    /// Retrieves a human-readable description of the last engine error.
+    ///
+    /// The error string is thread-local and is updated when a Boink API call fails.
+    ///
+    /// Parameters:
+    /// - `out_buf` - destination buffer for a null-terminated string.
+    /// - `in_out_len` - in: buffer size in bytes; out: required size (incl. null).
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_BUFFER_TOO_SMALL` if the buffer is too small.
+    /// - `BOINK_ERR_INVALID_ARG` on invalid pointers.
+    pub fn boink_get_last_error(out_buf: *mut c_char, in_out_len: *mut c_uint) -> c_int;
 
     /// Initializes the Boink engine library.
     ///
