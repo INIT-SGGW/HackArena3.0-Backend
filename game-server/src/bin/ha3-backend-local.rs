@@ -2,10 +2,12 @@
 //!
 //! Build with `--features local`. Uses local JWT defaults and the shared runtime.
 
-#[cfg(not(feature = "local"))]
+#[cfg(all(not(feature = "ide"), not(feature = "local")))]
 compile_error!("ha3-backend-local requires --features local");
-#[cfg(feature = "official")]
+#[cfg(all(not(feature = "ide"), feature = "official"))]
 compile_error!("ha3-backend-local cannot be built with --features official");
+#[cfg(all(feature = "ide", not(debug_assertions)))]
+compile_error!("feature `ide` is for editor use only; do not enable in release builds");
 
 use std::error::Error;
 use std::sync::Arc;
