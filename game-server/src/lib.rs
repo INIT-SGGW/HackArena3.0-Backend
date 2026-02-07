@@ -2,6 +2,8 @@
 
 pub mod auth;
 pub mod config;
+#[cfg(feature = "official")]
+pub mod db;
 pub mod runtime;
 pub mod server;
 pub mod services;
@@ -33,6 +35,17 @@ pub fn init_tracing() {
 }
 
 async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
+    #[cfg(feature = "official")]
+    let _db = {
+        let pool = crate::db::connect_and_migrate(
+            &cfg.official_database_url,
+            cfg.official_db_max_connections,
+        )
+        .await?;
+        tracing::info!("official database ready");
+        pool
+    };
+
     // Separate shutdown channels so we can grace gRPC before stopping the engine.
     let (grpc_shutdown_tx, grpc_shutdown_rx) = broadcast::channel::<()>(16);
     let (engine_shutdown_tx, engine_shutdown_rx) = broadcast::channel::<()>(16);

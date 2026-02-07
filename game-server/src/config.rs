@@ -46,6 +46,10 @@ pub struct Config {
     pub jwks_url: String,
     pub jwt_audience: Vec<String>,
     pub jwt_issuers: Vec<String>,
+    #[cfg(feature = "official")]
+    pub official_database_url: String,
+    #[cfg(feature = "official")]
+    pub official_db_max_connections: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +263,14 @@ impl Config {
             tracing::info!("debug drawer enabled");
         }
 
+        #[cfg(feature = "official")]
+        let official_database_url = read_env_string("OFFICIAL_DATABASE_URL")
+            .ok_or("OFFICIAL_DATABASE_URL must be set for official backend")?;
+
+        #[cfg(feature = "official")]
+        let official_db_max_connections =
+            parse_u32_env("OFFICIAL_DB_MAX_CONNECTIONS")?.unwrap_or(8);
+
         Ok(Self {
             env: app_env,
             listen_addr,
@@ -271,6 +283,10 @@ impl Config {
             jwks_url,
             jwt_audience,
             jwt_issuers,
+            #[cfg(feature = "official")]
+            official_database_url,
+            #[cfg(feature = "official")]
+            official_db_max_connections,
         })
     }
 }
@@ -432,4 +448,14 @@ fn parse_list_env(name: &str) -> Result<Option<Vec<String>>, String> {
         return Err(format!("{name} cannot be empty"));
     }
     Ok(Some(list))
+}
+
+fn parse_u32_env(name: &str) -> Result<Option<u32>, String> {
+    match read_env_string(name) {
+        Some(value) => value
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|e| format!("Invalid {name}: {e}")),
+        None => Ok(None),
+    }
 }

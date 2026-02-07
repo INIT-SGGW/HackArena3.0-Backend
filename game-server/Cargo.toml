@@ -14,7 +14,7 @@ path = "src/bin/ha3-backend-local.rs"
 [features]
 default = []
 ide = []
-official = []
+official = ["sqlx"]
 local = []
 proto-local = ["proto/proto-local"]
 
@@ -46,3 +46,4 @@ tokio-stream = { version = "0.1.17", features = ["net"] }
 tonic-health = "0.14.2"
 tonic-web = "0.14.2"
 tower-http = { version = "0.6.6", features = ["cors", "trace"] }
+sqlx = { version = "0.8.4", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros"], optional = true }
