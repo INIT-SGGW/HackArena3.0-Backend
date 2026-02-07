@@ -231,20 +231,16 @@ fn extract_scopes(claims: &TokenClaims) -> Vec<String> {
     scopes.into_iter().collect()
 }
 
-/// Parse the `authorization` metadata entry and return a bearer token if present.
-pub fn parse_bearer_token(metadata: &MetadataMap) -> Result<Option<String>, Status> {
-    let Some(value) = metadata.get("authorization") else {
+/// Parse the `x-ha3-game-token` metadata entry and return a token if present.
+pub fn parse_game_token(metadata: &MetadataMap) -> Result<Option<String>, Status> {
+    let Some(value) = metadata.get("x-ha3-game-token") else {
         return Ok(None);
     };
     let raw = value
         .to_str()
-        .map_err(|_| Status::unauthenticated("invalid authorization header"))?;
-    let token = raw
-        .strip_prefix("Bearer ")
-        .or_else(|| raw.strip_prefix("bearer "))
-        .ok_or_else(|| Status::unauthenticated("authorization must be bearer"))?;
-    if token.is_empty() {
-        return Err(Status::unauthenticated("empty bearer token"));
+        .map_err(|_| Status::unauthenticated("invalid x-ha3-game-token header"))?;
+    if raw.trim().is_empty() {
+        return Err(Status::unauthenticated("empty x-ha3-game-token"));
     }
-    Ok(Some(token.to_string()))
+    Ok(Some(raw.to_string()))
 }

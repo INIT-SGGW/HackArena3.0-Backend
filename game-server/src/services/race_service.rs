@@ -18,7 +18,7 @@ use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, server::NamedService};
 
-use crate::auth::jwt::{TokenValidator, parse_bearer_token};
+use crate::auth::jwt::{TokenValidator, parse_game_token};
 use crate::runtime::engine_worker::EngineClient;
 
 use super::error_map::map_worker_err;
@@ -83,7 +83,7 @@ impl RaceService for RaceServiceImpl {
     ) -> Result<Response<QuickJoinResponse>, Status> {
         let engine = self.engine.clone();
         let car_id = engine.spawn_car().await.map_err(map_worker_err)?;
-        if let Some(token) = parse_bearer_token(request.metadata())? {
+        if let Some(token) = parse_game_token(request.metadata())? {
             if let Some(instance_uuid) = self
                 .token_validator
                 .instance_uuid_from_token(&token)
@@ -107,7 +107,7 @@ impl RaceService for RaceServiceImpl {
         &self,
         request: Request<SetControlsRequest>,
     ) -> Result<Response<SetControlsResponse>, Status> {
-        let auth = parse_bearer_token(request.metadata())?;
+        let auth = parse_game_token(request.metadata())?;
         let req = request.into_inner();
         let car_id = match auth {
             Some(token) => {
@@ -177,7 +177,7 @@ impl RaceService for RaceServiceImpl {
         &self,
         request: Request<GetFrontendSpectatorRequest>,
     ) -> Result<Response<Self::StreamFrontendSpectatorStream>, Status> {
-        let auth = parse_bearer_token(request.metadata())?;
+        let auth = parse_game_token(request.metadata())?;
         let req = request.into_inner();
 
         let requested_view = normalize_requested_view(req.requested_view);
