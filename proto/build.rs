@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-changed={}", proto_root.display());
 
-    let subdirs = ["race/v1"];
+    let subdirs = ["race/v1", "weather/v1"];
     let protos = collect_proto_files(&proto_root, &subdirs)?;
     for p in &protos {
         println!("cargo:rerun-if-changed={}", p.display());

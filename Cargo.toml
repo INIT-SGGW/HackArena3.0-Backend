@@ -16,6 +16,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.48", features = ["full"] }
 tonic = "0.14"
 prost = "0.14"
+prost-types = "0.14"
 
 [profile.dev-release]
 inherits = "release"
