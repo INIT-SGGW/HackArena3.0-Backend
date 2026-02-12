@@ -2,6 +2,8 @@
 
 use proto::race::v1::asset_service_server::AssetServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
+use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
+use proto::weather::v1::weather_query_service_server::WeatherQueryServiceServer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -19,6 +21,8 @@ use crate::config::Config;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
+use crate::services::weather_admin_service::WeatherAdminServiceImpl;
+use crate::services::weather_query_service::WeatherQueryServiceImpl;
 
 use super::cors::cors_layer;
 use super::shutdown::shutdown_signal;
@@ -38,6 +42,12 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<RaceServiceServer<RaceServiceImpl>>()
         .await;
+    health_reporter
+        .set_serving::<WeatherQueryServiceServer<WeatherQueryServiceImpl>>()
+        .await;
+    health_reporter
+        .set_serving::<WeatherAdminServiceServer<WeatherAdminServiceImpl>>()
+        .await;
 
     let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
     let race_impl = RaceServiceImpl::new(
@@ -47,6 +57,8 @@ pub async fn serve_grpc(
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
     );
+    let weather_query_impl = WeatherQueryServiceImpl;
+    let weather_admin_impl = WeatherAdminServiceImpl;
 
     let cors = cors_layer(&cfg);
 
@@ -88,6 +100,8 @@ pub async fn serve_grpc(
         .add_service(health_service)
         .add_service(AssetServiceServer::new(asset_impl))
         .add_service(RaceServiceServer::new(race_impl))
+        .add_service(WeatherQueryServiceServer::new(weather_query_impl))
+        .add_service(WeatherAdminServiceServer::new(weather_admin_impl))
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))
         .await
         .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)

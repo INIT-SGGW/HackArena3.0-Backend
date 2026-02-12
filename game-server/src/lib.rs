@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 #[cfg(feature = "official")]
 pub mod db;
+pub mod domain;
 pub mod runtime;
 pub mod server;
 pub mod services;

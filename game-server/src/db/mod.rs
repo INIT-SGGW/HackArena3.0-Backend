@@ -1,5 +1,7 @@
 //! Database setup for the official backend (Postgres).
 
+pub mod repos;
+
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tracing::{Level, debug, info};
