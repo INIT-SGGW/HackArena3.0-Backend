@@ -1,17 +1,38 @@
-//! gRPC WeatherQueryService scaffold.
+//! gRPC WeatherQueryService implementation.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use prost_types::Timestamp;
 use proto::weather::v1::weather_query_service_server::WeatherQueryService;
 use proto::weather::v1::{
-    ForecastUpdateEvent, GetForecastNowRequest, GetForecastNowResponse, GetWeatherNowRequest,
-    GetWeatherNowResponse, StreamForecastUpdatesRequest, StreamWeatherUpdatesRequest,
+    ForecastPoint, ForecastPreset, ForecastUpdateEvent, GetForecastNowRequest,
+    GetForecastNowResponse, GetWeatherNowRequest, GetWeatherNowResponse,
+    StreamForecastUpdatesRequest, StreamWeatherUpdatesRequest, WeatherNow, WeatherType,
     WeatherUpdateEvent,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-/// Placeholder WeatherQuery service implementation.
+use crate::domain::weather::{
+    WeatherDomainError, align_start_to_preset_slot, project_forecast, weather_type_at,
+};
+
+#[cfg(feature = "official")]
+use crate::db::repos::weather::WeatherRepo;
+
+/// WeatherQuery service backed by global weather schedule.
 #[derive(Clone, Default)]
-pub struct WeatherQueryServiceImpl;
+pub struct WeatherQueryServiceImpl {
+    #[cfg(feature = "official")]
+    repo: Option<WeatherRepo>,
+}
+
+impl WeatherQueryServiceImpl {
+    #[cfg(feature = "official")]
+    pub fn with_repo(repo: WeatherRepo) -> Self {
+        Self { repo: Some(repo) }
+    }
+}
 
 #[tonic::async_trait]
 impl WeatherQueryService for WeatherQueryServiceImpl {
@@ -22,9 +43,15 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
         &self,
         _request: Request<GetWeatherNowRequest>,
     ) -> Result<Response<GetWeatherNowResponse>, Status> {
-        Err(Status::unimplemented(
-            "weather query service not implemented yet",
-        ))
+        let now_ms = current_time_ms();
+        let schedule = self.load_schedule().await?;
+        let weather_type = weather_type_at(&schedule, now_ms).unwrap_or(WeatherType::Unspecified);
+
+        Ok(Response::new(GetWeatherNowResponse {
+            now: Some(WeatherNow {
+                r#type: weather_type as i32,
+            }),
+        }))
     }
 
     async fn stream_weather_updates(
@@ -38,11 +65,29 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
 
     async fn get_forecast_now(
         &self,
-        _request: Request<GetForecastNowRequest>,
+        request: Request<GetForecastNowRequest>,
     ) -> Result<Response<GetForecastNowResponse>, Status> {
-        Err(Status::unimplemented(
-            "weather query service not implemented yet",
-        ))
+        let preset = extract_preset(request.into_inner())?;
+        let now_ms = current_time_ms();
+        let start_ms =
+            align_start_to_preset_slot(now_ms, preset).map_err(map_domain_error_to_status)?;
+
+        let schedule = self.load_schedule().await?;
+        let points =
+            project_forecast(&schedule, start_ms, preset).map_err(map_domain_error_to_status)?;
+        let response_points = points
+            .into_iter()
+            .map(|point| ForecastPoint {
+                time: Some(ms_to_timestamp(point.time_ms)),
+                r#type: point.weather_type as i32,
+                // TODO(weather): replace with proper probability model.
+                rain_probability: 0.0,
+            })
+            .collect();
+
+        Ok(Response::new(GetForecastNowResponse {
+            points: response_points,
+        }))
     }
 
     async fn stream_forecast_updates(
@@ -53,4 +98,63 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
             "weather query service not implemented yet",
         ))
     }
+}
+
+impl WeatherQueryServiceImpl {
+    async fn load_schedule(&self) -> Result<Vec<crate::domain::weather::ScheduleEntry>, Status> {
+        #[cfg(feature = "official")]
+        {
+            let repo = self.repo.as_ref().ok_or_else(|| {
+                Status::failed_precondition("weather query service is not configured")
+            })?;
+            return repo.get_schedule().await.map_err(|err| {
+                Status::internal(format!("failed to load weather schedule: {err}"))
+            });
+        }
+
+        #[cfg(not(feature = "official"))]
+        {
+            Err(Status::unimplemented(
+                "weather query service is available only in official backend",
+            ))
+        }
+    }
+}
+
+fn extract_preset(request: GetForecastNowRequest) -> Result<ForecastPreset, Status> {
+    let spec = request
+        .spec
+        .ok_or_else(|| Status::invalid_argument("spec is required"))?;
+    let preset = ForecastPreset::try_from(spec.preset)
+        .map_err(|_| Status::invalid_argument("invalid forecast preset"))?;
+    if matches!(preset, ForecastPreset::Unspecified) {
+        return Err(Status::invalid_argument(
+            "forecast preset must be specified",
+        ));
+    }
+    Ok(preset)
+}
+
+fn map_domain_error_to_status(err: WeatherDomainError) -> Status {
+    match err {
+        WeatherDomainError::UnspecifiedPreset
+        | WeatherDomainError::UnspecifiedNotTail { .. }
+        | WeatherDomainError::NonIncreasingTimestamp { .. } => {
+            Status::invalid_argument(err.to_string())
+        }
+        WeatherDomainError::TimestampOverflow => Status::out_of_range(err.to_string()),
+    }
+}
+
+fn current_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn ms_to_timestamp(ms: i64) -> Timestamp {
+    let seconds = ms.div_euclid(1000);
+    let nanos = (ms.rem_euclid(1000) as i32) * 1_000_000;
+    Timestamp { seconds, nanos }
 }

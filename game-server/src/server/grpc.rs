@@ -1,11 +1,12 @@
 //! gRPC server wiring and middleware layers.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use proto::race::v1::asset_service_server::AssetServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
 use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
 use proto::weather::v1::weather_query_service_server::WeatherQueryServiceServer;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -18,6 +19,8 @@ use tonic_web::GrpcWebLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
+#[cfg(feature = "official")]
+use crate::db::repos::weather::WeatherRepo;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
@@ -31,6 +34,7 @@ use super::shutdown::shutdown_signal;
 pub async fn serve_grpc(
     cfg: Arc<Config>,
     engine: EngineClient,
+    #[cfg(feature = "official")] official_db_pool: sqlx::PgPool,
     mut shutdown_rx: broadcast::Receiver<()>,
     active_connections: Arc<AtomicUsize>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -57,7 +61,11 @@ pub async fn serve_grpc(
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
     );
-    let weather_query_impl = WeatherQueryServiceImpl;
+    #[cfg(feature = "official")]
+    let weather_query_impl =
+        WeatherQueryServiceImpl::with_repo(WeatherRepo::new(official_db_pool.clone()));
+    #[cfg(not(feature = "official"))]
+    let weather_query_impl = WeatherQueryServiceImpl::default();
     let weather_admin_impl = WeatherAdminServiceImpl;
 
     let cors = cors_layer(&cfg);

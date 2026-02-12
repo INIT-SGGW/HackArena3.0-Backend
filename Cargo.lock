@@ -637,6 +637,7 @@ dependencies = [
  "itertools",
  "jsonwebtoken",
  "prost",
+ "prost-types",
  "proto",
  "reqwest",
  "serde",

@@ -37,7 +37,7 @@ pub fn init_tracing() {
 
 async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "official")]
-    let _db = {
+    let db_pool = {
         let pool = crate::db::connect_and_migrate(
             &cfg.official_database_url,
             cfg.official_db_max_connections,
@@ -62,8 +62,15 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
         let active_connections = active_connections.clone();
         async move {
             info!("Starting gRPC server on {}", cfg.listen_addr);
-            if let Err(e) =
-                crate::server::serve_grpc(cfg, engine, grpc_shutdown_rx, active_connections).await
+            if let Err(e) = crate::server::serve_grpc(
+                cfg,
+                engine,
+                #[cfg(feature = "official")]
+                db_pool.clone(),
+                grpc_shutdown_rx,
+                active_connections,
+            )
+            .await
             {
                 error!("gRPC server terminated with error: {e}");
                 let _ = shutdown_tx_grpc.send(());
