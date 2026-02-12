@@ -18,7 +18,7 @@ use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, server::NamedService};
 
-use crate::auth::jwt::{TokenValidator, parse_game_token};
+use crate::auth::game_token::{GameTokenValidator, parse_game_token};
 use crate::runtime::engine_worker::EngineClient;
 
 use super::error_map::map_worker_err;
@@ -37,7 +37,7 @@ pub struct RaceServiceImpl {
     known_cars: Arc<DashMap<u64, ()>>,
     last_client_seq: Arc<DashMap<u64, u64>>,
     instance_cars: Arc<DashMap<String, u64>>,
-    token_validator: Arc<TokenValidator>,
+    token_validator: Arc<GameTokenValidator>,
     // Optional shared state for future extensions.
     _state: Arc<Mutex<()>>,
 }
@@ -58,7 +58,7 @@ impl RaceServiceImpl {
             known_cars: Arc::new(DashMap::new()),
             last_client_seq: Arc::new(DashMap::new()),
             instance_cars: Arc::new(DashMap::new()),
-            token_validator: Arc::new(TokenValidator::new_with_config(
+            token_validator: Arc::new(GameTokenValidator::new_with_config(
                 jwks_url,
                 jwt_audience,
                 jwt_issuers,
@@ -111,6 +111,7 @@ impl RaceService for RaceServiceImpl {
         let req = request.into_inner();
         let car_id = match auth {
             Some(token) => {
+                // TODO(auth): official team-bot-token does not include instance_uuid.
                 let instance_uuid = self
                     .token_validator
                     .instance_uuid_from_token(&token)

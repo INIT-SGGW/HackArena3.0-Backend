@@ -1,25 +1,17 @@
-//! JWT validation helpers backed by a JWKS endpoint.
-//!
-//! The validator fetches and caches the JSON Web Key Set (JWKS), then uses it
-//! to verify ES256 tokens and extract common authorization claims.
+//! Shared JWKS-based JWT validation.
 
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use reqwest::Client;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
-use tonic::metadata::MetadataMap;
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const JWKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-pub const DEFAULT_AUDIENCE_OFFICIAL: &str = "ha3-official";
-pub const DEFAULT_ISSUERS_OFFICIAL: [&str; 1] = ["ha3-auth"];
-pub const DEFAULT_AUDIENCE_LOCAL: &str = "ha3-dev-auth";
-pub const DEFAULT_ISSUERS_LOCAL: [&str; 1] = ["ha3-local"];
 
 #[derive(Clone, Deserialize)]
 struct Jwks {
@@ -35,20 +27,13 @@ struct Jwk {
     y: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
-struct TokenClaims {
-    scope: Option<String>,
-    scp: Option<Vec<String>>,
-    instance_uuid: Option<String>,
-}
-
 struct JwksCache {
     jwks: Option<Jwks>,
     fetched_at: Option<Instant>,
 }
 
-/// Validates JWTs against a JWKS URL and extracts authorization claims.
-pub struct TokenValidator {
+/// Shared validator for ES256 JWTs signed by keys from a JWKS endpoint.
+pub struct JwksValidator {
     jwks_url: String,
     client: Client,
     cache: RwLock<JwksCache>,
@@ -57,9 +42,9 @@ pub struct TokenValidator {
     issuers: Vec<String>,
 }
 
-impl TokenValidator {
-    /// Create a new validator with explicit audience and issuer configuration.
-    pub fn new_with_config(jwks_url: &str, audience: Vec<String>, issuers: Vec<String>) -> Self {
+impl JwksValidator {
+    /// Create a new validator with explicit JWKS URL, audience and issuer constraints.
+    pub fn new(jwks_url: &str, audience: Vec<String>, issuers: Vec<String>) -> Self {
         Self {
             jwks_url: jwks_url.to_string(),
             client: Client::builder()
@@ -77,21 +62,12 @@ impl TokenValidator {
         }
     }
 
-    /// Validate the token and return a de-duplicated list of scopes.
-    pub async fn scopes_from_token(&self, token: &str) -> Result<Vec<String>, Status> {
-        let claims = self.claims_from_token(token).await?;
-        Ok(extract_scopes(&claims))
-    }
-
-    /// Validate the token and return the instance UUID claim, if present.
-    pub async fn instance_uuid_from_token(&self, token: &str) -> Result<Option<String>, Status> {
-        let claims = self.claims_from_token(token).await?;
-        Ok(claims.instance_uuid)
-    }
-
-    async fn claims_from_token(&self, token: &str) -> Result<TokenClaims, Status> {
-        let header =
-            decode_header(token).map_err(|_| Status::unauthenticated("invalid bearer token"))?;
+    /// Decode and validate a JWT into the requested claims type.
+    pub async fn decode_claims<T>(&self, token: &str) -> Result<T, Status>
+    where
+        T: DeserializeOwned,
+    {
+        let header = decode_header(token).map_err(|_| Status::unauthenticated("invalid jwt"))?;
         let alg = header.alg;
         if alg != Algorithm::ES256 {
             return Err(Status::unauthenticated("unsupported jwt algorithm"));
@@ -124,13 +100,13 @@ impl TokenValidator {
             validation.set_issuer(&issuers);
             validation.validate_exp = true;
             validation.required_spec_claims.insert("exp".to_string());
-            match decode::<TokenClaims>(token, &key, &validation) {
+            match decode::<T>(token, &key, &validation) {
                 Ok(data) => return Ok(data.claims),
                 Err(err) => tracing::debug!("jwt decode error: {err}"),
             }
         }
 
-        Err(Status::unauthenticated("invalid bearer token"))
+        Err(Status::unauthenticated("invalid jwt"))
     }
 
     async fn jwks(&self) -> Result<Jwks, Status> {
@@ -210,37 +186,4 @@ fn jwk_to_key(jwk: &Jwk) -> Result<DecodingKey, Status> {
         .as_deref()
         .ok_or_else(|| Status::unauthenticated("invalid jwk"))?;
     DecodingKey::from_ec_components(x, y).map_err(|_| Status::unauthenticated("invalid jwk"))
-}
-
-fn extract_scopes(claims: &TokenClaims) -> Vec<String> {
-    let mut scopes = HashSet::new();
-    if let Some(scope) = &claims.scope {
-        for entry in scope.split_whitespace() {
-            if !entry.is_empty() {
-                scopes.insert(entry.to_string());
-            }
-        }
-    }
-    if let Some(list) = &claims.scp {
-        for entry in list {
-            if !entry.is_empty() {
-                scopes.insert(entry.clone());
-            }
-        }
-    }
-    scopes.into_iter().collect()
-}
-
-/// Parse the `x-ha3-game-token` metadata entry and return a token if present.
-pub fn parse_game_token(metadata: &MetadataMap) -> Result<Option<String>, Status> {
-    let Some(value) = metadata.get("x-ha3-game-token") else {
-        return Ok(None);
-    };
-    let raw = value
-        .to_str()
-        .map_err(|_| Status::unauthenticated("invalid x-ha3-game-token header"))?;
-    if raw.trim().is_empty() {
-        return Err(Status::unauthenticated("empty x-ha3-game-token"));
-    }
-    Ok(Some(raw.to_string()))
 }
