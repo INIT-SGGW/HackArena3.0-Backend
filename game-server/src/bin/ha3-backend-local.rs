@@ -12,13 +12,36 @@ compile_error!("feature `ide` is for editor use only; do not enable in release b
 use std::error::Error;
 use std::sync::Arc;
 
-use game_server::config::{Config, JwtDefaults};
+use dotenv::{dotenv, from_filename};
+use game_server::config::Config;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let mut env_local_fallback: Option<dotenv::Error> = None;
+    let mut env_default_fallback_error: Option<dotenv::Error> = None;
+    if let Err(err) = from_filename(".env.local") {
+        env_local_fallback = Some(err);
+        if let Err(default_err) = dotenv() {
+            env_default_fallback_error = Some(default_err);
+        }
+    }
+
     game_server::init_tracing();
 
-    let cfg = Arc::new(Config::load_or_exit_with_defaults(JwtDefaults::local()));
+    if let Some(err) = env_local_fallback {
+        tracing::warn!(
+            error = %err,
+            "failed to load .env.local; falling back to .env"
+        );
+        if let Some(default_err) = env_default_fallback_error {
+            tracing::warn!(
+                error = %default_err,
+                "failed to load fallback .env"
+            );
+        }
+    }
+
+    let cfg = Arc::new(Config::load_or_exit());
 
     tracing::info!("ha3-backend-local starting");
 

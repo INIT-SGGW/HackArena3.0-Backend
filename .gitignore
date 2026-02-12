@@ -22,6 +22,8 @@ target
 
 # Environment files
 .env
+.env.local
+.env.official
 
 # Generated protobuf code
 proto/gen/
