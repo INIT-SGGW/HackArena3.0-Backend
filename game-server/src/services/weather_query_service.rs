@@ -2,13 +2,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use prost_types::Timestamp;
 use proto::weather::v1::weather_query_service_server::WeatherQueryService;
 use proto::weather::v1::{
-    ForecastPoint, ForecastPreset, ForecastUpdateEvent, GetForecastNowRequest,
-    GetForecastNowResponse, GetWeatherNowRequest, GetWeatherNowResponse,
-    StreamForecastUpdatesRequest, StreamWeatherUpdatesRequest, WeatherNow, WeatherType,
-    WeatherUpdateEvent,
+    ForecastPreset, ForecastUpdateEvent, GetForecastNowRequest, GetForecastNowResponse,
+    GetWeatherNowRequest, GetWeatherNowResponse, StreamForecastUpdatesRequest,
+    StreamWeatherUpdatesRequest, WeatherNow, WeatherType, WeatherUpdateEvent,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -16,6 +14,7 @@ use tonic::{Request, Response, Status};
 use crate::domain::weather::{
     WeatherDomainError, align_start_to_preset_slot, project_forecast, weather_type_at,
 };
+use crate::services::weather_mappers::forecast_point_to_proto;
 
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
@@ -75,15 +74,7 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
         let schedule = self.load_schedule().await?;
         let points =
             project_forecast(&schedule, start_ms, preset).map_err(map_domain_error_to_status)?;
-        let response_points = points
-            .into_iter()
-            .map(|point| ForecastPoint {
-                time: Some(ms_to_timestamp(point.time_ms)),
-                r#type: point.weather_type as i32,
-                // TODO(weather): replace with proper probability model.
-                rain_probability: 0.0,
-            })
-            .collect();
+        let response_points = points.into_iter().map(forecast_point_to_proto).collect();
 
         Ok(Response::new(GetForecastNowResponse {
             points: response_points,
@@ -151,10 +142,4 @@ fn current_time_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
-}
-
-fn ms_to_timestamp(ms: i64) -> Timestamp {
-    let seconds = ms.div_euclid(1000);
-    let nanos = (ms.rem_euclid(1000) as i32) * 1_000_000;
-    Timestamp { seconds, nanos }
 }

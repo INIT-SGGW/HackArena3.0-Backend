@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proto::race::v1::asset_service_server::AssetServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
+#[cfg(feature = "official")]
 use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
 use proto::weather::v1::weather_query_service_server::WeatherQueryServiceServer;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -24,6 +25,7 @@ use crate::db::repos::weather::WeatherRepo;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
+#[cfg(feature = "official")]
 use crate::services::weather_admin_service::WeatherAdminServiceImpl;
 use crate::services::weather_query_service::WeatherQueryServiceImpl;
 
@@ -49,6 +51,7 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<WeatherQueryServiceServer<WeatherQueryServiceImpl>>()
         .await;
+    #[cfg(feature = "official")]
     health_reporter
         .set_serving::<WeatherAdminServiceServer<WeatherAdminServiceImpl>>()
         .await;
@@ -61,12 +64,18 @@ pub async fn serve_grpc(
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
     );
+
     #[cfg(feature = "official")]
-    let weather_query_impl =
-        WeatherQueryServiceImpl::with_repo(WeatherRepo::new(official_db_pool.clone()));
+    let (weather_query_impl, weather_admin_impl) = {
+        let weather_repo = WeatherRepo::new(official_db_pool.clone());
+        (
+            WeatherQueryServiceImpl::with_repo(weather_repo.clone()),
+            WeatherAdminServiceImpl::with_repo(weather_repo, cfg.env),
+        )
+    };
+
     #[cfg(not(feature = "official"))]
     let weather_query_impl = WeatherQueryServiceImpl::default();
-    let weather_admin_impl = WeatherAdminServiceImpl;
 
     let cors = cors_layer(&cfg);
 
@@ -100,7 +109,7 @@ pub async fn serve_grpc(
 
     let trace_layer = TraceLayer::new_for_grpc().on_request(log_grpc_request);
 
-    Server::builder()
+    let server = Server::builder()
         .accept_http1(true)
         .layer(trace_layer)
         .layer(cors)
@@ -108,8 +117,12 @@ pub async fn serve_grpc(
         .add_service(health_service)
         .add_service(AssetServiceServer::new(asset_impl))
         .add_service(RaceServiceServer::new(race_impl))
-        .add_service(WeatherQueryServiceServer::new(weather_query_impl))
-        .add_service(WeatherAdminServiceServer::new(weather_admin_impl))
+        .add_service(WeatherQueryServiceServer::new(weather_query_impl));
+
+    #[cfg(feature = "official")]
+    let server = server.add_service(WeatherAdminServiceServer::new(weather_admin_impl));
+
+    server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))
         .await
         .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)
