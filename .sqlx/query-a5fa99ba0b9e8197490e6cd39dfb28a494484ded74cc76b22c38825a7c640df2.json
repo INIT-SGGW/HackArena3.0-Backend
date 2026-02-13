@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO weather_schedule (starts_at_ms, weather_type) VALUES ($1, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        {
+          "Custom": {
+            "name": "weather_type",
+            "kind": {
+              "Enum": [
+                "unspecified",
+                "clear",
+                "partly_cloudy",
+                "overcast",
+                "light_rain",
+                "medium_rain",
+                "heavy_rain"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a5fa99ba0b9e8197490e6cd39dfb28a494484ded74cc76b22c38825a7c640df2"
+}
