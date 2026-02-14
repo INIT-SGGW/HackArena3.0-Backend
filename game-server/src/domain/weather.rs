@@ -22,6 +22,55 @@ pub struct ForecastPoint {
     pub weather_type: WeatherType,
 }
 
+/// Weather parameters consumed by the simulation engine.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EngineWeatherParams {
+    /// Cloudiness in range `0.0..=1.0`.
+    pub cloudiness: f32,
+    /// Ambient temperature in Celsius.
+    pub temperature_c: f32,
+    /// Rain intensity in range `0.0..=1.0`.
+    pub rain_intensity: f32,
+}
+
+/// Maps API weather type to simulation engine parameters.
+///
+/// `WeatherType::Unspecified` is treated as a safe clear-weather fallback.
+pub fn engine_params_for_weather_type(weather_type: WeatherType) -> EngineWeatherParams {
+    match weather_type {
+        WeatherType::Unspecified | WeatherType::Clear => EngineWeatherParams {
+            cloudiness: 0.0,
+            temperature_c: 20.0,
+            rain_intensity: 0.0,
+        },
+        WeatherType::PartlyCloudy => EngineWeatherParams {
+            cloudiness: 0.5,
+            temperature_c: 18.0,
+            rain_intensity: 0.0,
+        },
+        WeatherType::Overcast => EngineWeatherParams {
+            cloudiness: 1.0,
+            temperature_c: 16.0,
+            rain_intensity: 0.0,
+        },
+        WeatherType::LightRain => EngineWeatherParams {
+            cloudiness: 0.8,
+            temperature_c: 15.0,
+            rain_intensity: 0.3,
+        },
+        WeatherType::MediumRain => EngineWeatherParams {
+            cloudiness: 0.95,
+            temperature_c: 14.0,
+            rain_intensity: 0.6,
+        },
+        WeatherType::HeavyRain => EngineWeatherParams {
+            cloudiness: 1.0,
+            temperature_c: 13.0,
+            rain_intensity: 0.85,
+        },
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum WeatherDomainError {
     #[error("forecast preset must be specified")]
