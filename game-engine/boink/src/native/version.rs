@@ -69,6 +69,14 @@ pub const REQUIRED_C_API_VERSION: Version = Version::new(
     sys::BOINK_C_API_VERSION_PATCH,
 );
 
+/// Minimal C-API version accepted in `legacy-native-lib` mode.
+///
+/// Legacy mode allows running against older native libraries as long as
+/// the baseline contract is available. Newer symbols may still be resolved
+/// dynamically and treated as optional.
+#[cfg(feature = "legacy-native-lib")]
+pub const MIN_LEGACY_C_API_VERSION: Version = Version::new(0, 3, 0);
+
 /// Queries the loaded native library for the Boink C-API and engine versions.
 ///
 /// # Errors
@@ -101,13 +109,7 @@ pub fn query_c_api_version() -> Result<Version> {
 #[cfg(feature = "legacy-native-lib")]
 pub fn query_c_api_version() -> Result<Version> {
     match try_dynamic_version_query(b"boink_get_c_api_version\0")? {
-        Some(version) => {
-            info!(
-                "Legacy native C API version: {} (min {})",
-                version, REQUIRED_C_API_VERSION
-            );
-            Ok(version)
-        }
+        Some(version) => Ok(version),
         None => {
             static ASSUMED_C_API_WARN_ONCE: Once = Once::new();
             ASSUMED_C_API_WARN_ONCE.call_once(|| {
@@ -117,10 +119,10 @@ pub fn query_c_api_version() -> Result<Version> {
                         "(min required {}). Missing version info may indicate newer APIs ",
                         "are unavailable."
                     ),
-                    REQUIRED_C_API_VERSION, REQUIRED_C_API_VERSION
+                    MIN_LEGACY_C_API_VERSION, MIN_LEGACY_C_API_VERSION
                 );
             });
-            Ok(REQUIRED_C_API_VERSION)
+            Ok(MIN_LEGACY_C_API_VERSION)
         }
     }
 }
@@ -145,13 +147,7 @@ pub fn query_engine_version() -> Result<Version> {
 #[cfg(feature = "legacy-native-lib")]
 pub fn query_engine_version() -> Result<Version> {
     match try_dynamic_version_query(b"boink_get_engine_version\0")? {
-        Some(version) => {
-            info!(
-                "Legacy native engine version: {} (min {})",
-                version, REQUIRED_C_API_VERSION
-            );
-            Ok(version)
-        }
+        Some(version) => Ok(version),
         None => {
             let assumed = Version::new(0, 0, 0);
             warn!(
@@ -192,8 +188,8 @@ pub fn ensure_c_api_compatible() -> Result<()> {
             };
 
             info!(
-                "Boink versions: c_api={} (min {}), engine={}",
-                actual, required, engine_version
+                "Boink versions: c_api={}, engine={}, required={}",
+                actual, engine_version, required
             );
             match query_engine_profile() {
                 Ok(Some(profile)) => info!("Boink engine profile: {}", profile),
@@ -232,15 +228,22 @@ pub fn ensure_c_api_compatible() -> Result<()> {
             "unknown".to_string()
         });
     info!(
-        "Boink versions: c_api={} (min {}), engine={}",
-        c_api, REQUIRED_C_API_VERSION, engine_version
+        "Boink versions: c_api={}, engine={}, legacy_min={}, required={}, mode=legacy",
+        c_api, engine_version, MIN_LEGACY_C_API_VERSION, REQUIRED_C_API_VERSION
     );
     match query_engine_profile() {
         Ok(Some(profile)) => info!("Boink engine profile: {}", profile),
         Ok(None) => {}
         Err(err) => warn!("Failed to query Boink engine profile: {err}"),
     }
-    Ok(())
+    if is_compatible(MIN_LEGACY_C_API_VERSION, c_api) {
+        Ok(())
+    } else {
+        Err(Error::IncompatibleVersion {
+            required: MIN_LEGACY_C_API_VERSION,
+            actual: c_api,
+        })
+    }
 }
 
 #[cfg(feature = "legacy-native-lib")]
@@ -273,7 +276,6 @@ fn try_dynamic_version_query(symbol: &[u8]) -> Result<Option<Version>> {
     }
 }
 
-#[cfg(not(feature = "legacy-native-lib"))]
 fn is_compatible(required: Version, actual: Version) -> bool {
     if actual.major != required.major {
         return false;
