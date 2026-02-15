@@ -10,7 +10,7 @@ use tracing::trace;
 
 use crate::native::error::NativeLoadError;
 use crate::native::loader::{
-    LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
+    LegacySetWeatherFn, LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
 };
 
 /// Lazily resolved optional symbols exposed by a potentially old native library.
@@ -19,6 +19,7 @@ pub struct NativeApi {
     get_engine_version: Option<LegacyVersionFn>,
     get_engine_profile: Option<LegacyStringFn>,
     get_last_error: Option<LegacyStringFn>,
+    set_weather: Option<LegacySetWeatherFn>,
 }
 
 impl NativeApi {
@@ -55,6 +56,12 @@ impl NativeApi {
         self.get_last_error
     }
 
+    /// Returns the function pointer for `boink_set_weather`, when exported.
+    #[must_use]
+    pub fn boink_set_weather(&self) -> Option<LegacySetWeatherFn> {
+        self.set_weather
+    }
+
     fn load() -> Result<NativeApi, NativeLoadError> {
         let lib = load_native_library()?;
 
@@ -62,13 +69,15 @@ impl NativeApi {
         let get_engine_version = resolve_optional(lib, b"boink_get_engine_version\0");
         let get_engine_profile = resolve_optional(lib, b"boink_get_engine_profile\0");
         let get_last_error = resolve_optional(lib, b"boink_get_last_error\0");
+        let set_weather = resolve_optional(lib, b"boink_set_weather\0");
 
         trace!(
-            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}",
+            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}",
             get_c_api_version.is_some(),
             get_engine_version.is_some(),
             get_engine_profile.is_some(),
-            get_last_error.is_some()
+            get_last_error.is_some(),
+            set_weather.is_some()
         );
 
         Ok(NativeApi {
@@ -76,6 +85,7 @@ impl NativeApi {
             get_engine_version,
             get_engine_profile,
             get_last_error,
+            set_weather,
         })
     }
 }

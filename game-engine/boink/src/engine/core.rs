@@ -13,7 +13,9 @@ use tracing::instrument;
 
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
-use crate::model::{Controls, VehicleState};
+use crate::model::{Controls, VehicleState, WeatherParams};
+#[cfg(feature = "legacy-native-lib")]
+use crate::native::api::NativeApi;
 use crate::version::ensure_c_api_compatible;
 
 /// Domain-level configuration of the vehicle model used by the engine.
@@ -249,6 +251,58 @@ impl Engine {
         } else {
             tracing::debug!(code = code, "boink_set_controls failed");
             Err(Error::from_code(code))
+        }
+    }
+
+    /// Updates global weather parameters used by simulation.
+    pub fn set_weather(&mut self, weather: WeatherParams) -> Result<()> {
+        let ffi_weather = sys::BoinkWeather {
+            cloudiness: weather.cloudiness,
+            temperature_c: weather.temperature_c,
+            rain_intensity: weather.rain_intensity,
+        };
+
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_weather) = api.boink_set_weather() else {
+                static WARNED_MISSING_SET_WEATHER: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_SET_WEATHER.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_set_weather symbol not found in native library; weather updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+
+            tracing::debug!(
+                cloudiness = weather.cloudiness,
+                temperature_c = weather.temperature_c,
+                rain_intensity = weather.rain_intensity,
+                "boink_set_weather (legacy dynamic symbol)"
+            );
+            let code = unsafe { set_weather(self.handle, &ffi_weather as *const _) };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(code, "boink_set_weather"));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(
+                cloudiness = weather.cloudiness,
+                temperature_c = weather.temperature_c,
+                rain_intensity = weather.rain_intensity,
+                "boink_set_weather"
+            );
+            let code = unsafe { sys::boink_set_weather(self.handle, &ffi_weather as *const _) };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(code, "boink_set_weather"))
+            }
         }
     }
 

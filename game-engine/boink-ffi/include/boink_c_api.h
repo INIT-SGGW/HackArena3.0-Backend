@@ -32,7 +32,7 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 4
+#define BOINK_C_API_VERSION_MINOR 5
 
 #define BOINK_C_API_VERSION_PATCH 0
 
@@ -246,6 +246,24 @@ typedef struct BoinkVehicleState {
    */
   Real wheel_speeds[4];
 } BoinkVehicleState;
+
+/**
+ * Represents weather parameters applied globally to the race simulation.
+ */
+typedef struct BoinkWeather {
+  /**
+   * Cloudiness in range [0.0, 1.0].
+   */
+  Real cloudiness;
+  /**
+   * Ambient temperature in Celsius.
+   */
+  Real temperature_c;
+  /**
+   * Rain intensity in range [0.0, 1.0].
+   */
+  Real rain_intensity;
+} BoinkWeather;
 
 #ifdef __cplusplus
 extern "C" {
@@ -564,6 +582,20 @@ BOINK_API int boink_set_track_position(BoinkHandle h, const struct BoinkVec3 *po
 BOINK_API int boink_read_vehicle_state(BoinkHandle h,
                                     uint64_t vehicle_id,
                                     struct BoinkVehicleState *out_state);
+
+/**
+ * Sets global weather parameters used by the simulation engine.
+ *
+ * Parameters:
+ * - `h` - handle to a valid race.
+ * - `weather` - non-null pointer to weather parameters.
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - `BOINK_ERR_INVALID_ARG` if `weather` is null.
+ * - Another error code for other failures.
+ */
+BOINK_API int boink_set_weather(BoinkHandle h, const struct BoinkWeather *weather);
 
 #ifdef __cplusplus
 }  // extern "C"

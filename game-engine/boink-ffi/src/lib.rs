@@ -13,7 +13,7 @@
 use libc::{c_char, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 4;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 5;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -97,6 +97,18 @@ pub struct BoinkControls {
     /// Negative values correspond to steering left.
     /// Positive values correspond to steering right.
     pub steer: Real,
+}
+
+/// Represents weather parameters applied globally to the race simulation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkWeather {
+    /// Cloudiness in range [0.0, 1.0].
+    pub cloudiness: Real,
+    /// Ambient temperature in Celsius.
+    pub temperature_c: Real,
+    /// Rain intensity in range [0.0, 1.0].
+    pub rain_intensity: Real,
 }
 
 /// Represents a quaternion rotation (x, y, z, w).
@@ -441,4 +453,16 @@ unsafe extern "C" {
         vehicle_id: u64,
         out_state: *mut BoinkVehicleState,
     ) -> c_int;
+
+    /// Sets global weather parameters used by the simulation engine.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `weather` - non-null pointer to weather parameters.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_INVALID_ARG` if `weather` is null.
+    /// - Another error code for other failures.
+    pub fn boink_set_weather(h: BoinkHandle, weather: *const BoinkWeather) -> c_int;
 }

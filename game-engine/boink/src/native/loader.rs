@@ -14,6 +14,9 @@ use super::error::NativeLoadError;
 pub type LegacyVersionFn = unsafe extern "C" fn(*mut u32, *mut u32, *mut u32) -> i32;
 /// Legacy counterpart of the exported string-querying functions.
 pub type LegacyStringFn = unsafe extern "C" fn(*mut std::os::raw::c_char, *mut u32) -> i32;
+/// Legacy counterpart of weather-setting function.
+pub type LegacySetWeatherFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, *const boink_sys::BoinkWeather) -> i32;
 
 /// Loads the Boink native library once and returns a reference to it.
 pub fn load_native_library() -> Result<&'static Library, NativeLoadError> {
