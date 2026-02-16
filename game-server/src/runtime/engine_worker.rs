@@ -9,8 +9,8 @@
 //!   avoiding shared mutable state and complex locking.
 
 use std::fmt;
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 
 use boink::engine::{Engine, EngineBuilder, VehicleMesh, VehicleModelConfig};
 use boink::error::Error as BoinkError;
@@ -21,13 +21,15 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
+use super::weather_sync::{
+    WEATHER_TICK_MS, WeatherSyncState, apply_weather_from_schedule, next_boundary_instant,
+};
 use crate::config::Config;
 
 use super::commands::EngineCommand;
 
 /// Maximum number of queued commands. Keep small enough to apply backpressure.
 const COMMAND_QUEUE_CAPACITY: usize = 256;
-
 /// Errors returned by the engine worker boundary.
 ///
 /// This is the stable surface for API layers; map it to `tonic::Status` in services.
@@ -125,6 +127,7 @@ impl EngineClient {
 /// Returns a client handle for issuing commands and a join handle for shutdown/monitoring.
 pub async fn spawn(
     cfg: Arc<Config>,
+    weather_sync: WeatherSyncState,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<(EngineClient, JoinHandle<()>), EngineWorkerError> {
     let (tx, mut rx) = mpsc::channel::<EngineCommand>(COMMAND_QUEUE_CAPACITY);
@@ -133,7 +136,14 @@ pub async fn spawn(
     let engine = build_engine(&cfg)?;
     let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f32;
     let handle = tokio::task::spawn_local(async move {
-        run_worker(engine, &mut rx, &mut shutdown_rx, simulation_dt_seconds).await;
+        run_worker(
+            engine,
+            &mut rx,
+            &mut shutdown_rx,
+            simulation_dt_seconds,
+            weather_sync,
+        )
+        .await;
     });
 
     Ok((client, handle))
@@ -144,10 +154,25 @@ async fn run_worker(
     rx: &mut mpsc::Receiver<EngineCommand>,
     shutdown_rx: &mut broadcast::Receiver<()>,
     simulation_dt_seconds: f32,
+    weather_sync: WeatherSyncState,
 ) {
     let mut ticker =
         tokio::time::interval(tokio::time::Duration::from_secs_f32(simulation_dt_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    let mut weather_tick = {
+        let mut weather_tick = tokio::time::interval_at(
+            next_boundary_instant(WEATHER_TICK_MS),
+            tokio::time::Duration::from_millis(WEATHER_TICK_MS as u64),
+        );
+        weather_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        tracing::info!("weather sync enabled (interval=60s)");
+        if let Err(err) = apply_weather_from_schedule(&mut engine, &weather_sync).await {
+            tracing::warn!(error = %err, "initial weather apply failed");
+        }
+        weather_tick
+    };
 
     loop {
         tokio::select! {
@@ -177,6 +202,12 @@ async fn run_worker(
                 if engine.should_close_debug() {
                     tracing::info!("engine worker: debug drawer requested close");
                     break;
+                }
+            }
+
+            _ = weather_tick.tick() => {
+                if let Err(err) = apply_weather_from_schedule(&mut engine, &weather_sync).await {
+                    tracing::warn!(error = %err, "engine worker: scheduled weather apply failed");
                 }
             }
 

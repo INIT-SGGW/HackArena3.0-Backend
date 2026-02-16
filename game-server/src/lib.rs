@@ -52,7 +52,13 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
     let (engine_shutdown_tx, engine_shutdown_rx) = broadcast::channel::<()>(16);
 
     // Start the engine worker (owns the boink wrapper).
-    let (engine, engine_task) = start_engine_worker(cfg.clone(), engine_shutdown_rx).await?;
+    let (engine, engine_task) = start_engine_worker(
+        cfg.clone(),
+        #[cfg(feature = "official")]
+        db_pool.clone(),
+        engine_shutdown_rx,
+    )
+    .await?;
 
     // Run gRPC server until shutdown.
     let active_connections = Arc::new(AtomicUsize::new(0));
@@ -92,8 +98,16 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
 /// Starts the engine worker and returns the client handle plus its task join handle.
 async fn start_engine_worker(
     cfg: Arc<Config>,
+    #[cfg(feature = "official")] official_db_pool: sqlx::PgPool,
     shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<(EngineClient, JoinHandle<()>), Box<dyn Error>> {
-    let (client, handle) = runtime::engine_worker::spawn(cfg, shutdown_rx).await?;
+    #[cfg(feature = "official")]
+    let weather_sync = runtime::weather_sync::WeatherSyncState::with_repo(
+        crate::db::repos::weather::WeatherRepo::new(official_db_pool),
+    );
+    #[cfg(not(feature = "official"))]
+    let weather_sync = runtime::weather_sync::WeatherSyncState::disabled();
+
+    let (client, handle) = runtime::engine_worker::spawn(cfg, weather_sync, shutdown_rx).await?;
     Ok((client, handle))
 }

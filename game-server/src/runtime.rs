@@ -2,3 +2,4 @@
 
 pub mod commands;
 pub mod engine_worker;
+pub mod weather_sync;
