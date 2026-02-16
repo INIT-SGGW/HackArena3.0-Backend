@@ -28,6 +28,8 @@ tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+base64 = "0.22.1"
+serde_json = "1.0.145"
 
 boink = { path = "../game-engine/boink" }
 hash-cache = { path = "../libs/hash-cache" }
