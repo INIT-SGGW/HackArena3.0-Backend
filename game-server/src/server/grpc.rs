@@ -19,6 +19,8 @@ use tonic_health::server::health_reporter;
 use tonic_web::GrpcWebLayer;
 use tower_http::trace::TraceLayer;
 
+#[cfg(feature = "official")]
+use crate::auth::auth_claims::TokenValidator;
 use crate::config::Config;
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
@@ -56,6 +58,9 @@ pub async fn serve_grpc(
         .set_serving::<WeatherAdminServiceServer<WeatherAdminServiceImpl>>()
         .await;
 
+    #[cfg(feature = "official")]
+    let token_validator = std::sync::Arc::new(TokenValidator::new());
+
     let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
     let race_impl = RaceServiceImpl::new(
         engine,
@@ -70,7 +75,7 @@ pub async fn serve_grpc(
         let weather_repo = WeatherRepo::new(official_db_pool.clone());
         (
             WeatherQueryServiceImpl::with_repo(weather_repo.clone()),
-            WeatherAdminServiceImpl::with_repo(weather_repo, cfg.env),
+            WeatherAdminServiceImpl::with_repo(weather_repo, cfg.env, token_validator.clone()),
         )
     };
 

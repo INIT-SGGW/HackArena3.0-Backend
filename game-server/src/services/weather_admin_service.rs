@@ -1,11 +1,15 @@
 //! gRPC WeatherAdminService implementation.
 
+#[cfg(feature = "official")]
+use std::sync::Arc;
+
 use proto::weather::v1::weather_admin_service_server::WeatherAdminService;
 use proto::weather::v1::{ForecastPreset, ReplaceWeatherScheduleResponse};
 use proto::weather::v1::{
     GetWeatherScheduleRequest, GetWeatherScheduleResponse, ReplaceWeatherScheduleRequest,
     SimulateForecastRequest, SimulateForecastResponse,
 };
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 use crate::config::AppEnv;
@@ -17,6 +21,8 @@ use crate::services::weather_mappers::{
 };
 
 #[cfg(feature = "official")]
+use crate::auth::auth_claims::TokenValidator;
+#[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
 
 /// WeatherAdmin service backed by global weather schedule.
@@ -24,14 +30,21 @@ use crate::db::repos::weather::WeatherRepo;
 pub struct WeatherAdminServiceImpl {
     #[cfg(feature = "official")]
     repo: Option<WeatherRepo>,
+    #[cfg(feature = "official")]
+    token_validator: Option<Arc<TokenValidator>>,
     app_env: AppEnv,
 }
 
 impl WeatherAdminServiceImpl {
     #[cfg(feature = "official")]
-    pub fn with_repo(repo: WeatherRepo, app_env: AppEnv) -> Self {
+    pub fn with_repo(
+        repo: WeatherRepo,
+        app_env: AppEnv,
+        token_validator: Arc<TokenValidator>,
+    ) -> Self {
         Self {
             repo: Some(repo),
+            token_validator: Some(token_validator),
             app_env,
         }
     }
@@ -42,6 +55,8 @@ impl Default for WeatherAdminServiceImpl {
         Self {
             #[cfg(feature = "official")]
             repo: None,
+            #[cfg(feature = "official")]
+            token_validator: None,
             app_env: AppEnv::Development,
         }
     }
@@ -51,8 +66,9 @@ impl Default for WeatherAdminServiceImpl {
 impl WeatherAdminService for WeatherAdminServiceImpl {
     async fn get_weather_schedule(
         &self,
-        _request: Request<GetWeatherScheduleRequest>,
+        request: Request<GetWeatherScheduleRequest>,
     ) -> Result<Response<GetWeatherScheduleResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
         let entries = self.load_schedule().await?;
         let entries = entries.into_iter().map(schedule_entry_to_proto).collect();
         Ok(Response::new(GetWeatherScheduleResponse { entries }))
@@ -62,6 +78,7 @@ impl WeatherAdminService for WeatherAdminServiceImpl {
         &self,
         request: Request<ReplaceWeatherScheduleRequest>,
     ) -> Result<Response<ReplaceWeatherScheduleResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
         let request = request.into_inner();
         let entries: Vec<_> = request
             .entries
@@ -80,6 +97,7 @@ impl WeatherAdminService for WeatherAdminServiceImpl {
         &self,
         request: Request<SimulateForecastRequest>,
     ) -> Result<Response<SimulateForecastResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
         let request = request.into_inner();
         let spec = request
             .spec
@@ -115,6 +133,28 @@ impl WeatherAdminService for WeatherAdminServiceImpl {
 }
 
 impl WeatherAdminServiceImpl {
+    async fn require_admin(&self, metadata: &MetadataMap) -> Result<(), Status> {
+        #[cfg(feature = "official")]
+        {
+            let validator = self.token_validator.as_ref().ok_or_else(|| {
+                Status::failed_precondition("weather admin service auth is not configured")
+            })?;
+            let is_admin = validator.is_admin(metadata).await?;
+            if !is_admin {
+                return Err(Status::permission_denied("admin role required"));
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = metadata;
+            Err(Status::unimplemented(
+                "weather admin service is available only in official backend",
+            ))
+        }
+    }
+
     async fn load_schedule(&self) -> Result<Vec<crate::domain::weather::ScheduleEntry>, Status> {
         #[cfg(feature = "official")]
         {
