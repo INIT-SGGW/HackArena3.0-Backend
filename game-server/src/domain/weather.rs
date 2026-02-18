@@ -159,8 +159,10 @@ pub fn align_start_to_preset_slot(
 
 /// Projects forecast points for requested preset from explicit start time.
 ///
-/// The projection returns points in `[start_ms, start_ms + horizon_ms)`,
-/// sampled every `step_ms`.
+/// Bucket semantics:
+/// - first point starts exactly at `start_ms`,
+/// - subsequent points are aligned to slot boundaries and then advanced by `step_ms`,
+/// - points are returned while `time <= start_ms + horizon_ms`.
 pub fn project_forecast(
     entries: &[ScheduleEntry],
     start_ms: i64,
@@ -168,26 +170,44 @@ pub fn project_forecast(
 ) -> Result<Vec<ForecastPoint>, WeatherDomainError> {
     validate_schedule(entries, UnspecifiedPolicy::AllowAnywhere)?;
     let (horizon_ms, step_ms) = preset_window(preset)?;
-
     let end_ms = start_ms
         .checked_add(horizon_ms)
         .ok_or(WeatherDomainError::TimestampOverflow)?;
 
     let mut points = Vec::new();
     let mut time_ms = start_ms;
-    while time_ms < end_ms {
+    let mut first = true;
+    while time_ms <= end_ms {
         if let Some(weather_type) = weather_type_at(entries, time_ms) {
             points.push(ForecastPoint {
                 time_ms,
                 weather_type,
             });
         }
-        time_ms = time_ms
-            .checked_add(step_ms)
-            .ok_or(WeatherDomainError::TimestampOverflow)?;
+
+        let next = if first {
+            first = false;
+            next_aligned_bucket_start(time_ms, step_ms)?
+        } else {
+            time_ms
+                .checked_add(step_ms)
+                .ok_or(WeatherDomainError::TimestampOverflow)?
+        };
+        if next > end_ms {
+            break;
+        }
+        time_ms = next;
     }
 
     Ok(points)
+}
+
+fn next_aligned_bucket_start(time_ms: i64, step_ms: i64) -> Result<i64, WeatherDomainError> {
+    let rem = time_ms.rem_euclid(step_ms);
+    let delta = if rem == 0 { step_ms } else { step_ms - rem };
+    time_ms
+        .checked_add(delta)
+        .ok_or(WeatherDomainError::TimestampOverflow)
 }
 
 fn preset_window(preset: ForecastPreset) -> Result<(i64, i64), WeatherDomainError> {

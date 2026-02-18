@@ -22,8 +22,7 @@ use tracing::error;
 use tracing::{debug, warn};
 
 use crate::domain::weather::{
-    ForecastPoint as DomainForecastPoint, ScheduleEntry, align_start_to_preset_slot,
-    project_forecast, weather_type_at,
+    ForecastPoint as DomainForecastPoint, ScheduleEntry, project_forecast, weather_type_at,
 };
 use crate::services::weather_mappers::forecast_point_to_proto;
 
@@ -139,8 +138,7 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
     ) -> Result<Response<GetForecastNowResponse>, Status> {
         let preset = extract_preset(request.into_inner())?;
         let now_ms = current_time_ms();
-        let start_ms =
-            align_start_to_preset_slot(now_ms, preset).map_err(map_domain_error_to_status)?;
+        let start_ms = now_ms;
 
         let schedule = self.current_schedule().await?;
         let points =
@@ -311,8 +309,7 @@ async fn emit_forecast_update(
     last_points: &mut Option<Vec<DomainForecastPoint>>,
 ) -> Result<(), Status> {
     let now_ms = current_time_ms();
-    let start_ms =
-        align_start_to_preset_slot(now_ms, preset).map_err(map_domain_error_to_status)?;
+    let start_ms = now_ms;
     let schedule = service.current_schedule().await?;
     let points =
         project_forecast(&schedule, start_ms, preset).map_err(map_domain_error_to_status)?;
