@@ -1,4 +1,6 @@
 //! Weather domain model and projection helpers.
+use std::cmp::Reverse;
+use std::collections::HashMap;
 
 use proto::weather::v1::{ForecastPreset, WeatherType};
 use thiserror::Error;
@@ -76,6 +78,106 @@ pub fn temperature_c_for_weather_type(weather_type: WeatherType) -> i32 {
     engine_params_for_weather_type(weather_type)
         .temperature_c
         .round() as i32
+}
+
+/// Computes rain probability for a `[start_ms, end_ms)` bucket.
+///
+/// Probability is the fraction of time where effective weather is rainy.
+#[must_use]
+pub fn rain_probability_for_window(entries: &[ScheduleEntry], start_ms: i64, end_ms: i64) -> f32 {
+    if end_ms <= start_ms {
+        return 0.0;
+    }
+    if entries.is_empty() {
+        return 0.0;
+    }
+
+    let mut rain_ms: i64 = 0;
+    let mut cursor = start_ms;
+    let mut next_idx = entries.partition_point(|entry| entry.starts_at_ms <= start_ms);
+    let mut current_type = if next_idx == 0 {
+        WeatherType::Unspecified
+    } else {
+        entries[next_idx - 1].weather_type
+    };
+
+    while cursor < end_ms {
+        let next_change = if next_idx < entries.len() {
+            entries[next_idx].starts_at_ms.min(end_ms)
+        } else {
+            end_ms
+        };
+
+        if next_change > cursor && is_rain_type(current_type) {
+            rain_ms += next_change - cursor;
+        }
+
+        if next_change >= end_ms {
+            break;
+        }
+
+        cursor = next_change;
+        current_type = entries[next_idx].weather_type;
+        next_idx += 1;
+    }
+
+    let total_ms = (end_ms - start_ms) as f32;
+    (rain_ms as f32 / total_ms).clamp(0.0, 1.0)
+}
+
+/// Computes dominant weather type for a `[start_ms, end_ms)` bucket.
+///
+/// Dominance is selected by the longest effective duration in the window.
+/// In case of ties, the type that appears earlier in the bucket is preferred.
+#[must_use]
+pub fn dominant_weather_type_for_window(
+    entries: &[ScheduleEntry],
+    start_ms: i64,
+    end_ms: i64,
+) -> WeatherType {
+    if end_ms <= start_ms || entries.is_empty() {
+        return WeatherType::Unspecified;
+    }
+
+    let mut stats: HashMap<WeatherType, (i64, i64)> = HashMap::new();
+
+    let mut cursor = start_ms;
+    let mut next_idx = entries.partition_point(|entry| entry.starts_at_ms <= start_ms);
+    let mut current_type = if next_idx == 0 {
+        WeatherType::Unspecified
+    } else {
+        entries[next_idx - 1].weather_type
+    };
+
+    while cursor < end_ms {
+        let next_change = if next_idx < entries.len() {
+            entries[next_idx].starts_at_ms.min(end_ms)
+        } else {
+            end_ms
+        };
+
+        if next_change > cursor {
+            let slot = stats.entry(current_type).or_insert((0, cursor));
+            slot.0 += next_change - cursor;
+        }
+
+        if next_change >= end_ms {
+            break;
+        }
+
+        cursor = next_change;
+        current_type = entries[next_idx].weather_type;
+        next_idx += 1;
+    }
+
+    stats
+        .into_iter()
+        .max_by_key(|(weather_type, (duration_ms, first_seen))| {
+            // Prefer longer duration, then earlier appearance, then stable enum order.
+            (*duration_ms, Reverse(*first_seen), Reverse(*weather_type))
+        })
+        .map(|(weather_type, _)| weather_type)
+        .unwrap_or(WeatherType::Unspecified)
 }
 
 #[derive(Debug, Error)]
@@ -215,6 +317,13 @@ fn next_aligned_bucket_start(time_ms: i64, step_ms: i64) -> Result<i64, WeatherD
     time_ms
         .checked_add(delta)
         .ok_or(WeatherDomainError::TimestampOverflow)
+}
+
+fn is_rain_type(weather_type: WeatherType) -> bool {
+    matches!(
+        weather_type,
+        WeatherType::LightRain | WeatherType::MediumRain | WeatherType::HeavyRain
+    )
 }
 
 fn preset_window(preset: ForecastPreset) -> Result<(i64, i64), WeatherDomainError> {

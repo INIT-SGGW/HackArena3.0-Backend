@@ -1,11 +1,12 @@
 //! Weather service mapping helpers.
 
 use prost_types::Timestamp;
-use proto::weather::v1::{ForecastPoint, WeatherScheduleEntry, WeatherType};
+use proto::weather::v1::{ForecastPoint, ForecastPreset, WeatherScheduleEntry, WeatherType};
 use tonic::Status;
 
 use crate::domain::weather::{
-    ForecastPoint as DomainForecastPoint, ScheduleEntry, temperature_c_for_weather_type,
+    ForecastPoint as DomainForecastPoint, ScheduleEntry, dominant_weather_type_for_window,
+    rain_probability_for_window, temperature_c_for_weather_type,
 };
 
 pub fn schedule_entry_to_proto(entry: ScheduleEntry) -> WeatherScheduleEntry {
@@ -28,13 +29,47 @@ pub fn schedule_entry_from_proto(entry: &WeatherScheduleEntry) -> Result<Schedul
     })
 }
 
-pub fn forecast_point_to_proto(point: DomainForecastPoint) -> ForecastPoint {
-    ForecastPoint {
-        time: Some(ms_to_timestamp(point.time_ms)),
-        r#type: point.weather_type as i32,
-        // TODO(weather): replace with proper probability model.
-        rain_probability: 0.0,
-        temperature_c: temperature_c_for_weather_type(point.weather_type),
+pub fn forecast_points_to_proto(
+    points: &[DomainForecastPoint],
+    schedule: &[ScheduleEntry],
+    preset: ForecastPreset,
+) -> Result<Vec<ForecastPoint>, Status> {
+    let step_ms = preset_step_ms(preset)?;
+    let mut out = Vec::with_capacity(points.len());
+
+    for (idx, point) in points.iter().enumerate() {
+        let bucket_end_ms = if let Some(next) = points.get(idx + 1) {
+            next.time_ms
+        } else {
+            point
+                .time_ms
+                .checked_add(step_ms)
+                .ok_or_else(|| Status::out_of_range("forecast bucket end overflow"))?
+        };
+
+        let rain_probability = rain_probability_for_window(schedule, point.time_ms, bucket_end_ms);
+        let dominant_type =
+            dominant_weather_type_for_window(schedule, point.time_ms, bucket_end_ms);
+        out.push(ForecastPoint {
+            time: Some(ms_to_timestamp(point.time_ms)),
+            r#type: dominant_type as i32,
+            rain_probability,
+            temperature_c: temperature_c_for_weather_type(dominant_type),
+        });
+    }
+
+    Ok(out)
+}
+
+fn preset_step_ms(preset: ForecastPreset) -> Result<i64, Status> {
+    const MINUTE_MS: i64 = 60 * 1000;
+    const HOUR_MS: i64 = 60 * MINUTE_MS;
+    match preset {
+        ForecastPreset::ForecastPreset1HourStep15Min => Ok(15 * MINUTE_MS),
+        ForecastPreset::ForecastPreset12HoursStep1Hour => Ok(HOUR_MS),
+        ForecastPreset::Unspecified => Err(Status::invalid_argument(
+            "forecast preset must be specified",
+        )),
     }
 }
 

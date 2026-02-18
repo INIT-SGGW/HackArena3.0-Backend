@@ -25,7 +25,7 @@ use crate::domain::weather::{
     ForecastPoint as DomainForecastPoint, ScheduleEntry, project_forecast,
     temperature_c_for_weather_type, weather_type_at,
 };
-use crate::services::weather_mappers::forecast_point_to_proto;
+use crate::services::weather_mappers::forecast_points_to_proto;
 
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
@@ -145,7 +145,7 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
         let schedule = self.current_schedule().await?;
         let points =
             project_forecast(&schedule, start_ms, preset).map_err(map_domain_error_to_status)?;
-        let response_points = points.into_iter().map(forecast_point_to_proto).collect();
+        let response_points = forecast_points_to_proto(&points, &schedule, preset)?;
 
         Ok(Response::new(GetForecastNowResponse {
             points: response_points,
@@ -323,7 +323,7 @@ async fn emit_forecast_update(
     *last_points = Some(points.clone());
 
     let event = ForecastUpdateEvent {
-        points: points.into_iter().map(forecast_point_to_proto).collect(),
+        points: forecast_points_to_proto(&points, &schedule, preset)?,
     };
 
     tx.send(Ok(event))

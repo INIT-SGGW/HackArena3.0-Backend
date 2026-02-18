@@ -17,7 +17,7 @@ use crate::domain::weather::{
     WeatherDomainError, project_forecast, unspecified_policy_for_env, validate_schedule,
 };
 use crate::services::weather_mappers::{
-    forecast_point_to_proto, schedule_entry_from_proto, schedule_entry_to_proto, timestamp_to_ms,
+    forecast_points_to_proto, schedule_entry_from_proto, schedule_entry_to_proto, timestamp_to_ms,
 };
 
 #[cfg(feature = "official")]
@@ -127,7 +127,7 @@ impl WeatherAdminService for WeatherAdminServiceImpl {
         // TODO(weather): support stochastic projection based on spec.stochastic/spec.seed.
         let points =
             project_forecast(&entries, start_ms, preset).map_err(map_domain_error_to_status)?;
-        let points = points.into_iter().map(forecast_point_to_proto).collect();
+        let points = forecast_points_to_proto(&points, &entries, preset)?;
         Ok(Response::new(SimulateForecastResponse { points }))
     }
 }
