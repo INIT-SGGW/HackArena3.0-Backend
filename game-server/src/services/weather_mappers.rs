@@ -4,7 +4,9 @@ use prost_types::Timestamp;
 use proto::weather::v1::{ForecastPoint, WeatherScheduleEntry, WeatherType};
 use tonic::Status;
 
-use crate::domain::weather::{ForecastPoint as DomainForecastPoint, ScheduleEntry};
+use crate::domain::weather::{
+    ForecastPoint as DomainForecastPoint, ScheduleEntry, temperature_c_for_weather_type,
+};
 
 pub fn schedule_entry_to_proto(entry: ScheduleEntry) -> WeatherScheduleEntry {
     WeatherScheduleEntry {
@@ -32,6 +34,7 @@ pub fn forecast_point_to_proto(point: DomainForecastPoint) -> ForecastPoint {
         r#type: point.weather_type as i32,
         // TODO(weather): replace with proper probability model.
         rain_probability: 0.0,
+        temperature_c: temperature_c_for_weather_type(point.weather_type),
     }
 }
 

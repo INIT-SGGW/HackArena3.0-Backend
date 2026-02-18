@@ -22,7 +22,8 @@ use tracing::error;
 use tracing::{debug, warn};
 
 use crate::domain::weather::{
-    ForecastPoint as DomainForecastPoint, ScheduleEntry, project_forecast, weather_type_at,
+    ForecastPoint as DomainForecastPoint, ScheduleEntry, project_forecast,
+    temperature_c_for_weather_type, weather_type_at,
 };
 use crate::services::weather_mappers::forecast_point_to_proto;
 
@@ -85,6 +86,7 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
         Ok(Response::new(GetWeatherNowResponse {
             now: Some(WeatherNow {
                 r#type: weather_type as i32,
+                temperature_c: temperature_c_for_weather_type(weather_type),
             }),
         }))
     }
@@ -294,6 +296,7 @@ async fn emit_weather_update(
     let event = WeatherUpdateEvent {
         now: Some(WeatherNow {
             r#type: weather_type as i32,
+            temperature_c: temperature_c_for_weather_type(weather_type),
         }),
     };
 

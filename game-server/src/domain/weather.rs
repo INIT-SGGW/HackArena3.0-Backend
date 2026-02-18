@@ -71,6 +71,13 @@ pub fn engine_params_for_weather_type(weather_type: WeatherType) -> EngineWeathe
     }
 }
 
+/// Returns air temperature (C) for a weather type, rounded to whole degrees.
+pub fn temperature_c_for_weather_type(weather_type: WeatherType) -> i32 {
+    engine_params_for_weather_type(weather_type)
+        .temperature_c
+        .round() as i32
+}
+
 #[derive(Debug, Error)]
 pub enum WeatherDomainError {
     #[error("forecast preset must be specified")]
