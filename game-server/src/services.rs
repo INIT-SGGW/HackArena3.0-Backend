@@ -7,3 +7,4 @@ pub mod race_service;
 pub mod weather_admin_service;
 mod weather_mappers;
 pub mod weather_query_service;
+mod weather_stochastic;

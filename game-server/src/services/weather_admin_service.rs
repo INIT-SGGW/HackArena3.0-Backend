@@ -9,6 +9,7 @@ use proto::weather::v1::{
     GetWeatherScheduleRequest, GetWeatherScheduleResponse, ReplaceWeatherScheduleRequest,
     SimulateForecastRequest, SimulateForecastResponse,
 };
+use rand::SeedableRng;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
@@ -19,6 +20,7 @@ use crate::domain::weather::{
 use crate::services::weather_mappers::{
     forecast_points_to_proto, schedule_entry_from_proto, schedule_entry_to_proto, timestamp_to_ms,
 };
+use crate::services::weather_stochastic::stochasticize_forecast_points;
 
 #[cfg(feature = "official")]
 use crate::auth::auth_claims::TokenValidator;
@@ -124,10 +126,16 @@ impl WeatherAdminService for WeatherAdminServiceImpl {
         validate_schedule(&entries, unspecified_policy_for_env(self.app_env))
             .map_err(map_domain_error_to_status)?;
 
-        // TODO(weather): support stochastic projection based on spec.stochastic/spec.seed.
         let points =
             project_forecast(&entries, start_ms, preset).map_err(map_domain_error_to_status)?;
-        let points = forecast_points_to_proto(&points, &entries, preset)?;
+        let mut points = forecast_points_to_proto(&points, &entries, preset)?;
+        if spec.stochastic {
+            let mut rng = spec
+                .seed
+                .map(rand::rngs::StdRng::seed_from_u64)
+                .unwrap_or_else(rand::rngs::StdRng::from_entropy);
+            points = stochasticize_forecast_points(&points, &[], preset, start_ms, &mut rng, false);
+        }
         Ok(Response::new(SimulateForecastResponse { points }))
     }
 }

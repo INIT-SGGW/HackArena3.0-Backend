@@ -7,9 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use proto::weather::v1::weather_query_service_server::WeatherQueryService;
 use proto::weather::v1::{
-    ForecastPreset, ForecastUpdateEvent, GetForecastNowRequest, GetForecastNowResponse,
-    GetWeatherNowRequest, GetWeatherNowResponse, StreamForecastUpdatesRequest,
-    StreamWeatherUpdatesRequest, WeatherNow, WeatherType, WeatherUpdateEvent,
+    ForecastPoint as ProtoForecastPoint, ForecastPreset, ForecastUpdateEvent,
+    GetForecastNowRequest, GetForecastNowResponse, GetWeatherNowRequest, GetWeatherNowResponse,
+    StreamForecastUpdatesRequest, StreamWeatherUpdatesRequest, WeatherNow, WeatherType,
+    WeatherUpdateEvent,
 };
 use tokio::sync::mpsc;
 #[cfg(feature = "official")]
@@ -21,18 +22,19 @@ use tonic::{Request, Response, Status};
 use tracing::error;
 use tracing::{debug, warn};
 
-use crate::domain::weather::{
-    ForecastPoint as DomainForecastPoint, ScheduleEntry, project_forecast,
-    temperature_c_for_weather_type, weather_type_at,
-};
+#[cfg(feature = "official")]
+use crate::domain::weather::project_forecast;
+use crate::domain::weather::{ScheduleEntry, temperature_c_for_weather_type, weather_type_at};
+#[cfg(feature = "official")]
 use crate::services::weather_mappers::forecast_points_to_proto;
+#[cfg(feature = "official")]
+use crate::services::weather_stochastic::stochasticize_forecast_points;
 
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
 
-const SECOND_MS: i64 = 1_000;
-const MINUTE_MS: i64 = 60 * SECOND_MS;
-const FIFTEEN_MIN_MS: i64 = 15 * MINUTE_MS;
+const MINUTE_MS: i64 = 60 * 1_000;
+const STREAM_CHANNEL_CAPACITY: usize = 16;
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 /// WeatherQuery service backed by global weather schedule.
@@ -47,6 +49,8 @@ struct WeatherQueryInner {
     repo: WeatherRepo,
     schedule_cache: RwLock<CachedSchedule>,
     refresh_guard: Mutex<()>,
+    forecast_cache: RwLock<CachedForecasts>,
+    forecast_refresh_guard: Mutex<()>,
 }
 
 #[cfg(feature = "official")]
@@ -56,6 +60,21 @@ struct CachedSchedule {
     refreshed_at_ms: Option<i64>,
 }
 
+#[cfg(feature = "official")]
+#[derive(Default, Clone)]
+struct CachedForecasts {
+    one_hour: CachedForecast,
+    twelve_hours: CachedForecast,
+}
+
+#[cfg(feature = "official")]
+#[derive(Default, Clone)]
+struct CachedForecast {
+    points: Vec<ProtoForecastPoint>,
+    minute_slot: Option<i64>,
+    schedule_refreshed_at_ms: Option<i64>,
+}
+
 impl WeatherQueryServiceImpl {
     #[cfg(feature = "official")]
     pub fn with_repo(repo: WeatherRepo) -> Self {
@@ -63,6 +82,8 @@ impl WeatherQueryServiceImpl {
             repo,
             schedule_cache: RwLock::new(CachedSchedule::default()),
             refresh_guard: Mutex::new(()),
+            forecast_cache: RwLock::new(CachedForecasts::default()),
+            forecast_refresh_guard: Mutex::new(()),
         });
 
         tokio::spawn(run_cache_refresh_loop(inner.clone()));
@@ -100,7 +121,7 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
         let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
 
         let service = self.clone();
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
         tokio::spawn(async move {
             debug!(stream_id, peer = ?peer_addr, "weather stream started");
             let mut last_weather_type: Option<WeatherType> = None;
@@ -139,17 +160,8 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
         request: Request<GetForecastNowRequest>,
     ) -> Result<Response<GetForecastNowResponse>, Status> {
         let preset = extract_preset(request.into_inner())?;
-        let now_ms = current_time_ms();
-        let start_ms = now_ms;
-
-        let schedule = self.current_schedule().await?;
-        let points =
-            project_forecast(&schedule, start_ms, preset).map_err(map_domain_error_to_status)?;
-        let response_points = forecast_points_to_proto(&points, &schedule, preset)?;
-
-        Ok(Response::new(GetForecastNowResponse {
-            points: response_points,
-        }))
+        let points = self.current_forecast(preset).await?;
+        Ok(Response::new(GetForecastNowResponse { points }))
     }
 
     async fn stream_forecast_updates(
@@ -165,14 +177,14 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
         let _ = self.current_schedule().await?;
 
         let service = self.clone();
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
         tokio::spawn(async move {
             debug!(stream_id, peer = ?peer_addr, preset = ?preset, "forecast stream started");
-            let mut last_points: Option<Vec<DomainForecastPoint>> = None;
+            let mut last_points: Option<Vec<ProtoForecastPoint>> = None;
 
             let mut ticker = tokio::time::interval_at(
-                next_boundary_instant(FIFTEEN_MIN_MS),
-                Duration::from_millis(FIFTEEN_MIN_MS as u64),
+                next_boundary_instant(MINUTE_MS),
+                Duration::from_millis(MINUTE_MS as u64),
             );
 
             if let Err(status) = emit_forecast_update(&service, preset, &tx, &mut last_points).await
@@ -238,6 +250,51 @@ impl WeatherQueryServiceImpl {
             ))
         }
     }
+
+    async fn current_forecast(
+        &self,
+        preset: ForecastPreset,
+    ) -> Result<Vec<ProtoForecastPoint>, Status> {
+        #[cfg(feature = "official")]
+        {
+            let inner = self.inner.as_ref().ok_or_else(|| {
+                Status::failed_precondition("weather query service is not configured")
+            })?;
+            let now_ms = current_minute_start_ms();
+            let schedule_refreshed_at_ms =
+                ensure_schedule_cache_fresh(inner).await.map_err(|err| {
+                    Status::internal(format!("failed to load weather schedule: {err}"))
+                })?;
+
+            {
+                let read = inner.forecast_cache.read().await;
+                if let Some(cached) = cached_forecast_for_preset(&read, preset) {
+                    if is_forecast_cache_fresh(cached, schedule_refreshed_at_ms, now_ms) {
+                        return Ok(cached.points.clone());
+                    }
+                }
+            }
+
+            refresh_forecast_singleflight(inner, preset, now_ms)
+                .await
+                .map_err(|err| {
+                    Status::internal(format!("failed to compute weather forecast: {err}"))
+                })?;
+
+            let read = inner.forecast_cache.read().await;
+            let cached = cached_forecast_for_preset(&read, preset)
+                .ok_or_else(|| Status::invalid_argument("forecast preset must be specified"))?;
+            return Ok(cached.points.clone());
+        }
+
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = preset;
+            Err(Status::unimplemented(
+                "weather query service is available only in official backend",
+            ))
+        }
+    }
 }
 
 #[cfg(feature = "official")]
@@ -265,6 +322,80 @@ async fn refresh_cache_singleflight(inner: &WeatherQueryInner) -> anyhow::Result
 }
 
 #[cfg(feature = "official")]
+async fn ensure_schedule_cache_fresh(inner: &WeatherQueryInner) -> anyhow::Result<Option<i64>> {
+    {
+        let read = inner.schedule_cache.read().await;
+        if !read.entries.is_empty() && !is_cache_stale(read.refreshed_at_ms) {
+            return Ok(read.refreshed_at_ms);
+        }
+    }
+
+    refresh_cache_singleflight(inner).await?;
+    let read = inner.schedule_cache.read().await;
+    Ok(read.refreshed_at_ms)
+}
+
+#[cfg(feature = "official")]
+async fn refresh_forecast_singleflight(
+    inner: &WeatherQueryInner,
+    preset: ForecastPreset,
+    now_ms: i64,
+) -> anyhow::Result<()> {
+    let _guard = inner.forecast_refresh_guard.lock().await;
+    let schedule_refreshed_at_ms = ensure_schedule_cache_fresh(inner).await?;
+
+    {
+        let read = inner.forecast_cache.read().await;
+        if let Some(cached) = cached_forecast_for_preset(&read, preset) {
+            if is_forecast_cache_fresh(cached, schedule_refreshed_at_ms, now_ms) {
+                return Ok(());
+            }
+        } else {
+            anyhow::bail!("unsupported forecast preset: {preset:?}");
+        }
+    }
+
+    refresh_forecast_once(inner, preset, now_ms, schedule_refreshed_at_ms).await
+}
+
+#[cfg(feature = "official")]
+async fn refresh_forecast_once(
+    inner: &WeatherQueryInner,
+    preset: ForecastPreset,
+    now_ms: i64,
+    schedule_refreshed_at_ms: Option<i64>,
+) -> anyhow::Result<()> {
+    let schedule = {
+        let read = inner.schedule_cache.read().await;
+        read.entries.clone()
+    };
+
+    let points = project_forecast(&schedule, now_ms, preset)
+        .map_err(|err| anyhow::anyhow!("forecast projection failed: {err}"))?;
+    let baseline_points = forecast_points_to_proto(&points, &schedule, preset)
+        .map_err(|err| anyhow::anyhow!("forecast mapping failed: {err}"))?;
+
+    let mut write = inner.forecast_cache.write().await;
+    let cached = cached_forecast_for_preset_mut(&mut write, preset)
+        .ok_or_else(|| anyhow::anyhow!("unsupported forecast preset: {preset:?}"))?;
+
+    let same_schedule_snapshot = cached.schedule_refreshed_at_ms == schedule_refreshed_at_ms;
+    let prev_points = std::mem::take(&mut cached.points);
+    let mut rng = rand::thread_rng();
+    cached.points = stochasticize_forecast_points(
+        &baseline_points,
+        &prev_points,
+        preset,
+        now_ms,
+        &mut rng,
+        same_schedule_snapshot,
+    );
+    cached.minute_slot = Some(now_ms.div_euclid(MINUTE_MS));
+    cached.schedule_refreshed_at_ms = schedule_refreshed_at_ms;
+    Ok(())
+}
+
+#[cfg(feature = "official")]
 async fn run_cache_refresh_loop(inner: Arc<WeatherQueryInner>) {
     let mut ticker = tokio::time::interval_at(
         next_boundary_instant(MINUTE_MS),
@@ -274,8 +405,19 @@ async fn run_cache_refresh_loop(inner: Arc<WeatherQueryInner>) {
         ticker.tick().await;
         if let Err(err) = refresh_cache_singleflight(&inner).await {
             error!(error = %err, "weather cache refresh failed");
-        } else {
-            debug!("weather cache refreshed");
+            continue;
+        }
+
+        let now_ms = current_minute_start_ms();
+        for preset in [
+            ForecastPreset::ForecastPreset1HourStep15Min,
+            ForecastPreset::ForecastPreset12HoursStep1Hour,
+        ] {
+            if let Err(err) = refresh_forecast_singleflight(&inner, preset, now_ms).await {
+                error!(error = %err, preset = ?preset, "weather forecast cache refresh failed");
+            } else {
+                debug!(preset = ?preset, "weather forecast cache refreshed");
+            }
         }
     }
 }
@@ -309,22 +451,15 @@ async fn emit_forecast_update(
     service: &WeatherQueryServiceImpl,
     preset: ForecastPreset,
     tx: &mpsc::Sender<Result<ForecastUpdateEvent, Status>>,
-    last_points: &mut Option<Vec<DomainForecastPoint>>,
+    last_points: &mut Option<Vec<ProtoForecastPoint>>,
 ) -> Result<(), Status> {
-    let now_ms = current_time_ms();
-    let start_ms = now_ms;
-    let schedule = service.current_schedule().await?;
-    let points =
-        project_forecast(&schedule, start_ms, preset).map_err(map_domain_error_to_status)?;
-
+    let points = service.current_forecast(preset).await?;
     if last_points.as_ref() == Some(&points) {
         return Ok(());
     }
     *last_points = Some(points.clone());
 
-    let event = ForecastUpdateEvent {
-        points: forecast_points_to_proto(&points, &schedule, preset)?,
-    };
+    let event = ForecastUpdateEvent { points };
 
     tx.send(Ok(event))
         .await
@@ -364,6 +499,45 @@ async fn handle_forecast_stream_error(
     let _ = tx.send(Err(status)).await;
 }
 
+#[cfg(feature = "official")]
+fn cached_forecast_for_preset(
+    cache: &CachedForecasts,
+    preset: ForecastPreset,
+) -> Option<&CachedForecast> {
+    match preset {
+        ForecastPreset::ForecastPreset1HourStep15Min => Some(&cache.one_hour),
+        ForecastPreset::ForecastPreset12HoursStep1Hour => Some(&cache.twelve_hours),
+        ForecastPreset::Unspecified => None,
+    }
+}
+
+#[cfg(feature = "official")]
+fn cached_forecast_for_preset_mut(
+    cache: &mut CachedForecasts,
+    preset: ForecastPreset,
+) -> Option<&mut CachedForecast> {
+    match preset {
+        ForecastPreset::ForecastPreset1HourStep15Min => Some(&mut cache.one_hour),
+        ForecastPreset::ForecastPreset12HoursStep1Hour => Some(&mut cache.twelve_hours),
+        ForecastPreset::Unspecified => None,
+    }
+}
+
+#[cfg(feature = "official")]
+fn is_forecast_cache_fresh(
+    cached: &CachedForecast,
+    schedule_refreshed_at_ms: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    if cached.points.is_empty() {
+        return false;
+    }
+    if cached.minute_slot != Some(now_ms.div_euclid(MINUTE_MS)) {
+        return false;
+    }
+    cached.schedule_refreshed_at_ms == schedule_refreshed_at_ms
+}
+
 fn next_boundary_instant(step_ms: i64) -> Instant {
     let now_ms = current_time_ms();
     let next_ms = (now_ms.div_euclid(step_ms) + 1) * step_ms;
@@ -390,24 +564,16 @@ fn extract_preset_from_spec(
     Ok(preset)
 }
 
-fn map_domain_error_to_status(err: crate::domain::weather::WeatherDomainError) -> Status {
-    match err {
-        crate::domain::weather::WeatherDomainError::UnspecifiedPreset
-        | crate::domain::weather::WeatherDomainError::UnspecifiedNotTail { .. }
-        | crate::domain::weather::WeatherDomainError::NonIncreasingTimestamp { .. } => {
-            Status::invalid_argument(err.to_string())
-        }
-        crate::domain::weather::WeatherDomainError::TimestampOverflow => {
-            Status::out_of_range(err.to_string())
-        }
-    }
-}
-
 fn current_time_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn current_minute_start_ms() -> i64 {
+    let now_ms = current_time_ms();
+    now_ms - now_ms.rem_euclid(MINUTE_MS)
 }
 
 #[cfg(feature = "official")]
@@ -426,4 +592,4 @@ fn peer_addr_from_request<T>(request: &Request<T>) -> Option<std::net::SocketAdd
 }
 
 #[cfg(feature = "official")]
-const CACHE_MAX_STALENESS_MS: i64 = 5_000;
+const CACHE_MAX_STALENESS_MS: i64 = MINUTE_MS;
