@@ -25,6 +25,8 @@ use tower_http::trace::TraceLayer;
 use crate::auth::auth_claims::TokenValidator;
 use crate::config::Config;
 #[cfg(feature = "official")]
+use crate::db::repos::race_config::RaceConfigRepo;
+#[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
@@ -79,15 +81,15 @@ pub async fn serve_grpc(
     );
 
     #[cfg(feature = "official")]
-    let (weather_query_impl, weather_admin_impl) = {
+    let (weather_query_impl, weather_admin_impl, race_config_admin_impl) = {
         let weather_repo = WeatherRepo::new(official_db_pool.clone());
+        let race_config_repo = RaceConfigRepo::new(official_db_pool.clone());
         (
             WeatherQueryServiceImpl::with_repo(weather_repo.clone()),
             WeatherAdminServiceImpl::with_repo(weather_repo, cfg.env, token_validator.clone()),
+            RaceConfigAdminServiceImpl::with_repo(race_config_repo),
         )
     };
-    #[cfg(feature = "official")]
-    let race_config_admin_impl = RaceConfigAdminServiceImpl;
 
     #[cfg(not(feature = "official"))]
     let weather_query_impl = WeatherQueryServiceImpl::default();

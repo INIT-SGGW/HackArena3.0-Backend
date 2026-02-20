@@ -50,4 +50,5 @@ tokio-stream = { version = "0.1.17", features = ["net"] }
 tonic-health = "0.14.2"
 tonic-web = "0.14.2"
 tower-http = { version = "0.6.6", features = ["cors", "trace"] }
+uuid = { version = "1.21.0", features = ["v5"] }
 sqlx = { version = "0.8.4", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros"], optional = true }
