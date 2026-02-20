@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT race_id, race_name, starts_at_ms, ends_at_ms, map_id, map_version, start_placement_mode AS \"start_placement_mode: DbStartPlacementMode\", points_multiplier_fixed, time_of_day_preset AS \"time_of_day_preset: DbTimeOfDayPreset\" FROM race_config_schedule ORDER BY starts_at_ms ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "race_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "race_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "starts_at_ms",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "ends_at_ms",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "map_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "map_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "start_placement_mode: DbStartPlacementMode",
+        "type_info": {
+          "Custom": {
+            "name": "start_placement_mode",
+            "kind": {
+              "Enum": [
+                "random",
+                "scoreboard",
+                "reversed_scoreboard"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "points_multiplier_fixed",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 8,
+        "name": "time_of_day_preset: DbTimeOfDayPreset",
+        "type_info": {
+          "Custom": {
+            "name": "time_of_day_preset",
+            "kind": {
+              "Enum": [
+                "morning",
+                "noon",
+                "evening",
+                "night"
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "65eb0bf89af3a70d10b35fb35fa627d92933eba7fdd17be1a0e41640ed9526b5"
+}
