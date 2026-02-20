@@ -8,8 +8,8 @@ use bytes::{Bytes, BytesMut};
 use hash_cache::HashCache;
 use proto::race::v1::asset_service_server::AssetService;
 use proto::race::v1::{
-    GetTrackMetaRequest, GetTrackMetaResponse, GetTrackRequest, GetTrackResponse, MimeType,
-    TrackMeta,
+    GetTrackMetaRequest, GetTrackMetaResponse, GetTrackRequest, GetTrackResponse, ListMapsRequest,
+    ListMapsResponse, MapCatalogEntry, MimeType, TrackMeta,
 };
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
@@ -67,6 +67,56 @@ impl AssetServiceImpl {
 
 #[tonic::async_trait]
 impl AssetService for AssetServiceImpl {
+    async fn list_maps(
+        &self,
+        _request: Request<ListMapsRequest>,
+    ) -> Result<Response<ListMapsResponse>, Status> {
+        let mut maps = Vec::new();
+        let mut entries = fs::read_dir(&self.tracks_dir).await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                path = %self.tracks_dir.display(),
+                "failed to list tracks directory"
+            );
+            Status::internal("failed to list maps")
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                path = %self.tracks_dir.display(),
+                "failed to read tracks directory entry"
+            );
+            Status::internal("failed to list maps")
+        })? {
+            let path = entry.path();
+            let is_glb = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("glb"));
+            if !is_glb {
+                continue;
+            }
+
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if Self::sanitize_id(stem).is_err() {
+                tracing::warn!(map_id = %stem, "skipping invalid map id");
+                continue;
+            }
+
+            maps.push(MapCatalogEntry {
+                map_id: stem.to_string(),
+                display_name: stem.to_string(),
+                version: 1,
+            });
+        }
+
+        maps.sort_by(|a, b| a.map_id.cmp(&b.map_id));
+        Ok(Response::new(ListMapsResponse { maps }))
+    }
+
     async fn get_track_meta(
         &self,
         request: Request<GetTrackMetaRequest>,
