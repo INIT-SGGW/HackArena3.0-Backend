@@ -1,13 +1,19 @@
 //! gRPC RaceConfigAdminService implementation.
 
+#[cfg(feature = "official")]
+use std::sync::Arc;
+
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminService;
 use proto::race::v1::{
     GetRaceConfigScheduleRequest, GetRaceConfigScheduleResponse, ReplaceRaceConfigScheduleRequest,
     ReplaceRaceConfigScheduleResponse,
 };
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+#[cfg(feature = "official")]
+use crate::auth::auth_claims::TokenValidator;
 use crate::domain::race_config::{
     RaceConfigDomainError, RaceConfigInput, validate_draft_schedule, validate_schedule,
 };
@@ -23,12 +29,17 @@ use crate::db::repos::race_config::RaceConfigRepo;
 pub struct RaceConfigAdminServiceImpl {
     #[cfg(feature = "official")]
     repo: Option<RaceConfigRepo>,
+    #[cfg(feature = "official")]
+    token_validator: Option<Arc<TokenValidator>>,
 }
 
 impl RaceConfigAdminServiceImpl {
     #[cfg(feature = "official")]
-    pub fn with_repo(repo: RaceConfigRepo) -> Self {
-        Self { repo: Some(repo) }
+    pub fn with_repo(repo: RaceConfigRepo, token_validator: Arc<TokenValidator>) -> Self {
+        Self {
+            repo: Some(repo),
+            token_validator: Some(token_validator),
+        }
     }
 }
 
@@ -37,6 +48,8 @@ impl Default for RaceConfigAdminServiceImpl {
         Self {
             #[cfg(feature = "official")]
             repo: None,
+            #[cfg(feature = "official")]
+            token_validator: None,
         }
     }
 }
@@ -45,8 +58,9 @@ impl Default for RaceConfigAdminServiceImpl {
 impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
     async fn get_race_config_schedule(
         &self,
-        _request: Request<GetRaceConfigScheduleRequest>,
+        request: Request<GetRaceConfigScheduleRequest>,
     ) -> Result<Response<GetRaceConfigScheduleResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
         let entries = self.load_schedule().await?;
         let races = entries.into_iter().map(schedule_entry_to_proto).collect();
         Ok(Response::new(GetRaceConfigScheduleResponse { races }))
@@ -56,6 +70,7 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
         &self,
         request: Request<ReplaceRaceConfigScheduleRequest>,
     ) -> Result<Response<ReplaceRaceConfigScheduleResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
         let request = request.into_inner();
 
         let draft_entries: Vec<_> = request
@@ -78,6 +93,28 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
 }
 
 impl RaceConfigAdminServiceImpl {
+    async fn require_admin(&self, metadata: &MetadataMap) -> Result<(), Status> {
+        #[cfg(feature = "official")]
+        {
+            let validator = self.token_validator.as_ref().ok_or_else(|| {
+                Status::failed_precondition("race config admin service auth is not configured")
+            })?;
+            let is_admin = validator.is_admin(metadata).await?;
+            if !is_admin {
+                return Err(Status::permission_denied("admin role required"));
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = metadata;
+            Err(Status::unimplemented(
+                "race config admin service is available only in official backend",
+            ))
+        }
+    }
+
     async fn load_schedule(
         &self,
     ) -> Result<Vec<crate::domain::race_config::ScheduleEntry>, Status> {
