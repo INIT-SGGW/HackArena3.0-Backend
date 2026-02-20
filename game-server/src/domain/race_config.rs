@@ -1,0 +1,1 @@
+//! Race config domain scaffold.

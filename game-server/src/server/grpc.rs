@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proto::race::v1::asset_service_server::AssetServiceServer;
+#[cfg(feature = "official")]
+use proto::race::v1::race_config_admin_service_server::RaceConfigAdminServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
 #[cfg(feature = "official")]
 use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
@@ -26,6 +28,8 @@ use crate::config::Config;
 use crate::db::repos::weather::WeatherRepo;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
+#[cfg(feature = "official")]
+use crate::services::race_config_admin_service::RaceConfigAdminServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::weather_admin_service::WeatherAdminServiceImpl;
@@ -57,6 +61,10 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<WeatherAdminServiceServer<WeatherAdminServiceImpl>>()
         .await;
+    #[cfg(feature = "official")]
+    health_reporter
+        .set_serving::<RaceConfigAdminServiceServer<RaceConfigAdminServiceImpl>>()
+        .await;
 
     #[cfg(feature = "official")]
     let token_validator = std::sync::Arc::new(TokenValidator::new());
@@ -78,6 +86,8 @@ pub async fn serve_grpc(
             WeatherAdminServiceImpl::with_repo(weather_repo, cfg.env, token_validator.clone()),
         )
     };
+    #[cfg(feature = "official")]
+    let race_config_admin_impl = RaceConfigAdminServiceImpl;
 
     #[cfg(not(feature = "official"))]
     let weather_query_impl = WeatherQueryServiceImpl::default();
@@ -126,6 +136,8 @@ pub async fn serve_grpc(
 
     #[cfg(feature = "official")]
     let server = server.add_service(WeatherAdminServiceServer::new(weather_admin_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(RaceConfigAdminServiceServer::new(race_config_admin_impl));
 
     server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))
