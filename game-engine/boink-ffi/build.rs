@@ -56,5 +56,5 @@ fn main() {
     file.write_all(fixed.as_bytes())
         .expect("write header file failed");
 
-    println!("cargo:warning=Generated header: {}", out_path.display());
+    eprintln!("[boink-ffi build] generated header: {}", out_path.display());
 }

@@ -17,12 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !use_local {
         println!("cargo:rustc-cfg=proto_mode_published");
-        println!("cargo:warning=mode=PUBLISHED");
+        eprintln!("[proto build] mode=PUBLISHED");
         return Ok(());
     }
 
     println!("cargo:rustc-cfg=proto_mode_local");
-    println!("cargo:warning=mode=LOCAL");
+    eprintln!("[proto build] mode=LOCAL");
 
     let proto_root = PathBuf::from(env::var("PROTO_PATH").map_err(
         |_| "PROTO_PATH is required in proto-local mode. Set env to the root of your proto files",
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("cargo:warning=generated {} files", files.len());
+    eprintln!("[proto build] generated {} files", files.len());
 
     Ok(())
 }
