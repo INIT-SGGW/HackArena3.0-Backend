@@ -32,9 +32,9 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 5
+#define BOINK_C_API_VERSION_MINOR 6
 
-#define BOINK_C_API_VERSION_PATCH 1
+#define BOINK_C_API_VERSION_PATCH 0
 
 /**
  * Indicates successful operation.
@@ -109,6 +109,86 @@ typedef struct BoinkVec3 {
    */
   Real z;
 } BoinkVec3;
+
+/**
+ * Represents one static centerline sample of a race track.
+ *
+ * Returned as part of `BoinkTrackData` by `boink_get_track_data`.
+ */
+typedef struct BoinkCenterlineSample {
+  /**
+   * Arc-length position along the lap in meters.
+   */
+  double s_m;
+  /**
+   * World-space centerline position.
+   */
+  struct BoinkVec3 position;
+  /**
+   * Track-forward unit vector.
+   */
+  struct BoinkVec3 tangent;
+  /**
+   * Track-local up unit vector.
+   */
+  struct BoinkVec3 normal;
+  /**
+   * Track-right unit vector.
+   */
+  struct BoinkVec3 right;
+  /**
+   * Drivable half-width to track-left from centerline, meters.
+   */
+  Real left_width_m;
+  /**
+   * Drivable half-width to track-right from centerline, meters.
+   */
+  Real right_width_m;
+  /**
+   * Signed centerline curvature [1/m].
+   */
+  Real curvature_1pm;
+  /**
+   * Longitudinal slope angle in radians.
+   */
+  Real grade_rad;
+  /**
+   * Crossfall/banking angle in radians around tangent.
+   */
+  Real bank_rad;
+} BoinkCenterlineSample;
+
+/**
+ * Represents static track geometry for one lap.
+ *
+ * The `map_id` and `centerline_samples` pointers are owned by the engine
+ * and must not be freed or modified by the caller.
+ * These pointers remain valid until `boink_destroy_race(h)` is called.
+ */
+typedef struct BoinkTrackData {
+  /**
+   * Null-terminated UTF-8 track identifier.
+   */
+  const char *map_id;
+  /**
+   * Track geometry version.
+   */
+  unsigned int version;
+  /**
+   * Full lap length along centerline in meters.
+   */
+  double lap_length_m;
+  /**
+   * Number of elements at `centerline_samples`.
+   */
+  unsigned int centerline_sample_count;
+  /**
+   * Pointer to `centerline_sample_count` elements.
+   *
+   * Can be null only when `centerline_sample_count == 0`.
+   */
+  const struct BoinkCenterlineSample *centerline_samples;
+} BoinkTrackData;
 
 /**
  * Describes the geometric and steering properties of a vehicle model.
@@ -442,6 +522,22 @@ BOINK_API int boink_step_race(BoinkHandle h, Real dt_seconds);
  * - An error code on failure.
  */
 BOINK_API int boink_get_race_duration(BoinkHandle h, Real *out_dur);
+
+/**
+ * Retrieves static track geometry for the specified race.
+ *
+ * The returned pointers inside `BoinkTrackData` are owned by the engine.
+ *
+ * Parameters:
+ * - `h` - handle to a valid race.
+ * - `out_track_data` - non-null output pointer.
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - `BOINK_ERR_INVALID_ARG` if `out_track_data` is null.
+ * - Another error code for other failures.
+ */
+BOINK_API int boink_get_track_data(BoinkHandle h, struct BoinkTrackData *out_track_data);
 
 /**
  * Updates the debug drawer for the current frame.

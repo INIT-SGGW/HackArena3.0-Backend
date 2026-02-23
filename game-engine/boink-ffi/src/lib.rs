@@ -10,11 +10,11 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
 
-use libc::{c_char, c_float, c_int, c_uint, c_void};
+use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 5;
-pub const BOINK_C_API_VERSION_PATCH: c_uint = 1;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 6;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
@@ -109,6 +109,56 @@ pub struct BoinkWeather {
     pub temperature_c: Real,
     /// Rain intensity in range [0.0, 1.0].
     pub rain_intensity: Real,
+}
+
+/// Represents one static centerline sample of a race track.
+///
+/// Returned as part of `BoinkTrackData` by `boink_get_track_data`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkCenterlineSample {
+    /// Arc-length position along the lap in meters.
+    pub s_m: c_double,
+    /// World-space centerline position.
+    pub position: BoinkVec3,
+    /// Track-forward unit vector.
+    pub tangent: BoinkVec3,
+    /// Track-local up unit vector.
+    pub normal: BoinkVec3,
+    /// Track-right unit vector.
+    pub right: BoinkVec3,
+    /// Drivable half-width to track-left from centerline, meters.
+    pub left_width_m: Real,
+    /// Drivable half-width to track-right from centerline, meters.
+    pub right_width_m: Real,
+    /// Signed centerline curvature [1/m].
+    pub curvature_1pm: Real,
+    /// Longitudinal slope angle in radians.
+    pub grade_rad: Real,
+    /// Crossfall/banking angle in radians around tangent.
+    pub bank_rad: Real,
+}
+
+/// Represents static track geometry for one lap.
+///
+/// The `map_id` and `centerline_samples` pointers are owned by the engine
+/// and must not be freed or modified by the caller.
+/// These pointers remain valid until `boink_destroy_race(h)` is called.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkTrackData {
+    /// Null-terminated UTF-8 track identifier.
+    pub map_id: *const c_char,
+    /// Track geometry version.
+    pub version: c_uint,
+    /// Full lap length along centerline in meters.
+    pub lap_length_m: c_double,
+    /// Number of elements at `centerline_samples`.
+    pub centerline_sample_count: c_uint,
+    /// Pointer to `centerline_sample_count` elements.
+    ///
+    /// Can be null only when `centerline_sample_count == 0`.
+    pub centerline_samples: *const BoinkCenterlineSample,
 }
 
 /// Represents a quaternion rotation (x, y, z, w).
@@ -323,6 +373,20 @@ unsafe extern "C" {
     /// - `BOINK_OK` on success.
     /// - An error code on failure.
     pub fn boink_get_race_duration(h: BoinkHandle, out_dur: *mut Real) -> c_int;
+
+    /// Retrieves static track geometry for the specified race.
+    ///
+    /// The returned pointers inside `BoinkTrackData` are owned by the engine.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `out_track_data` - non-null output pointer.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_INVALID_ARG` if `out_track_data` is null.
+    /// - Another error code for other failures.
+    pub fn boink_get_track_data(h: BoinkHandle, out_track_data: *mut BoinkTrackData) -> c_int;
 
     /// Updates the debug drawer for the current frame.
     ///
