@@ -10,7 +10,8 @@ use tracing::trace;
 
 use crate::native::error::NativeLoadError;
 use crate::native::loader::{
-    LegacySetWeatherFn, LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
+    LegacyGetTrackDataFn, LegacySetWeatherFn, LegacyStringFn, LegacyVersionFn, load_native_library,
+    resolve_optional,
 };
 
 /// Lazily resolved optional symbols exposed by a potentially old native library.
@@ -20,6 +21,7 @@ pub struct NativeApi {
     get_engine_profile: Option<LegacyStringFn>,
     get_last_error: Option<LegacyStringFn>,
     set_weather: Option<LegacySetWeatherFn>,
+    get_track_data: Option<LegacyGetTrackDataFn>,
 }
 
 impl NativeApi {
@@ -62,6 +64,12 @@ impl NativeApi {
         self.set_weather
     }
 
+    /// Returns the function pointer for `boink_get_track_data`, when exported.
+    #[must_use]
+    pub fn boink_get_track_data(&self) -> Option<LegacyGetTrackDataFn> {
+        self.get_track_data
+    }
+
     fn load() -> Result<NativeApi, NativeLoadError> {
         let lib = load_native_library()?;
 
@@ -70,14 +78,16 @@ impl NativeApi {
         let get_engine_profile = resolve_optional(lib, b"boink_get_engine_profile\0");
         let get_last_error = resolve_optional(lib, b"boink_get_last_error\0");
         let set_weather = resolve_optional(lib, b"boink_set_weather\0");
+        let get_track_data = resolve_optional(lib, b"boink_get_track_data\0");
 
         trace!(
-            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}",
+            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, track_data={}",
             get_c_api_version.is_some(),
             get_engine_version.is_some(),
             get_engine_profile.is_some(),
             get_last_error.is_some(),
-            set_weather.is_some()
+            set_weather.is_some(),
+            get_track_data.is_some()
         );
 
         Ok(NativeApi {
@@ -86,6 +96,7 @@ impl NativeApi {
             get_engine_profile,
             get_last_error,
             set_weather,
+            get_track_data,
         })
     }
 }

@@ -13,7 +13,7 @@ use tracing::instrument;
 
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
-use crate::model::{Controls, VehicleState, WeatherParams};
+use crate::model::{Controls, TrackData, VehicleState, WeatherParams};
 #[cfg(feature = "legacy-native-lib")]
 use crate::native::api::NativeApi;
 use crate::version::ensure_c_api_compatible;
@@ -197,6 +197,59 @@ impl Engine {
         } else {
             tracing::debug!(code = code, "boink_get_race_duration failed");
             Err(Error::from_ffi_status(code, "boink_get_race_duration"))
+        }
+    }
+
+    /// Retrieves static track geometry parsed from the loaded track.
+    #[instrument(skip(self))]
+    pub fn track_data(&self) -> Result<TrackData> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(get_track_data) = api.boink_get_track_data() else {
+                static WARNED_MISSING_GET_TRACK_DATA: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_GET_TRACK_DATA.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_get_track_data symbol not found in native library; track data queries are unavailable"
+                    );
+                }
+                return Err(Error::Internal(
+                    "boink_get_track_data is unavailable in this native library".to_string(),
+                ));
+            };
+
+            let mut raw: sys::BoinkTrackData = unsafe { core::mem::zeroed() };
+            tracing::debug!("boink_get_track_data (legacy dynamic symbol)");
+            let code = unsafe { get_track_data(self.handle, &mut raw as *mut _) };
+            tracing::debug!(
+                code,
+                sample_count = raw.centerline_sample_count,
+                "boink_get_track_data result"
+            );
+            if code == sys::BOINK_OK {
+                return unsafe { TrackData::try_from_ffi(raw) };
+            }
+            tracing::debug!(code = code, "boink_get_track_data failed");
+            return Err(Error::from_ffi_status(code, "boink_get_track_data"));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            let mut raw: sys::BoinkTrackData = unsafe { core::mem::zeroed() };
+            tracing::debug!("boink_get_track_data");
+            let code = unsafe { sys::boink_get_track_data(self.handle, &mut raw as *mut _) };
+            tracing::debug!(
+                code,
+                sample_count = raw.centerline_sample_count,
+                "boink_get_track_data result"
+            );
+            if code == sys::BOINK_OK {
+                unsafe { TrackData::try_from_ffi(raw) }
+            } else {
+                tracing::debug!(code = code, "boink_get_track_data failed");
+                Err(Error::from_ffi_status(code, "boink_get_track_data"))
+            }
         }
     }
 
