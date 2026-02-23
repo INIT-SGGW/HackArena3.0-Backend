@@ -14,7 +14,7 @@ use libc::{c_char, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
 pub const BOINK_C_API_VERSION_MINOR: c_uint = 5;
-pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 1;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
@@ -157,7 +157,7 @@ pub struct BoinkVehicleState {
     ///   [2] = rear-left
     ///   [3] = rear-right
     pub wheel_position: [BoinkVec3; 4],
-    /// Wheel angular speeds in revolutions per minute.
+    /// Wheel angular speeds in radians per second.
     ///
     /// Index mapping:
     ///   [0] = front-left
