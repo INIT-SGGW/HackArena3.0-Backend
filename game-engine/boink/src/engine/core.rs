@@ -58,7 +58,7 @@ impl VehicleMesh {
         );
         if code == sys::BOINK_OK {
             if handle.is_null() {
-                Err(Error::NullHandle("boink_create_vehicle_mesh"))
+                Err(Error::from_null_handle("boink_create_vehicle_mesh"))
             } else {
                 Ok(Self { handle })
             }
@@ -121,7 +121,7 @@ impl Engine {
         let handle = unsafe { sys::boink_create_race(c_path.as_ptr()) };
         if handle.is_null() {
             tracing::debug!("boink_create_race returned null handle");
-            return Err(Error::NullHandle("boink_create_race"));
+            return Err(Error::from_null_handle("boink_create_race"));
         }
 
         tracing::debug!("Boink race initialized");
@@ -181,7 +181,7 @@ impl Engine {
             Ok(())
         } else {
             tracing::debug!(code = code, "boink_step_race failed");
-            Err(Error::from_code(code))
+            Err(Error::from_ffi_status(code, "boink_step_race"))
         }
     }
 
@@ -196,7 +196,7 @@ impl Engine {
             Ok(dur)
         } else {
             tracing::debug!(code = code, "boink_get_race_duration failed");
-            Err(Error::from_code(code))
+            Err(Error::from_ffi_status(code, "boink_get_race_duration"))
         }
     }
 
@@ -205,24 +205,39 @@ impl Engine {
     pub fn spawn_vehicle(&mut self) -> Result<u64> {
         let mut vehicle_id = 0u64;
         tracing::debug!("boink_spawn_vehicle");
-        let code = unsafe {
-            let mut r = sys::boink_spawn_vehicle(self.handle, &self.vehicle_model, &mut vehicle_id);
-            // TODO: Temp solution
-            let spawn_pos = sys::BoinkVec3 {
-                x: -5.0,
-                y: 5.0,
-                z: 0.0,
-            };
-            r |= sys::boink_set_vehicle_position(self.handle, vehicle_id, &spawn_pos);
-            r
-        };
-        tracing::debug!(code, vehicle_id, "boink_spawn_vehicle result");
-        if code == sys::BOINK_OK {
-            Ok(vehicle_id)
-        } else {
-            tracing::debug!(code = code, "boink_spawn_vehicle failed");
-            Err(Error::from_code(code))
+        let spawn_code =
+            unsafe { sys::boink_spawn_vehicle(self.handle, &self.vehicle_model, &mut vehicle_id) };
+        tracing::debug!(spawn_code, vehicle_id, "boink_spawn_vehicle result");
+        if spawn_code != sys::BOINK_OK {
+            tracing::debug!(code = spawn_code, "boink_spawn_vehicle failed");
+            return Err(Error::from_ffi_status(spawn_code, "boink_spawn_vehicle"));
         }
+
+        // TODO: Temp solution
+        let spawn_pos = sys::BoinkVec3 {
+            x: -5.0,
+            y: 5.0,
+            z: 0.0,
+        };
+        let set_pos_code =
+            unsafe { sys::boink_set_vehicle_position(self.handle, vehicle_id, &spawn_pos) };
+        tracing::debug!(
+            set_pos_code,
+            vehicle_id,
+            "boink_set_vehicle_position result (spawn)"
+        );
+        if set_pos_code != sys::BOINK_OK {
+            tracing::debug!(
+                code = set_pos_code,
+                "boink_set_vehicle_position failed (spawn)"
+            );
+            return Err(Error::from_ffi_status(
+                set_pos_code,
+                "boink_set_vehicle_position",
+            ));
+        }
+
+        Ok(vehicle_id)
     }
 
     /// Removes a vehicle with the specified identifier from the race.
@@ -235,7 +250,7 @@ impl Engine {
             Ok(())
         } else {
             tracing::debug!(code = code, "boink_despawn_vehicle failed");
-            Err(Error::from_code(code))
+            Err(Error::from_ffi_status(code, "boink_despawn_vehicle"))
         }
     }
 
@@ -250,7 +265,7 @@ impl Engine {
             Ok(())
         } else {
             tracing::debug!(code = code, "boink_set_controls failed");
-            Err(Error::from_code(code))
+            Err(Error::from_ffi_status(code, "boink_set_controls"))
         }
     }
 
@@ -325,7 +340,7 @@ impl Engine {
             Ok(())
         } else {
             tracing::debug!(code = code, "boink_set_vehicle_position failed");
-            Err(Error::from_code(code))
+            Err(Error::from_ffi_status(code, "boink_set_vehicle_position"))
         }
     }
 
@@ -345,7 +360,7 @@ impl Engine {
             Ok(())
         } else {
             tracing::debug!(code = code, "boink_set_track_position failed");
-            Err(Error::from_code(code))
+            Err(Error::from_ffi_status(code, "boink_set_track_position"))
         }
     }
 
@@ -361,7 +376,7 @@ impl Engine {
             VehicleState::try_from(raw)
         } else {
             tracing::debug!(code = code, "boink_read_vehicle_state failed");
-            Err(Error::from_code(code))
+            Err(Error::from_ffi_status(code, "boink_read_vehicle_state"))
         }
     }
 

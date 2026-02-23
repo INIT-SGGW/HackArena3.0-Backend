@@ -11,6 +11,6 @@ pub(crate) fn query_engine_profile() -> Result<Option<String>> {
         boink_sys::boink_get_engine_profile
     ) {
         Ok(value) => Ok(value),
-        Err(code) => Err(Error::from_code_with_last_error(code)),
+        Err(code) => Err(Error::from_ffi_status(code, "boink_get_engine_profile")),
     }
 }

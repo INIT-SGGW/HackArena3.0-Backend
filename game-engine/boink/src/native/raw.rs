@@ -1,6 +1,6 @@
 //! Raw optional string queries for the native engine.
 //!
-//! This module stays minimal to avoid re-entrancy when `Error::from_code`
+//! This module stays minimal to avoid re-entrancy when `Error::from_ffi_status`
 //! tries to log the last native error.
 
 use super::macros::native_optional_string_query;

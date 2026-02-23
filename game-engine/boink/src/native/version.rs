@@ -101,7 +101,7 @@ pub fn query_c_api_version() -> Result<Version> {
     if code == sys::BOINK_OK {
         Ok(Version::new(major, minor, patch))
     } else {
-        Err(Error::from_code(code))
+        Err(Error::from_ffi_status(code, "boink_get_c_api_version"))
     }
 }
 
@@ -139,7 +139,7 @@ pub fn query_engine_version() -> Result<Version> {
     if code == sys::BOINK_OK {
         Ok(Version::new(major, minor, patch))
     } else {
-        Err(Error::from_code(code))
+        Err(Error::from_ffi_status(code, "boink_get_engine_version"))
     }
 }
 
@@ -272,7 +272,12 @@ fn try_dynamic_version_query(symbol: &[u8]) -> Result<Option<Version>> {
     if code == sys::BOINK_OK {
         Ok(Some(Version::new(major, minor, patch)))
     } else {
-        Err(Error::from_code(code))
+        let func = match symbol {
+            b"boink_get_c_api_version\0" => "boink_get_c_api_version",
+            b"boink_get_engine_version\0" => "boink_get_engine_version",
+            _ => "<unknown>",
+        };
+        Err(Error::from_ffi_status(code, func))
     }
 }
 

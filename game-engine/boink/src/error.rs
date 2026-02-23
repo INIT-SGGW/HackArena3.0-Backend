@@ -67,47 +67,43 @@ pub enum Error {
     Native(i32),
 }
 
-fn log_last_error_if_available() {
+fn log_last_error_if_available(func: &'static str, code: Option<i32>) {
     match query_last_error_raw() {
         Ok(Some(last_error)) => {
             if !last_error.is_empty() {
-                tracing::warn!("Boink last error: {}", last_error);
+                if let Some(code) = code {
+                    tracing::warn!(
+                        "Boink last error after {} (code {}): {}",
+                        func,
+                        code,
+                        last_error
+                    );
+                } else {
+                    tracing::warn!("Boink last error after {}: {}", func, last_error);
+                }
             }
         }
         Ok(None) => {}
-        Err(code) => {
-            tracing::warn!("Boink last error query failed (code {code})");
+        Err(last_error_code) => {
+            if let Some(code) = code {
+                tracing::warn!(
+                    "Boink last error query failed after {} (code {}, last_error_code {})",
+                    func,
+                    code,
+                    last_error_code
+                );
+            } else {
+                tracing::warn!(
+                    "Boink last error query failed after {} (last_error_code {})",
+                    func,
+                    last_error_code
+                );
+            }
         }
     }
 }
 
 impl Error {
-    /// Converts a raw native status code into an [`Error`].
-    ///
-    /// # Panics
-    ///
-    /// This function is intended to be called only for non-success codes. Passing
-    /// `BOINK_OK` is considered a logic error and will trigger a debug assertion.
-    pub(crate) fn from_code(code: i32) -> Self {
-        debug_assert_ne!(
-            code,
-            sys::BOINK_OK,
-            "from_code must not be called with success status"
-        );
-
-        match code {
-            x if x == sys::BOINK_ERR_INVALID_ARG => Self::InvalidArg,
-            x if x == sys::BOINK_ERR_BUFFER_TOO_SMALL => Self::BufferTooSmall,
-            x if x == sys::BOINK_ERR_NOT_FOUND => Self::NotFound,
-            x if x == sys::BOINK_ERR_UNSUPPORTED_FORMAT => Self::UnsupportedFormat,
-            x if x == sys::BOINK_ERR_IO => Self::Io,
-            x if x == sys::BOINK_ERR_INTERNAL => {
-                Self::Internal("native engine reported an internal error".to_string())
-            }
-            other => Self::Native(other),
-        }
-    }
-
     /// Converts a raw native status code into an [`Error`], annotating it with
     /// the function name that returned it.
     ///
@@ -122,6 +118,8 @@ impl Error {
             "from_ffi_status must not be called with success status"
         );
 
+        log_last_error_if_available(func, Some(code));
+
         match code {
             x if x == sys::BOINK_ERR_INVALID_ARG => Self::InvalidArg,
             x if x == sys::BOINK_ERR_BUFFER_TOO_SMALL => Self::BufferTooSmall,
@@ -135,10 +133,9 @@ impl Error {
         }
     }
 
-    /// Converts a raw native status code into an [`Error`], logging
-    /// `boink_get_last_error` when available.
-    pub(crate) fn from_code_with_last_error(code: i32) -> Self {
-        log_last_error_if_available();
-        Self::from_code(code)
+    /// Creates a null-handle error while logging `boink_get_last_error` when available.
+    pub(crate) fn from_null_handle(func: &'static str) -> Self {
+        log_last_error_if_available(func, None);
+        Self::NullHandle(func)
     }
 }
