@@ -17,10 +17,10 @@ pub(crate) fn proto_to_controls(req: &SetControlsRequest) -> Controls {
 
 fn wheel_speeds_from_state(state: &VehicleState) -> WheelSpeeds {
     WheelSpeeds {
-        front_left_rps: state.wheel_speeds[0],
-        front_right_rps: state.wheel_speeds[1],
-        rear_left_rps: state.wheel_speeds[2],
-        rear_right_rps: state.wheel_speeds[3],
+        front_left_radps: state.wheel_speeds[0],
+        front_right_radps: state.wheel_speeds[1],
+        rear_left_radps: state.wheel_speeds[2],
+        rear_right_radps: state.wheel_speeds[3],
     }
 }
 
