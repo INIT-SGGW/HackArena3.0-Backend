@@ -58,6 +58,7 @@ struct WeatherQueryInner {
 struct CachedSchedule {
     entries: Vec<ScheduleEntry>,
     refreshed_at_ms: Option<i64>,
+    generation: u64,
 }
 
 #[cfg(feature = "official")]
@@ -72,7 +73,7 @@ struct CachedForecasts {
 struct CachedForecast {
     points: Vec<ProtoForecastPoint>,
     minute_slot: Option<i64>,
-    schedule_refreshed_at_ms: Option<i64>,
+    schedule_generation: Option<u64>,
 }
 
 impl WeatherQueryServiceImpl {
@@ -103,11 +104,12 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
         let now_ms = current_time_ms();
         let schedule = self.current_schedule().await?;
         let weather_type = weather_type_at(&schedule, now_ms).unwrap_or(WeatherType::Unspecified);
+        let temperature_c = temperature_c_for_weather_type(weather_type);
 
         Ok(Response::new(GetWeatherNowResponse {
             now: Some(WeatherNow {
                 r#type: weather_type as i32,
-                temperature_c: temperature_c_for_weather_type(weather_type),
+                temperature_c,
             }),
         }))
     }
@@ -261,15 +263,14 @@ impl WeatherQueryServiceImpl {
                 Status::failed_precondition("weather query service is not configured")
             })?;
             let now_ms = current_minute_start_ms();
-            let schedule_refreshed_at_ms =
-                ensure_schedule_cache_fresh(inner).await.map_err(|err| {
-                    Status::internal(format!("failed to load weather schedule: {err}"))
-                })?;
+            let schedule_generation = ensure_schedule_cache_fresh(inner).await.map_err(|err| {
+                Status::internal(format!("failed to load weather schedule: {err}"))
+            })?;
 
             {
                 let read = inner.forecast_cache.read().await;
                 if let Some(cached) = cached_forecast_for_preset(&read, preset) {
-                    if is_forecast_cache_fresh(cached, schedule_refreshed_at_ms, now_ms) {
+                    if is_forecast_cache_fresh(cached, schedule_generation, now_ms) {
                         return Ok(cached.points.clone());
                     }
                 }
@@ -301,8 +302,12 @@ impl WeatherQueryServiceImpl {
 async fn refresh_cache_once(inner: &WeatherQueryInner) -> anyhow::Result<()> {
     let schedule = inner.repo.get_schedule().await?;
     let mut write = inner.schedule_cache.write().await;
+    let changed = write.entries != schedule;
     write.entries = schedule;
     write.refreshed_at_ms = Some(current_time_ms());
+    if changed {
+        write.generation = write.generation.wrapping_add(1);
+    }
     Ok(())
 }
 
@@ -322,17 +327,17 @@ async fn refresh_cache_singleflight(inner: &WeatherQueryInner) -> anyhow::Result
 }
 
 #[cfg(feature = "official")]
-async fn ensure_schedule_cache_fresh(inner: &WeatherQueryInner) -> anyhow::Result<Option<i64>> {
+async fn ensure_schedule_cache_fresh(inner: &WeatherQueryInner) -> anyhow::Result<u64> {
     {
         let read = inner.schedule_cache.read().await;
         if !read.entries.is_empty() && !is_cache_stale(read.refreshed_at_ms) {
-            return Ok(read.refreshed_at_ms);
+            return Ok(read.generation);
         }
     }
 
     refresh_cache_singleflight(inner).await?;
     let read = inner.schedule_cache.read().await;
-    Ok(read.refreshed_at_ms)
+    Ok(read.generation)
 }
 
 #[cfg(feature = "official")]
@@ -342,12 +347,12 @@ async fn refresh_forecast_singleflight(
     now_ms: i64,
 ) -> anyhow::Result<()> {
     let _guard = inner.forecast_refresh_guard.lock().await;
-    let schedule_refreshed_at_ms = ensure_schedule_cache_fresh(inner).await?;
+    let schedule_generation = ensure_schedule_cache_fresh(inner).await?;
 
     {
         let read = inner.forecast_cache.read().await;
         if let Some(cached) = cached_forecast_for_preset(&read, preset) {
-            if is_forecast_cache_fresh(cached, schedule_refreshed_at_ms, now_ms) {
+            if is_forecast_cache_fresh(cached, schedule_generation, now_ms) {
                 return Ok(());
             }
         } else {
@@ -355,7 +360,7 @@ async fn refresh_forecast_singleflight(
         }
     }
 
-    refresh_forecast_once(inner, preset, now_ms, schedule_refreshed_at_ms).await
+    refresh_forecast_once(inner, preset, now_ms, schedule_generation).await
 }
 
 #[cfg(feature = "official")]
@@ -363,7 +368,7 @@ async fn refresh_forecast_once(
     inner: &WeatherQueryInner,
     preset: ForecastPreset,
     now_ms: i64,
-    schedule_refreshed_at_ms: Option<i64>,
+    schedule_generation: u64,
 ) -> anyhow::Result<()> {
     let schedule = {
         let read = inner.schedule_cache.read().await;
@@ -379,7 +384,7 @@ async fn refresh_forecast_once(
     let cached = cached_forecast_for_preset_mut(&mut write, preset)
         .ok_or_else(|| anyhow::anyhow!("unsupported forecast preset: {preset:?}"))?;
 
-    let same_schedule_snapshot = cached.schedule_refreshed_at_ms == schedule_refreshed_at_ms;
+    let same_schedule_snapshot = cached.schedule_generation == Some(schedule_generation);
     let prev_points = std::mem::take(&mut cached.points);
     let mut rng = rand::thread_rng();
     cached.points = stochasticize_forecast_points(
@@ -391,7 +396,7 @@ async fn refresh_forecast_once(
         same_schedule_snapshot,
     );
     cached.minute_slot = Some(now_ms.div_euclid(MINUTE_MS));
-    cached.schedule_refreshed_at_ms = schedule_refreshed_at_ms;
+    cached.schedule_generation = Some(schedule_generation);
     Ok(())
 }
 
@@ -524,18 +529,14 @@ fn cached_forecast_for_preset_mut(
 }
 
 #[cfg(feature = "official")]
-fn is_forecast_cache_fresh(
-    cached: &CachedForecast,
-    schedule_refreshed_at_ms: Option<i64>,
-    now_ms: i64,
-) -> bool {
+fn is_forecast_cache_fresh(cached: &CachedForecast, schedule_generation: u64, now_ms: i64) -> bool {
     if cached.points.is_empty() {
         return false;
     }
     if cached.minute_slot != Some(now_ms.div_euclid(MINUTE_MS)) {
         return false;
     }
-    cached.schedule_refreshed_at_ms == schedule_refreshed_at_ms
+    cached.schedule_generation == Some(schedule_generation)
 }
 
 fn next_boundary_instant(step_ms: i64) -> Instant {
