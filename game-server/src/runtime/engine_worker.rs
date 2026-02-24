@@ -17,6 +17,7 @@ use boink::error::Error as BoinkError;
 use boink::model::control::Controls;
 use boink::model::math::Vec3;
 use boink::model::state::VehicleState;
+use boink::model::track::TrackData;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -100,6 +101,19 @@ impl EngineClient {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::ReadCarState { car_id, reply_tx })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Reads static track geometry from the engine world.
+    pub async fn track_data(&self) -> Result<TrackData, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::GetTrackData { reply_tx })
             .await
             .map_err(|_| EngineWorkerError::WorkerStopped)?;
 
@@ -251,6 +265,11 @@ fn handle_command(engine: &mut Engine, cmd: EngineCommand) -> Result<(), EngineW
             let result = engine
                 .read_vehicle_state(car_id)
                 .map_err(EngineWorkerError::Engine);
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::GetTrackData { reply_tx } => {
+            let result = engine.track_data().map_err(EngineWorkerError::Engine);
             let _ = reply_tx.send(result);
             Ok(())
         }

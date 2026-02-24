@@ -1,10 +1,19 @@
 //! Transport-layer mapping helpers.
 
-use boink::model::{Controls, Gear, VehicleState};
+use boink::model::{Controls, Gear, TrackData as EngineTrackData, VehicleState};
 use proto::race::v1::{
-    CarKinematics, CarParticipantState, CarRenderState, FrontendCarFullState, Quaternion,
-    SetControlsRequest, Vector3, WheelAngles, WheelSpeeds,
+    CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, FrontendCarFullState,
+    Quaternion, SetControlsRequest, TrackData as ProtoTrackData, Vector3, WheelAngles, WheelSpeeds,
 };
+
+/// Convert engine `Vec3` into proto `Vector3`.
+pub(crate) fn vec3_to_proto(v: boink::model::Vec3) -> Vector3 {
+    Vector3 {
+        x: v.x,
+        y: v.y,
+        z: v.z,
+    }
+}
 
 /// Convert gRPC controls request into engine controls.
 pub(crate) fn proto_to_controls(req: &SetControlsRequest) -> Controls {
@@ -33,11 +42,7 @@ fn wheel_angles_from_state(_state: &VehicleState) -> WheelAngles {
 
 fn kinematics_from_state(state: &VehicleState) -> CarKinematics {
     CarKinematics {
-        position: Some(Vector3 {
-            x: state.chassis_position.x,
-            y: state.chassis_position.y,
-            z: state.chassis_position.z,
-        }),
+        position: Some(vec3_to_proto(state.chassis_position)),
         orientation: Some(Quaternion {
             x: state.vehicle_orientation.x,
             y: state.vehicle_orientation.y,
@@ -86,5 +91,32 @@ pub(crate) fn frontend_full_state(
             last_applied_client_seq,
         )),
         render: Some(render_state_from_state(&state)),
+    }
+}
+
+/// Convert engine `TrackData` into proto `TrackData`.
+pub(crate) fn track_data_to_proto(track: EngineTrackData) -> ProtoTrackData {
+    let centerline_samples = track
+        .centerline_samples
+        .into_iter()
+        .map(|sample| CenterlineSample {
+            s_m: sample.s_m,
+            position: Some(vec3_to_proto(sample.position)),
+            tangent: Some(vec3_to_proto(sample.tangent)),
+            normal: Some(vec3_to_proto(sample.normal)),
+            right: Some(vec3_to_proto(sample.right)),
+            left_width_m: sample.left_width_m,
+            right_width_m: sample.right_width_m,
+            curvature_1pm: sample.curvature_1pm,
+            grade_rad: sample.grade_rad,
+            bank_rad: sample.bank_rad,
+        })
+        .collect();
+
+    ProtoTrackData {
+        map_id: track.map_id,
+        version: track.version,
+        lap_length_m: track.lap_length_m,
+        centerline_samples,
     }
 }

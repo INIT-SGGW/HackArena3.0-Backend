@@ -7,6 +7,7 @@ use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
+use proto::race::v1::track_service_server::TrackServiceServer;
 #[cfg(feature = "official")]
 use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
 use proto::weather::v1::weather_query_service_server::WeatherQueryServiceServer;
@@ -33,6 +34,7 @@ use crate::services::asset_service::AssetServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::race_config_admin_service::RaceConfigAdminServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
+use crate::services::track_service::TrackServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::weather_admin_service::WeatherAdminServiceImpl;
 use crate::services::weather_query_service::WeatherQueryServiceImpl;
@@ -57,6 +59,9 @@ pub async fn serve_grpc(
         .set_serving::<RaceServiceServer<RaceServiceImpl>>()
         .await;
     health_reporter
+        .set_serving::<TrackServiceServer<TrackServiceImpl>>()
+        .await;
+    health_reporter
         .set_serving::<WeatherQueryServiceServer<WeatherQueryServiceImpl>>()
         .await;
     #[cfg(feature = "official")]
@@ -73,12 +78,13 @@ pub async fn serve_grpc(
 
     let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
     let race_impl = RaceServiceImpl::new(
-        engine,
+        engine.clone(),
         cfg.simulation_hz,
         &cfg.jwks_url,
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
     );
+    let track_impl = TrackServiceImpl::new(engine);
 
     #[cfg(feature = "official")]
     let (weather_query_impl, weather_admin_impl, race_config_admin_impl) = {
@@ -134,6 +140,7 @@ pub async fn serve_grpc(
         .add_service(health_service)
         .add_service(AssetServiceServer::new(asset_impl))
         .add_service(RaceServiceServer::new(race_impl))
+        .add_service(TrackServiceServer::new(track_impl))
         .add_service(WeatherQueryServiceServer::new(weather_query_impl));
 
     #[cfg(feature = "official")]
