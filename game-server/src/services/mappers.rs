@@ -115,7 +115,6 @@ pub(crate) fn track_data_to_proto(track: EngineTrackData) -> ProtoTrackData {
 
     ProtoTrackData {
         map_id: track.map_id,
-        version: track.version,
         lap_length_m: track.lap_length_m,
         centerline_samples,
     }

@@ -27,10 +27,7 @@ impl TrackService for TrackServiceImpl {
         &self,
         request: Request<GetTrackDataRequest>,
     ) -> Result<Response<GetTrackDataResponse>, Status> {
-        let GetTrackDataRequest {
-            map_id,
-            map_version,
-        } = request.into_inner();
+        let GetTrackDataRequest { map_id } = request.into_inner();
 
         if map_id.trim().is_empty() {
             return Err(Status::invalid_argument("map_id is required"));
@@ -40,12 +37,6 @@ impl TrackService for TrackServiceImpl {
 
         if track.map_id != map_id {
             return Err(Status::not_found("track not found"));
-        }
-
-        if let Some(version) = map_version {
-            if track.version != version {
-                return Err(Status::not_found("track version not found"));
-            }
         }
 
         let response = GetTrackDataResponse {

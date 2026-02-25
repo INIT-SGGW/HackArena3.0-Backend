@@ -109,7 +109,6 @@ impl AssetService for AssetServiceImpl {
             maps.push(MapCatalogEntry {
                 map_id: stem.to_string(),
                 display_name: stem.to_string(),
-                version: 1,
             });
         }
 
@@ -143,7 +142,6 @@ impl AssetService for AssetServiceImpl {
             content_type: MimeType::GltfBinary as i32,
             size_bytes: size,
             content_hash: hash,
-            version: 1, // TODO : Versioning
         };
 
         tracing::info!(%id, "meta ok");
