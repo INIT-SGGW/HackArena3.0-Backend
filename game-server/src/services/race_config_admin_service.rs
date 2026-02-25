@@ -176,17 +176,12 @@ fn persisted_schedule_from_draft(
 }
 
 fn race_id_v5(input: &RaceConfigInput, idx: usize) -> String {
-    let map_version = input
-        .map_version
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "null".to_string());
     let payload = format!(
-        "idx={idx};race_name={};starts_at_ms={};ends_at_ms={};map_id={};map_version={};start_placement_mode={};points_multiplier_fixed={};time_of_day_preset={}",
+        "idx={idx};race_name={};starts_at_ms={};ends_at_ms={};map_id={};map_version=null;start_placement_mode={};points_multiplier_fixed={};time_of_day_preset={}",
         input.race_name,
         input.starts_at_ms,
         input.ends_at_ms,
         input.map_id,
-        map_version,
         input.start_placement_mode as i32,
         input.points_multiplier_fixed,
         input.time_of_day_preset as i32

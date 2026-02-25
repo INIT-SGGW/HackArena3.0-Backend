@@ -1,7 +1,5 @@
 //! Race config repository for persisted schedule entries.
 
-use std::convert::TryFrom;
-
 use proto::race::v1::{StartPlacementMode, TimeOfDayPreset};
 use sqlx::PgPool;
 
@@ -13,7 +11,6 @@ pub struct ScheduleEntry {
     pub starts_at_ms: i64,
     pub ends_at_ms: i64,
     pub map_id: String,
-    pub map_version: Option<u32>,
     pub start_placement_mode: StartPlacementMode,
     pub points_multiplier_fixed: f32,
     pub time_of_day_preset: TimeOfDayPreset,
@@ -106,20 +103,12 @@ impl RaceConfigRepo {
 
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
-            let map_version = row
-                .map_version
-                .map(u32::try_from)
-                .transpose()
-                .map_err(|_| {
-                    anyhow::anyhow!("invalid negative map_version in race_config_schedule")
-                })?;
             entries.push(ScheduleEntry {
                 race_id: row.race_id,
                 race_name: row.race_name,
                 starts_at_ms: row.starts_at_ms,
                 ends_at_ms: row.ends_at_ms,
                 map_id: row.map_id,
-                map_version,
                 start_placement_mode: row.start_placement_mode.into(),
                 points_multiplier_fixed: row.points_multiplier_fixed,
                 time_of_day_preset: row.time_of_day_preset.into(),
@@ -142,11 +131,7 @@ impl RaceConfigRepo {
                 .map_err(|msg| anyhow::anyhow!(msg))?;
             let time_of_day_preset = DbTimeOfDayPreset::try_from(entry.time_of_day_preset)
                 .map_err(|msg| anyhow::anyhow!(msg))?;
-            let map_version = entry
-                .map_version
-                .map(i32::try_from)
-                .transpose()
-                .map_err(|_| anyhow::anyhow!("map_version exceeds i32 range"))?;
+            let map_version: Option<i32> = None;
 
             sqlx::query!(
                 "INSERT INTO race_config_schedule (race_id, race_name, starts_at_ms, ends_at_ms, map_id, map_version, start_placement_mode, points_multiplier_fixed, time_of_day_preset) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",

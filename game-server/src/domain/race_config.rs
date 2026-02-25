@@ -12,7 +12,6 @@ pub struct RaceConfigInput {
     pub starts_at_ms: i64,
     pub ends_at_ms: i64,
     pub map_id: String,
-    pub map_version: Option<u32>,
     pub start_placement_mode: StartPlacementMode,
     pub points_multiplier_fixed: f32,
     pub time_of_day_preset: TimeOfDayPreset,
@@ -33,8 +32,6 @@ pub enum RaceConfigDomainError {
     EmptyRaceName { index: usize },
     #[error("map_id must be non-empty at index {index}")]
     EmptyMapId { index: usize },
-    #[error("map_version must be greater than zero at index {index}")]
-    InvalidMapVersion { index: usize },
     #[error("start_placement_mode must be specified at index {index}")]
     UnspecifiedStartPlacementMode { index: usize },
     #[error("time_of_day_preset must be specified at index {index}")]
@@ -130,9 +127,6 @@ fn validate_input(index: usize, entry: &RaceConfigInput) -> Result<(), RaceConfi
     }
     if entry.map_id.trim().is_empty() {
         return Err(RaceConfigDomainError::EmptyMapId { index });
-    }
-    if entry.map_version == Some(0) {
-        return Err(RaceConfigDomainError::InvalidMapVersion { index });
     }
     if matches!(entry.start_placement_mode, StartPlacementMode::Unspecified) {
         return Err(RaceConfigDomainError::UnspecifiedStartPlacementMode { index });
