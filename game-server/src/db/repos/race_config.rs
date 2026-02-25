@@ -96,7 +96,7 @@ impl RaceConfigRepo {
     /// Fetches full schedule ordered by start timestamp.
     pub async fn get_schedule(&self) -> anyhow::Result<Vec<ScheduleEntry>> {
         let rows = sqlx::query!(
-            r#"SELECT race_id, race_name, starts_at_ms, ends_at_ms, map_id, map_version, start_placement_mode AS "start_placement_mode: DbStartPlacementMode", points_multiplier_fixed, time_of_day_preset AS "time_of_day_preset: DbTimeOfDayPreset" FROM race_config_schedule ORDER BY starts_at_ms ASC"#
+            r#"SELECT race_id, race_name, starts_at_ms, ends_at_ms, map_id, start_placement_mode AS "start_placement_mode: DbStartPlacementMode", points_multiplier_fixed, time_of_day_preset AS "time_of_day_preset: DbTimeOfDayPreset" FROM race_config_schedule ORDER BY starts_at_ms ASC"#
         )
         .fetch_all(&self.pool)
         .await?;
@@ -131,16 +131,14 @@ impl RaceConfigRepo {
                 .map_err(|msg| anyhow::anyhow!(msg))?;
             let time_of_day_preset = DbTimeOfDayPreset::try_from(entry.time_of_day_preset)
                 .map_err(|msg| anyhow::anyhow!(msg))?;
-            let map_version: Option<i32> = None;
 
             sqlx::query!(
-                "INSERT INTO race_config_schedule (race_id, race_name, starts_at_ms, ends_at_ms, map_id, map_version, start_placement_mode, points_multiplier_fixed, time_of_day_preset) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                "INSERT INTO race_config_schedule (race_id, race_name, starts_at_ms, ends_at_ms, map_id, start_placement_mode, points_multiplier_fixed, time_of_day_preset) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                 entry.race_id,
                 entry.race_name,
                 entry.starts_at_ms,
                 entry.ends_at_ms,
                 entry.map_id,
-                map_version,
                 start_placement_mode as _,
                 entry.points_multiplier_fixed,
                 time_of_day_preset as _,
