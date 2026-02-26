@@ -7,6 +7,8 @@ use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
+#[cfg(feature = "official")]
+use proto::race::v1::sandbox_admin_service_server::SandboxAdminServiceServer;
 use proto::race::v1::track_service_server::TrackServiceServer;
 #[cfg(feature = "official")]
 use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
@@ -34,6 +36,8 @@ use crate::services::asset_service::AssetServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::race_config_admin_service::RaceConfigAdminServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
+#[cfg(feature = "official")]
+use crate::services::sandbox_admin_service::SandboxAdminServiceImpl;
 use crate::services::track_service::TrackServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::weather_admin_service::WeatherAdminServiceImpl;
@@ -72,6 +76,10 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<RaceConfigAdminServiceServer<RaceConfigAdminServiceImpl>>()
         .await;
+    #[cfg(feature = "official")]
+    health_reporter
+        .set_serving::<SandboxAdminServiceServer<SandboxAdminServiceImpl>>()
+        .await;
 
     #[cfg(feature = "official")]
     let token_validator = std::sync::Arc::new(TokenValidator::new());
@@ -96,6 +104,8 @@ pub async fn serve_grpc(
             RaceConfigAdminServiceImpl::with_repo(race_config_repo, token_validator.clone()),
         )
     };
+    #[cfg(feature = "official")]
+    let sandbox_admin_impl = SandboxAdminServiceImpl;
 
     #[cfg(not(feature = "official"))]
     let weather_query_impl = WeatherQueryServiceImpl::default();
@@ -147,6 +157,8 @@ pub async fn serve_grpc(
     let server = server.add_service(WeatherAdminServiceServer::new(weather_admin_impl));
     #[cfg(feature = "official")]
     let server = server.add_service(RaceConfigAdminServiceServer::new(race_config_admin_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(SandboxAdminServiceServer::new(sandbox_admin_impl));
 
     server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))
