@@ -10,6 +10,7 @@ pub(crate) fn map_worker_err(err: EngineWorkerError) -> Status {
     match err {
         EngineWorkerError::Engine(e) => map_engine_err(e),
         EngineWorkerError::WorkerStopped => Status::unavailable("engine worker stopped"),
+        EngineWorkerError::InvalidArgument(msg) => Status::invalid_argument(msg),
     }
 }
 

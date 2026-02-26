@@ -3,7 +3,7 @@
 use boink::model::{Controls, TrackData, VehicleState};
 use tokio::sync::oneshot;
 
-use super::engine_worker::EngineWorkerError;
+use super::engine_worker::{EngineActivityKind, EngineRuntimeState, EngineWorkerError};
 
 /// Commands processed by the engine worker.
 ///
@@ -24,6 +24,14 @@ pub enum EngineCommand {
     },
     GetTrackData {
         reply_tx: oneshot::Sender<Result<TrackData, EngineWorkerError>>,
+    },
+    GetRuntimeState {
+        reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
+    },
+    SwitchRuntime {
+        activity_kind: EngineActivityKind,
+        map_id: String,
+        reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
     DespawnCar {
         car_id: u64,

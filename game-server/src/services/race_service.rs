@@ -82,6 +82,7 @@ impl RaceService for RaceServiceImpl {
         request: Request<QuickJoinRequest>,
     ) -> Result<Response<QuickJoinResponse>, Status> {
         let engine = self.engine.clone();
+        let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
         let car_id = engine.spawn_car().await.map_err(map_worker_err)?;
         if let Some(token) = parse_game_token(request.metadata())? {
             if let Some(instance_uuid) = self
@@ -95,7 +96,7 @@ impl RaceService for RaceServiceImpl {
 
         let resp = QuickJoinResponse {
             car_id,
-            map_id: "test".into(),
+            map_id: runtime_state.map_id,
         };
         self.known_cars.insert(car_id, ());
         self.last_client_seq.insert(car_id, 0);
@@ -189,6 +190,8 @@ impl RaceService for RaceServiceImpl {
         let (resolved_view, view_downgrade_reason) = resolve_view(requested_view, &scopes);
 
         let engine = self.engine.clone();
+        let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
+        let runtime_map_id = runtime_state.map_id;
         let simulation_hz = self.simulation_hz;
         let active_streams = self.active_streams.clone();
         let known_cars = self.known_cars.clone();
@@ -207,6 +210,7 @@ impl RaceService for RaceServiceImpl {
             requested_view,
             resolved_view,
             view_downgrade_reason,
+            runtime_map_id,
             tx,
         ));
 
@@ -289,6 +293,7 @@ fn build_settings_event(
     clamp_reason: StreamClampReason,
     resolved_view: SpectatorView,
     view_downgrade_reason: ViewDowngradeReason,
+    map_id: &str,
 ) -> FrontendSpectatorEvent {
     let settings = StreamSettings {
         requested_hz,
@@ -296,7 +301,7 @@ fn build_settings_event(
         clamp_reason: clamp_reason as i32,
         resolved_view: resolved_view as i32,
         view_downgrade_reason: view_downgrade_reason as i32,
-        map_id: "test".into(),
+        map_id: map_id.to_string(),
     };
     FrontendSpectatorEvent {
         payload: Some(FrontendSpectatorPayload::Settings(settings)),
@@ -314,6 +319,7 @@ async fn run_frontend_spectator_stream(
     requested_view: SpectatorView,
     resolved_view: SpectatorView,
     view_downgrade_reason: ViewDowngradeReason,
+    runtime_map_id: String,
     tx: mpsc::Sender<Result<FrontendSpectatorEvent, Status>>,
 ) {
     static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -341,6 +347,7 @@ async fn run_frontend_spectator_stream(
         clamp_reason,
         resolved_view,
         view_downgrade_reason,
+        &runtime_map_id,
     );
     if tx.try_send(Ok(settings_msg)).is_err() {
         active_streams.remove(&stream_id);

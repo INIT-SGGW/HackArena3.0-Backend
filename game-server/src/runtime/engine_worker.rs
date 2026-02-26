@@ -31,6 +31,24 @@ use super::commands::EngineCommand;
 
 /// Maximum number of queued commands. Keep small enough to apply backpressure.
 const COMMAND_QUEUE_CAPACITY: usize = 256;
+const DEFAULT_MAP_ID: &str = "test";
+
+/// Backend runtime activity kind reflected by engine worker state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineActivityKind {
+    None,
+    OfficialRace,
+    Sandbox,
+}
+
+/// Minimal runtime state owned by the engine worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineRuntimeState {
+    pub revision: u64,
+    pub activity_kind: EngineActivityKind,
+    pub map_id: String,
+}
+
 /// Errors returned by the engine worker boundary.
 ///
 /// This is the stable surface for API layers; map it to `tonic::Status` in services.
@@ -40,6 +58,8 @@ pub enum EngineWorkerError {
     WorkerStopped,
     /// An error occurred inside the Boink engine wrapper.
     Engine(BoinkError),
+    /// Invalid runtime control request.
+    InvalidArgument(String),
 }
 
 /// A lightweight handle used by API services to interact with the engine worker.
@@ -55,6 +75,7 @@ impl fmt::Display for EngineWorkerError {
         match self {
             EngineWorkerError::WorkerStopped => write!(f, "engine worker is stopped"),
             EngineWorkerError::Engine(e) => write!(f, "engine error: {e}"),
+            EngineWorkerError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
         }
     }
 }
@@ -122,6 +143,40 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Reads current runtime activity and map metadata.
+    pub async fn runtime_state(&self) -> Result<EngineRuntimeState, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::GetRuntimeState { reply_tx })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Switches activity kind and active map by rebuilding engine world.
+    pub async fn switch_runtime(
+        &self,
+        activity_kind: EngineActivityKind,
+        map_id: String,
+    ) -> Result<EngineRuntimeState, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SwitchRuntime {
+                activity_kind,
+                map_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Despawns a car, releasing it from the engine world.
     pub async fn despawn_car(&self, car_id: u64) -> Result<(), EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -147,8 +202,14 @@ pub async fn spawn(
     let (tx, mut rx) = mpsc::channel::<EngineCommand>(COMMAND_QUEUE_CAPACITY);
     let client = EngineClient { tx };
 
-    let engine = build_engine(&cfg)?;
+    let runtime_state = EngineRuntimeState {
+        revision: 0,
+        activity_kind: EngineActivityKind::OfficialRace,
+        map_id: DEFAULT_MAP_ID.to_string(),
+    };
+    let engine = build_engine(&cfg, &runtime_state.map_id)?;
     let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f32;
+    let run_cfg = Arc::clone(&cfg);
     let handle = tokio::task::spawn_local(async move {
         run_worker(
             engine,
@@ -156,6 +217,8 @@ pub async fn spawn(
             &mut shutdown_rx,
             simulation_dt_seconds,
             weather_sync,
+            run_cfg,
+            runtime_state,
         )
         .await;
     });
@@ -169,6 +232,8 @@ async fn run_worker(
     shutdown_rx: &mut broadcast::Receiver<()>,
     simulation_dt_seconds: f32,
     weather_sync: WeatherSyncState,
+    cfg: Arc<Config>,
+    mut runtime_state: EngineRuntimeState,
 ) {
     let mut ticker =
         tokio::time::interval(tokio::time::Duration::from_secs_f32(simulation_dt_seconds));
@@ -231,7 +296,7 @@ async fn run_worker(
                     break;
                 };
 
-                if let Err(err) = handle_command(&mut engine, cmd) {
+                if let Err(err) = handle_command(&mut engine, &cfg, &mut runtime_state, cmd) {
                     tracing::warn!("engine worker: command failed: {err}");
                 }
             }
@@ -241,7 +306,12 @@ async fn run_worker(
     tracing::info!("engine worker: stopped");
 }
 
-fn handle_command(engine: &mut Engine, cmd: EngineCommand) -> Result<(), EngineWorkerError> {
+fn handle_command(
+    engine: &mut Engine,
+    cfg: &Config,
+    runtime_state: &mut EngineRuntimeState,
+    cmd: EngineCommand,
+) -> Result<(), EngineWorkerError> {
     match cmd {
         EngineCommand::SpawnCar { reply_tx } => {
             let result = engine.spawn_vehicle().map_err(EngineWorkerError::Engine);
@@ -273,6 +343,19 @@ fn handle_command(engine: &mut Engine, cmd: EngineCommand) -> Result<(), EngineW
             let _ = reply_tx.send(result);
             Ok(())
         }
+        EngineCommand::GetRuntimeState { reply_tx } => {
+            let _ = reply_tx.send(Ok(runtime_state.clone()));
+            Ok(())
+        }
+        EngineCommand::SwitchRuntime {
+            activity_kind,
+            map_id,
+            reply_tx,
+        } => {
+            let result = switch_runtime(engine, cfg, runtime_state, activity_kind, map_id);
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
         EngineCommand::DespawnCar { car_id, reply_tx } => {
             let result = engine
                 .despawn_vehicle(car_id)
@@ -283,11 +366,59 @@ fn handle_command(engine: &mut Engine, cmd: EngineCommand) -> Result<(), EngineW
     }
 }
 
-/// Builds the engine instance using server configuration defaults.
-fn build_engine(cfg: &Config) -> Result<Engine, EngineWorkerError> {
-    tracing::info!(env = ?cfg.env, "initializing engine world");
+fn switch_runtime(
+    engine: &mut Engine,
+    cfg: &Config,
+    runtime_state: &mut EngineRuntimeState,
+    activity_kind: EngineActivityKind,
+    map_id: String,
+) -> Result<EngineRuntimeState, EngineWorkerError> {
+    validate_map_id(&map_id)?;
+    let new_engine = build_engine(cfg, &map_id)?;
+    *engine = new_engine;
 
-    let track_glb = cfg.tracks_dir.join("test.glb");
+    runtime_state.revision = runtime_state.revision.saturating_add(1);
+    runtime_state.activity_kind = activity_kind;
+    runtime_state.map_id = map_id;
+
+    tracing::info!(
+        revision = runtime_state.revision,
+        activity_kind = ?runtime_state.activity_kind,
+        map_id = %runtime_state.map_id,
+        "engine worker: runtime switched"
+    );
+
+    Ok(runtime_state.clone())
+}
+
+fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
+    if map_id.trim().is_empty() {
+        return Err(EngineWorkerError::InvalidArgument(
+            "map_id must be non-empty".to_string(),
+        ));
+    }
+    if !map_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(EngineWorkerError::InvalidArgument(
+            "map_id contains invalid characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Builds the engine instance using server configuration defaults.
+fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError> {
+    validate_map_id(map_id)?;
+    let track_glb = cfg.tracks_dir.join(format!("{map_id}.glb"));
+    tracing::info!(
+        env = ?cfg.env,
+        map_id = %map_id,
+        track_path = %track_glb.display(),
+        "initializing engine world"
+    );
+
     let mesh_glb = cfg.bolids_dir.join("test.glb");
     let mesh = VehicleMesh::load(&mesh_glb).map_err(EngineWorkerError::Engine)?;
 
