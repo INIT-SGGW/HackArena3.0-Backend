@@ -15,6 +15,7 @@ use std::time::Instant;
 use boink::engine::{Engine, EngineBuilder, VehicleMesh, VehicleModelConfig};
 use boink::error::Error as BoinkError;
 use boink::model::control::Controls;
+use boink::model::ghost::{GhostModeConditionLogic, GhostModeSettings};
 use boink::model::math::Vec3;
 use boink::model::state::VehicleState;
 use boink::model::track::TrackData;
@@ -32,6 +33,16 @@ use super::commands::EngineCommand;
 /// Maximum number of queued commands. Keep small enough to apply backpressure.
 const COMMAND_QUEUE_CAPACITY: usize = 256;
 const DEFAULT_MAP_ID: &str = "test";
+const DEFAULT_GHOST_MODE_SETTINGS: GhostModeSettings = GhostModeSettings {
+    enabled: false,
+    min_speed_enter_mps: 0.0,
+    min_speed_exit_mps: 0.0,
+    enter_delay_ms: 0,
+    exit_delay_ms: 0,
+    min_completed_laps: 0,
+    condition_logic: GhostModeConditionLogic::Unspecified,
+    overlap_exit_delay_ms: 0,
+};
 
 /// Backend runtime activity kind reflected by engine worker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +188,22 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Updates global ghost mode settings in the active engine world.
+    pub async fn set_ghost_mode_settings(
+        &self,
+        settings: GhostModeSettings,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetGhostModeSettings { settings, reply_tx })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Despawns a car, releasing it from the engine world.
     pub async fn despawn_car(&self, car_id: u64) -> Result<(), EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -207,7 +234,11 @@ pub async fn spawn(
         activity_kind: EngineActivityKind::OfficialRace,
         map_id: DEFAULT_MAP_ID.to_string(),
     };
-    let engine = build_engine(&cfg, &runtime_state.map_id)?;
+    let mut engine = build_engine(&cfg, &runtime_state.map_id)?;
+    let ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
+    engine
+        .set_ghost_mode_settings(ghost_mode_settings)
+        .map_err(EngineWorkerError::Engine)?;
     let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f32;
     let run_cfg = Arc::clone(&cfg);
     let handle = tokio::task::spawn_local(async move {
@@ -219,6 +250,7 @@ pub async fn spawn(
             weather_sync,
             run_cfg,
             runtime_state,
+            ghost_mode_settings,
         )
         .await;
     });
@@ -234,6 +266,7 @@ async fn run_worker(
     weather_sync: WeatherSyncState,
     cfg: Arc<Config>,
     mut runtime_state: EngineRuntimeState,
+    mut ghost_mode_settings: GhostModeSettings,
 ) {
     let mut ticker =
         tokio::time::interval(tokio::time::Duration::from_secs_f32(simulation_dt_seconds));
@@ -296,7 +329,13 @@ async fn run_worker(
                     break;
                 };
 
-                if let Err(err) = handle_command(&mut engine, &cfg, &mut runtime_state, cmd) {
+                if let Err(err) = handle_command(
+                    &mut engine,
+                    &cfg,
+                    &mut runtime_state,
+                    &mut ghost_mode_settings,
+                    cmd,
+                ) {
                     tracing::warn!("engine worker: command failed: {err}");
                 }
             }
@@ -310,6 +349,7 @@ fn handle_command(
     engine: &mut Engine,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
+    ghost_mode_settings: &mut GhostModeSettings,
     cmd: EngineCommand,
 ) -> Result<(), EngineWorkerError> {
     match cmd {
@@ -352,7 +392,24 @@ fn handle_command(
             map_id,
             reply_tx,
         } => {
-            let result = switch_runtime(engine, cfg, runtime_state, activity_kind, map_id);
+            let result = switch_runtime(
+                engine,
+                cfg,
+                runtime_state,
+                *ghost_mode_settings,
+                activity_kind,
+                map_id,
+            );
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetGhostModeSettings { settings, reply_tx } => {
+            let result = engine
+                .set_ghost_mode_settings(settings)
+                .map_err(EngineWorkerError::Engine);
+            if result.is_ok() {
+                *ghost_mode_settings = settings;
+            }
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -370,11 +427,15 @@ fn switch_runtime(
     engine: &mut Engine,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
+    ghost_mode_settings: GhostModeSettings,
     activity_kind: EngineActivityKind,
     map_id: String,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
     validate_map_id(&map_id)?;
-    let new_engine = build_engine(cfg, &map_id)?;
+    let mut new_engine = build_engine(cfg, &map_id)?;
+    new_engine
+        .set_ghost_mode_settings(ghost_mode_settings)
+        .map_err(EngineWorkerError::Engine)?;
     *engine = new_engine;
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);

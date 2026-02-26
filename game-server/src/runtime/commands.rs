@@ -1,6 +1,6 @@
 //! Command types sent to the engine worker.
 
-use boink::model::{Controls, TrackData, VehicleState};
+use boink::model::{Controls, GhostModeSettings, TrackData, VehicleState};
 use tokio::sync::oneshot;
 
 use super::engine_worker::{EngineActivityKind, EngineRuntimeState, EngineWorkerError};
@@ -32,6 +32,10 @@ pub enum EngineCommand {
         activity_kind: EngineActivityKind,
         map_id: String,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
+    },
+    SetGhostModeSettings {
+        settings: GhostModeSettings,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
     },
     DespawnCar {
         car_id: u64,
