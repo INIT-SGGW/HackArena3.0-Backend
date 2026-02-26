@@ -32,7 +32,7 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 6
+#define BOINK_C_API_VERSION_MINOR 7
 
 #define BOINK_C_API_VERSION_PATCH 0
 
@@ -344,6 +344,44 @@ typedef struct BoinkWeather {
    */
   Real rain_intensity;
 } BoinkWeather;
+
+/**
+ * Represents ghost mode settings applied globally to the race simulation.
+ */
+typedef struct BoinkGhostModeSettings {
+  /**
+   * Enables or disables ghost mode logic.
+   */
+  bool enabled;
+  /**
+   * Minimum speed to enter ghost mode in meters per second.
+   */
+  Real min_speed_enter_mps;
+  /**
+   * Minimum speed to stay in ghost mode in meters per second.
+   */
+  Real min_speed_exit_mps;
+  /**
+   * Required time above enter threshold before ghost mode is enabled.
+   */
+  unsigned int enter_delay_ms;
+  /**
+   * Required time below exit threshold before ghost mode is disabled.
+   */
+  unsigned int exit_delay_ms;
+  /**
+   * Minimum completed laps required for ghost mode logic.
+   */
+  unsigned int min_completed_laps;
+  /**
+   * Entry-condition combine rule for speed and completed-laps checks.
+   */
+  int condition_logic;
+  /**
+   * Required time after overlap ends before ghost mode may be disabled.
+   */
+  unsigned int overlap_exit_delay_ms;
+} BoinkGhostModeSettings;
 
 #ifdef __cplusplus
 extern "C" {
@@ -692,6 +730,21 @@ BOINK_API int boink_read_vehicle_state(BoinkHandle h,
  * - Another error code for other failures.
  */
 BOINK_API int boink_set_weather(BoinkHandle h, const struct BoinkWeather *weather);
+
+/**
+ * Sets global ghost mode settings used by the simulation engine.
+ *
+ * Parameters:
+ * - `h` - handle to a valid race.
+ * - `settings` - non-null pointer to ghost mode settings.
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - `BOINK_ERR_INVALID_ARG` if `settings` is null.
+ * - Another error code for other failures.
+ */
+BOINK_API int boink_set_ghost_mode_settings(BoinkHandle h,
+                                         const struct BoinkGhostModeSettings *settings);
 
 #ifdef __cplusplus
 }  // extern "C"

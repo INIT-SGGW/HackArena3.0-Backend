@@ -13,7 +13,7 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 6;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 7;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -109,6 +109,28 @@ pub struct BoinkWeather {
     pub temperature_c: Real,
     /// Rain intensity in range [0.0, 1.0].
     pub rain_intensity: Real,
+}
+
+/// Represents ghost mode settings applied globally to the race simulation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkGhostModeSettings {
+    /// Enables or disables ghost mode logic.
+    pub enabled: bool,
+    /// Minimum speed to enter ghost mode in meters per second.
+    pub min_speed_enter_mps: Real,
+    /// Minimum speed to stay in ghost mode in meters per second.
+    pub min_speed_exit_mps: Real,
+    /// Required time above enter threshold before ghost mode is enabled.
+    pub enter_delay_ms: c_uint,
+    /// Required time below exit threshold before ghost mode is disabled.
+    pub exit_delay_ms: c_uint,
+    /// Minimum completed laps required for ghost mode logic.
+    pub min_completed_laps: c_uint,
+    /// Entry-condition combine rule for speed and completed-laps checks.
+    pub condition_logic: c_int,
+    /// Required time after overlap ends before ghost mode may be disabled.
+    pub overlap_exit_delay_ms: c_uint,
 }
 
 /// Represents one static centerline sample of a race track.
@@ -529,4 +551,19 @@ unsafe extern "C" {
     /// - `BOINK_ERR_INVALID_ARG` if `weather` is null.
     /// - Another error code for other failures.
     pub fn boink_set_weather(h: BoinkHandle, weather: *const BoinkWeather) -> c_int;
+
+    /// Sets global ghost mode settings used by the simulation engine.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `settings` - non-null pointer to ghost mode settings.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_INVALID_ARG` if `settings` is null.
+    /// - Another error code for other failures.
+    pub fn boink_set_ghost_mode_settings(
+        h: BoinkHandle,
+        settings: *const BoinkGhostModeSettings,
+    ) -> c_int;
 }
