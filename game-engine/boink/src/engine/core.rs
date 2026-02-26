@@ -13,7 +13,7 @@ use tracing::instrument;
 
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
-use crate::model::{Controls, TrackData, VehicleState, WeatherParams};
+use crate::model::{Controls, GhostModeSettings, TrackData, VehicleState, WeatherParams};
 #[cfg(feature = "legacy-native-lib")]
 use crate::native::api::NativeApi;
 use crate::version::ensure_c_api_compatible;
@@ -370,6 +370,81 @@ impl Engine {
                 Ok(())
             } else {
                 Err(Error::from_ffi_status(code, "boink_set_weather"))
+            }
+        }
+    }
+
+    /// Updates global ghost mode settings used by simulation.
+    pub fn set_ghost_mode_settings(&mut self, settings: GhostModeSettings) -> Result<()> {
+        let ffi_settings = sys::BoinkGhostModeSettings {
+            enabled: settings.enabled,
+            min_speed_enter_mps: settings.min_speed_enter_mps,
+            min_speed_exit_mps: settings.min_speed_exit_mps,
+            enter_delay_ms: settings.enter_delay_ms,
+            exit_delay_ms: settings.exit_delay_ms,
+            min_completed_laps: settings.min_completed_laps,
+            condition_logic: settings.condition_logic.as_i32(),
+            overlap_exit_delay_ms: settings.overlap_exit_delay_ms,
+        };
+
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_ghost_mode_settings) = api.boink_set_ghost_mode_settings() else {
+                static WARNED_MISSING_SET_GHOST_MODE_SETTINGS: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_SET_GHOST_MODE_SETTINGS.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_set_ghost_mode_settings symbol not found in native library; ghost mode settings updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+
+            tracing::debug!(
+                enabled = settings.enabled,
+                min_speed_enter_mps = settings.min_speed_enter_mps,
+                min_speed_exit_mps = settings.min_speed_exit_mps,
+                enter_delay_ms = settings.enter_delay_ms,
+                exit_delay_ms = settings.exit_delay_ms,
+                min_completed_laps = settings.min_completed_laps,
+                condition_logic = settings.condition_logic.as_i32(),
+                overlap_exit_delay_ms = settings.overlap_exit_delay_ms,
+                "boink_set_ghost_mode_settings (legacy dynamic symbol)"
+            );
+            let code = unsafe { set_ghost_mode_settings(self.handle, &ffi_settings as *const _) };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_set_ghost_mode_settings",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(
+                enabled = settings.enabled,
+                min_speed_enter_mps = settings.min_speed_enter_mps,
+                min_speed_exit_mps = settings.min_speed_exit_mps,
+                enter_delay_ms = settings.enter_delay_ms,
+                exit_delay_ms = settings.exit_delay_ms,
+                min_completed_laps = settings.min_completed_laps,
+                condition_logic = settings.condition_logic.as_i32(),
+                overlap_exit_delay_ms = settings.overlap_exit_delay_ms,
+                "boink_set_ghost_mode_settings"
+            );
+            let code = unsafe {
+                sys::boink_set_ghost_mode_settings(self.handle, &ffi_settings as *const _)
+            };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_set_ghost_mode_settings",
+                ))
             }
         }
     }

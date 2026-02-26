@@ -17,6 +17,9 @@ pub type LegacyStringFn = unsafe extern "C" fn(*mut std::os::raw::c_char, *mut u
 /// Legacy counterpart of weather-setting function.
 pub type LegacySetWeatherFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, *const boink_sys::BoinkWeather) -> i32;
+/// Legacy counterpart of ghost-mode-setting function.
+pub type LegacySetGhostModeSettingsFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, *const boink_sys::BoinkGhostModeSettings) -> i32;
 /// Legacy counterpart of track-data query function.
 pub type LegacyGetTrackDataFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, *mut boink_sys::BoinkTrackData) -> i32;
