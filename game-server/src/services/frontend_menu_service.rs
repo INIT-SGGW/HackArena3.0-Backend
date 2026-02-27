@@ -13,9 +13,8 @@ use crate::db::repos::sandbox_config::SandboxConfigRepo;
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
-    find_unique_sandbox_by_map_id, runtime_activity_kind_to_proto,
-    runtime_time_of_day_preset_to_proto, sandbox_runtime_info_from_record, sandbox_to_proto,
-    utc_now_timestamp,
+    find_sandbox_by_id, runtime_activity_kind_to_proto, runtime_time_of_day_preset_to_proto,
+    sandbox_runtime_info_from_record, sandbox_to_proto, utc_now_timestamp,
 };
 
 const STREAM_CHANNEL_CAPACITY: usize = 16;
@@ -41,13 +40,10 @@ impl FrontendMenuServiceImpl {
             })?;
 
         let active_sandbox = if matches!(runtime.activity_kind, EngineActivityKind::Sandbox) {
-            match find_unique_sandbox_by_map_id(&snapshot.sandboxes, &runtime.map_id) {
-                Ok(value) => value,
-                Err(err) => {
-                    tracing::warn!(error = %err, map_id = %runtime.map_id, "unable to resolve unique active sandbox by map_id");
-                    None
-                }
-            }
+            runtime
+                .active_sandbox_id
+                .as_deref()
+                .and_then(|sandbox_id| find_sandbox_by_id(&snapshot.sandboxes, sandbox_id))
         } else {
             None
         };

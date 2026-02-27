@@ -165,22 +165,15 @@ pub fn sandbox_runtime_info_from_record(
     }
 }
 
-/// Finds a unique sandbox record by map_id.
-pub fn find_unique_sandbox_by_map_id(
+/// Finds sandbox record by stable sandbox identifier.
+pub fn find_sandbox_by_id(
     sandboxes: &[SandboxConfigRecord],
-    map_id: &str,
-) -> Result<Option<SandboxConfigRecord>, &'static str> {
-    let mut matching = sandboxes
+    sandbox_id: &str,
+) -> Option<SandboxConfigRecord> {
+    sandboxes
         .iter()
-        .filter(|entry| entry.config.map_id == map_id);
-    let first = matching.next().cloned();
-    let second_exists = matching.next().is_some();
-
-    if second_exists {
-        return Err("multiple sandbox configs share the same map_id");
-    }
-
-    Ok(first)
+        .find(|entry| entry.sandbox_id == sandbox_id)
+        .cloned()
 }
 
 /// Returns disabled/default ghost mode settings for engine runtime.

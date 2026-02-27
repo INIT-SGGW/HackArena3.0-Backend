@@ -21,11 +21,10 @@ use crate::db::repos::sandbox_config::{
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
-    default_engine_ghost_mode_settings, engine_ghost_mode_settings_from_record,
-    find_unique_sandbox_by_map_id, runtime_activity_kind_to_proto,
-    runtime_time_of_day_preset_from_proto, runtime_time_of_day_preset_to_proto,
-    sandbox_input_from_proto, sandbox_runtime_info_from_record, sandbox_to_proto,
-    utc_now_timestamp,
+    default_engine_ghost_mode_settings, engine_ghost_mode_settings_from_record, find_sandbox_by_id,
+    runtime_activity_kind_to_proto, runtime_time_of_day_preset_from_proto,
+    runtime_time_of_day_preset_to_proto, sandbox_input_from_proto,
+    sandbox_runtime_info_from_record, sandbox_to_proto, utc_now_timestamp,
 };
 
 /// SandboxAdmin service backed by persisted sandbox config snapshot.
@@ -193,6 +192,7 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
                     request.expected_revision,
                     EngineActivityKind::Sandbox,
                     sandbox.config.map_id.clone(),
+                    Some(sandbox.sandbox_id.clone()),
                     Some(runtime_time_of_day_preset_from_proto(
                         sandbox.config.time_of_day_preset,
                     )),
@@ -217,6 +217,7 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
                 request.expected_revision,
                 EngineActivityKind::None,
                 current_runtime_map_id_for_deactivation(&self.engine).await?,
+                None,
                 None,
                 Some(default_engine_ghost_mode_settings()),
             )
@@ -249,20 +250,21 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
                 "sandbox time-of-day override requires active sandbox runtime",
             ));
         }
+        let active_sandbox_id = runtime_before.active_sandbox_id.clone().ok_or_else(|| {
+            Status::failed_precondition("active sandbox runtime does not include active_sandbox_id")
+        })?;
 
         let snapshot = self
             .repo
             .get_snapshot()
             .await
             .map_err(map_repo_error_to_status)?;
-        let active_sandbox =
-            find_unique_sandbox_by_map_id(&snapshot.sandboxes, &runtime_before.map_id)
-                .map_err(Status::failed_precondition)?
-                .ok_or_else(|| {
-                    Status::failed_precondition(
-                        "active sandbox runtime does not match configured sandbox entry",
-                    )
-                })?;
+        let active_sandbox = find_sandbox_by_id(&snapshot.sandboxes, &active_sandbox_id)
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    "active sandbox runtime does not match configured sandbox entry",
+                )
+            })?;
 
         if !request.sandbox_id.trim().is_empty() && request.sandbox_id != active_sandbox.sandbox_id
         {
@@ -301,17 +303,10 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
             .map_err(map_repo_error_to_status)?;
 
         let active_sandbox = if matches!(runtime.activity_kind, EngineActivityKind::Sandbox) {
-            match find_unique_sandbox_by_map_id(&snapshot.sandboxes, &runtime.map_id) {
-                Ok(value) => value,
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        map_id = %runtime.map_id,
-                        "unable to resolve unique active sandbox by map_id"
-                    );
-                    None
-                }
-            }
+            runtime
+                .active_sandbox_id
+                .as_deref()
+                .and_then(|sandbox_id| find_sandbox_by_id(&snapshot.sandboxes, sandbox_id))
         } else {
             None
         };
@@ -348,29 +343,15 @@ impl SandboxAdminServiceImpl {
 
     async fn require_sandbox_not_active(&self, sandbox_id: &str) -> Result<(), Status> {
         let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
-        if !matches!(runtime.activity_kind, EngineActivityKind::Sandbox) {
+        if !matches!(runtime.activity_kind, EngineActivityKind::Sandbox)
+            || runtime.active_sandbox_id.as_deref() != Some(sandbox_id)
+        {
             return Ok(());
         }
 
-        let snapshot = self
-            .repo
-            .get_snapshot()
-            .await
-            .map_err(map_repo_error_to_status)?;
-        let target = snapshot
-            .sandboxes
-            .iter()
-            .find(|entry| entry.sandbox_id == sandbox_id);
-        let Some(target) = target else {
-            return Ok(());
-        };
-
-        if target.config.map_id == runtime.map_id {
-            return Err(Status::failed_precondition(
-                "active sandbox cannot be modified",
-            ));
-        }
-        Ok(())
+        Err(Status::failed_precondition(
+            "active sandbox cannot be modified",
+        ))
     }
 }
 

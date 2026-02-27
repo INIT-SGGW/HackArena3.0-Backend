@@ -34,6 +34,7 @@ pub enum EngineCommand {
         expected_revision: u64,
         activity_kind: EngineActivityKind,
         map_id: String,
+        active_sandbox_id: Option<String>,
         time_of_day_preset: Option<EngineRuntimeTimeOfDayPreset>,
         ghost_mode_settings: Option<GhostModeSettings>,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,

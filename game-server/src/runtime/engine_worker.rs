@@ -68,6 +68,7 @@ pub struct EngineRuntimeState {
     pub revision: u64,
     pub activity_kind: EngineActivityKind,
     pub map_id: String,
+    pub active_sandbox_id: Option<String>,
     pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
 }
 
@@ -190,6 +191,7 @@ impl EngineClient {
         expected_revision: u64,
         activity_kind: EngineActivityKind,
         map_id: String,
+        active_sandbox_id: Option<String>,
         time_of_day_preset: Option<EngineRuntimeTimeOfDayPreset>,
         ghost_mode_settings: Option<GhostModeSettings>,
     ) -> Result<EngineRuntimeState, EngineWorkerError> {
@@ -199,6 +201,7 @@ impl EngineClient {
                 expected_revision,
                 activity_kind,
                 map_id,
+                active_sandbox_id,
                 time_of_day_preset,
                 ghost_mode_settings,
                 reply_tx,
@@ -277,6 +280,7 @@ pub async fn spawn(
         revision: 0,
         activity_kind: EngineActivityKind::OfficialRace,
         map_id: DEFAULT_MAP_ID.to_string(),
+        active_sandbox_id: None,
         time_of_day_preset: EngineRuntimeTimeOfDayPreset::Unspecified,
     };
     let mut engine = build_engine(&cfg, &runtime_state.map_id)?;
@@ -436,6 +440,7 @@ fn handle_command(
             expected_revision,
             activity_kind,
             map_id,
+            active_sandbox_id: next_active_sandbox_id,
             time_of_day_preset: next_time_of_day_preset,
             ghost_mode_settings: next_ghost_mode_settings,
             reply_tx,
@@ -451,6 +456,7 @@ fn handle_command(
                 expected_revision,
                 activity_kind,
                 map_id,
+                next_active_sandbox_id,
                 target_time_of_day_preset,
                 target_ghost_mode_settings,
             );
@@ -496,6 +502,7 @@ fn switch_runtime(
     expected_revision: u64,
     activity_kind: EngineActivityKind,
     map_id: String,
+    active_sandbox_id: Option<String>,
     time_of_day_preset: EngineRuntimeTimeOfDayPreset,
     ghost_mode_settings: GhostModeSettings,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
@@ -512,15 +519,34 @@ fn switch_runtime(
         .map_err(EngineWorkerError::Engine)?;
     *engine = new_engine;
 
+    let normalized_active_sandbox_id = match activity_kind {
+        EngineActivityKind::Sandbox => {
+            let active_sandbox_id = active_sandbox_id.ok_or_else(|| {
+                EngineWorkerError::InvalidArgument(
+                    "active_sandbox_id is required for sandbox runtime".to_string(),
+                )
+            })?;
+            if active_sandbox_id.trim().is_empty() {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "active_sandbox_id must be non-empty for sandbox runtime".to_string(),
+                ));
+            }
+            Some(active_sandbox_id)
+        }
+        EngineActivityKind::None | EngineActivityKind::OfficialRace => None,
+    };
+
     runtime_state.revision = runtime_state.revision.saturating_add(1);
     runtime_state.activity_kind = activity_kind;
     runtime_state.map_id = map_id;
+    runtime_state.active_sandbox_id = normalized_active_sandbox_id;
     runtime_state.time_of_day_preset = time_of_day_preset;
 
     tracing::info!(
         revision = runtime_state.revision,
         activity_kind = ?runtime_state.activity_kind,
         map_id = %runtime_state.map_id,
+        active_sandbox_id = ?runtime_state.active_sandbox_id,
         time_of_day_preset = ?runtime_state.time_of_day_preset,
         "engine worker: runtime switched"
     );
@@ -544,6 +570,11 @@ fn set_runtime_time_of_day(
             "sandbox time-of-day override requires active sandbox runtime".to_string(),
         ));
     }
+    if runtime_state.active_sandbox_id.is_none() {
+        return Err(EngineWorkerError::InvalidArgument(
+            "sandbox time-of-day override requires active_sandbox_id".to_string(),
+        ));
+    }
     if matches!(preset, EngineRuntimeTimeOfDayPreset::Unspecified) {
         return Err(EngineWorkerError::InvalidArgument(
             "time-of-day preset must be specified".to_string(),
@@ -557,6 +588,7 @@ fn set_runtime_time_of_day(
         revision = runtime_state.revision,
         activity_kind = ?runtime_state.activity_kind,
         map_id = %runtime_state.map_id,
+        active_sandbox_id = ?runtime_state.active_sandbox_id,
         time_of_day_preset = ?runtime_state.time_of_day_preset,
         "engine worker: sandbox time-of-day updated"
     );
