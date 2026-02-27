@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM sandbox_configs WHERE sandbox_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bddd088cc369ac62665f55fe723f9c78c03a73b9b2272d988a41bef2365c4796"
+}

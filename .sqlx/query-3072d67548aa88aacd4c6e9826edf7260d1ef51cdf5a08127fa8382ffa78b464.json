@@ -1,0 +1,108 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            sandbox_id,\n            sandbox_name,\n            map_id,\n            time_of_day_preset AS \"time_of_day_preset: DbTimeOfDayPreset\",\n            ghost_mode_enabled,\n            ghost_min_speed_enter_mps,\n            ghost_min_speed_exit_mps,\n            ghost_enter_delay_ms,\n            ghost_exit_delay_ms,\n            ghost_min_completed_laps,\n            ghost_condition_logic AS \"ghost_condition_logic: DbGhostModeConditionLogic\",\n            ghost_overlap_exit_delay_ms\n        FROM sandbox_configs\n        ORDER BY sandbox_id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sandbox_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "sandbox_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "map_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "time_of_day_preset: DbTimeOfDayPreset",
+        "type_info": {
+          "Custom": {
+            "name": "time_of_day_preset",
+            "kind": {
+              "Enum": [
+                "morning",
+                "noon",
+                "evening",
+                "night"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "ghost_mode_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "ghost_min_speed_enter_mps",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 6,
+        "name": "ghost_min_speed_exit_mps",
+        "type_info": "Float4"
+      },
+      {
+        "ordinal": 7,
+        "name": "ghost_enter_delay_ms",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "ghost_exit_delay_ms",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "ghost_min_completed_laps",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "ghost_condition_logic: DbGhostModeConditionLogic",
+        "type_info": {
+          "Custom": {
+            "name": "ghost_mode_condition_logic",
+            "kind": {
+              "Enum": [
+                "and",
+                "or"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "ghost_overlap_exit_delay_ms",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "3072d67548aa88aacd4c6e9826edf7260d1ef51cdf5a08127fa8382ffa78b464"
+}

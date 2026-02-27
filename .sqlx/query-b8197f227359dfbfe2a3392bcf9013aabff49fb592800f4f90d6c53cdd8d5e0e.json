@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sandbox_config_state SET revision = $1 WHERE singleton_key = TRUE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b8197f227359dfbfe2a3392bcf9013aabff49fb592800f4f90d6c53cdd8d5e0e"
+}
