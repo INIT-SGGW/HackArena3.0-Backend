@@ -2,6 +2,8 @@
 
 pub mod asset_service;
 mod error_map;
+#[cfg(feature = "official")]
+pub mod frontend_menu_service;
 mod mappers;
 pub mod race_config_admin_service;
 mod race_config_mappers;

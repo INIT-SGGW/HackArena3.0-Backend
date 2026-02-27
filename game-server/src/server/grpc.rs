@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "official")]
+use proto::race::v1::frontend_menu_service_server::FrontendMenuServiceServer;
+#[cfg(feature = "official")]
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
 #[cfg(feature = "official")]
@@ -35,6 +37,8 @@ use crate::db::repos::sandbox_config::SandboxConfigRepo;
 use crate::db::repos::weather::WeatherRepo;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
+#[cfg(feature = "official")]
+use crate::services::frontend_menu_service::FrontendMenuServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::race_config_admin_service::RaceConfigAdminServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
@@ -82,6 +86,10 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<SandboxAdminServiceServer<SandboxAdminServiceImpl>>()
         .await;
+    #[cfg(feature = "official")]
+    health_reporter
+        .set_serving::<FrontendMenuServiceServer<FrontendMenuServiceImpl>>()
+        .await;
 
     #[cfg(feature = "official")]
     let token_validator = std::sync::Arc::new(TokenValidator::new());
@@ -96,10 +104,18 @@ pub async fn serve_grpc(
     );
     #[cfg(feature = "official")]
     let sandbox_engine = engine.clone();
+    #[cfg(feature = "official")]
+    let frontend_menu_engine = engine.clone();
     let track_impl = TrackServiceImpl::new(engine);
 
     #[cfg(feature = "official")]
-    let (weather_query_impl, weather_admin_impl, race_config_admin_impl, sandbox_admin_impl) = {
+    let (
+        weather_query_impl,
+        weather_admin_impl,
+        race_config_admin_impl,
+        sandbox_admin_impl,
+        frontend_menu_impl,
+    ) = {
         let weather_repo = WeatherRepo::new(official_db_pool.clone());
         let race_config_repo = RaceConfigRepo::new(official_db_pool.clone());
         let sandbox_config_repo = SandboxConfigRepo::new(official_db_pool.clone());
@@ -108,10 +124,11 @@ pub async fn serve_grpc(
             WeatherAdminServiceImpl::with_repo(weather_repo, cfg.env, token_validator.clone()),
             RaceConfigAdminServiceImpl::with_repo(race_config_repo, token_validator.clone()),
             SandboxAdminServiceImpl::with_repo(
-                sandbox_config_repo,
+                sandbox_config_repo.clone(),
                 token_validator.clone(),
                 sandbox_engine,
             ),
+            FrontendMenuServiceImpl::with_repo(sandbox_config_repo, frontend_menu_engine),
         )
     };
 
@@ -167,6 +184,8 @@ pub async fn serve_grpc(
     let server = server.add_service(RaceConfigAdminServiceServer::new(race_config_admin_impl));
     #[cfg(feature = "official")]
     let server = server.add_service(SandboxAdminServiceServer::new(sandbox_admin_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(FrontendMenuServiceServer::new(frontend_menu_impl));
 
     server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))
