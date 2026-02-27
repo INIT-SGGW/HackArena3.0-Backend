@@ -63,15 +63,18 @@ pub enum EngineRuntimeTimeOfDayPreset {
 }
 
 /// Scheduled sandbox activation/deactivation stored in runtime metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnginePendingSandboxActivation {
     pub activate: bool,
     pub sandbox_id: String,
     pub execute_at_unix_ms: i64,
+    pub map_id: Option<String>,
+    pub time_of_day_preset: Option<EngineRuntimeTimeOfDayPreset>,
+    pub ghost_mode_settings: Option<GhostModeSettings>,
 }
 
 /// Minimal runtime state owned by the engine worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EngineRuntimeState {
     pub revision: u64,
     pub activity_kind: EngineActivityKind,
@@ -395,6 +398,14 @@ async fn run_worker(
                     tracing::info!("engine worker: debug drawer requested close");
                     break;
                 }
+                if let Err(err) = maybe_execute_due_pending_sandbox_activation(
+                    &mut engine,
+                    &cfg,
+                    &mut runtime_state,
+                    &mut ghost_mode_settings,
+                ) {
+                    tracing::warn!("engine worker: pending sandbox activation failed: {err}");
+                }
             }
 
             _ = weather_tick.tick() => {
@@ -417,6 +428,14 @@ async fn run_worker(
                     cmd,
                 ) {
                     tracing::warn!("engine worker: command failed: {err}");
+                }
+                if let Err(err) = maybe_execute_due_pending_sandbox_activation(
+                    &mut engine,
+                    &cfg,
+                    &mut runtime_state,
+                    &mut ghost_mode_settings,
+                ) {
+                    tracing::warn!("engine worker: pending sandbox activation failed: {err}");
                 }
             }
         }
@@ -662,6 +681,43 @@ fn set_pending_sandbox_activation(
                 "sandbox_id must be empty for scheduled deactivation".to_string(),
             ));
         }
+        if pending.activate {
+            let map_id = pending.map_id.as_ref().ok_or_else(|| {
+                EngineWorkerError::InvalidArgument(
+                    "map_id must be set for scheduled activation".to_string(),
+                )
+            })?;
+            if map_id.trim().is_empty() {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "map_id must be non-empty for scheduled activation".to_string(),
+                ));
+            }
+            let time_of_day_preset = pending.time_of_day_preset.ok_or_else(|| {
+                EngineWorkerError::InvalidArgument(
+                    "time_of_day_preset must be set for scheduled activation".to_string(),
+                )
+            })?;
+            if matches!(
+                time_of_day_preset,
+                EngineRuntimeTimeOfDayPreset::Unspecified
+            ) {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "time_of_day_preset must be specified for scheduled activation".to_string(),
+                ));
+            }
+            if pending.ghost_mode_settings.is_none() {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "ghost_mode_settings must be set for scheduled activation".to_string(),
+                ));
+            }
+        } else if pending.map_id.is_some()
+            || pending.time_of_day_preset.is_some()
+            || pending.ghost_mode_settings.is_some()
+        {
+            return Err(EngineWorkerError::InvalidArgument(
+                "scheduled deactivation must not include activation payload".to_string(),
+            ));
+        }
     }
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);
@@ -674,6 +730,77 @@ fn set_pending_sandbox_activation(
     );
 
     Ok(runtime_state.clone())
+}
+
+fn maybe_execute_due_pending_sandbox_activation(
+    engine: &mut Engine,
+    cfg: &Config,
+    runtime_state: &mut EngineRuntimeState,
+    ghost_mode_settings: &mut GhostModeSettings,
+) -> Result<(), EngineWorkerError> {
+    let Some(pending) = runtime_state.pending_sandbox_activation.clone() else {
+        return Ok(());
+    };
+    if pending.execute_at_unix_ms > current_unix_ms() {
+        return Ok(());
+    }
+
+    if pending.activate {
+        let map_id = pending.map_id.ok_or_else(|| {
+            EngineWorkerError::InvalidArgument("scheduled activation is missing map_id".to_string())
+        })?;
+        let time_of_day_preset = pending.time_of_day_preset.ok_or_else(|| {
+            EngineWorkerError::InvalidArgument(
+                "scheduled activation is missing time_of_day_preset".to_string(),
+            )
+        })?;
+        let scheduled_ghost_mode_settings = pending.ghost_mode_settings.ok_or_else(|| {
+            EngineWorkerError::InvalidArgument(
+                "scheduled activation is missing ghost_mode_settings".to_string(),
+            )
+        })?;
+
+        let _ = switch_runtime(
+            engine,
+            cfg,
+            runtime_state,
+            runtime_state.revision,
+            EngineActivityKind::Sandbox,
+            map_id,
+            Some(pending.sandbox_id),
+            time_of_day_preset,
+            scheduled_ghost_mode_settings,
+        )?;
+        *ghost_mode_settings = scheduled_ghost_mode_settings;
+        tracing::info!("engine worker: scheduled sandbox activation executed");
+        return Ok(());
+    }
+
+    let deactivation_ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
+    let _ = switch_runtime(
+        engine,
+        cfg,
+        runtime_state,
+        runtime_state.revision,
+        EngineActivityKind::None,
+        runtime_state.map_id.clone(),
+        None,
+        runtime_state.time_of_day_preset,
+        deactivation_ghost_mode_settings,
+    )?;
+    *ghost_mode_settings = deactivation_ghost_mode_settings;
+    tracing::info!("engine worker: scheduled sandbox deactivation executed");
+    Ok(())
+}
+
+fn current_unix_ms() -> i64 {
+    let now = std::time::SystemTime::now();
+    let duration = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+    let seconds = i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
+    let nanos_ms = i64::from(duration.subsec_millis());
+    seconds.saturating_mul(1000).saturating_add(nanos_ms)
 }
 
 fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {

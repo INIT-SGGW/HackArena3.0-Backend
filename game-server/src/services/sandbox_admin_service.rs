@@ -27,7 +27,7 @@ use crate::services::sandbox_mappers::{
     pending_sandbox_activation_to_proto, runtime_activity_kind_to_proto,
     runtime_time_of_day_preset_from_proto, runtime_time_of_day_preset_to_proto,
     sandbox_input_from_proto, sandbox_runtime_info_from_record, sandbox_to_proto,
-    timestamp_to_unix_ms, utc_now_timestamp,
+    timestamp_to_unix_ms, unix_ms_to_timestamp, utc_now_timestamp,
 };
 
 /// SandboxAdmin service backed by persisted sandbox config snapshot.
@@ -180,20 +180,47 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
                         "sandbox_id must be non-empty when activate=true",
                     ));
                 }
-                let exists = self
+                let sandbox = self
                     .repo
                     .get_snapshot()
                     .await
                     .map_err(map_repo_error_to_status)?
                     .sandboxes
                     .into_iter()
-                    .any(|entry| entry.sandbox_id == request.sandbox_id);
-                if !exists {
-                    return Err(Status::not_found(format!(
-                        "sandbox config not found: {}",
-                        request.sandbox_id
-                    )));
-                }
+                    .find(|entry| entry.sandbox_id == request.sandbox_id)
+                    .ok_or_else(|| {
+                        Status::not_found(format!(
+                            "sandbox config not found: {}",
+                            request.sandbox_id
+                        ))
+                    })?;
+
+                let pending = EnginePendingSandboxActivation {
+                    activate: true,
+                    sandbox_id: request.sandbox_id.clone(),
+                    execute_at_unix_ms,
+                    map_id: Some(sandbox.config.map_id),
+                    time_of_day_preset: Some(runtime_time_of_day_preset_from_proto(
+                        sandbox.config.time_of_day_preset,
+                    )),
+                    ghost_mode_settings: Some(engine_ghost_mode_settings_from_record(
+                        sandbox.config.ghost_mode.as_ref(),
+                    )),
+                };
+                let runtime_after = self
+                    .engine
+                    .set_pending_sandbox_activation(request.expected_revision, Some(pending))
+                    .await
+                    .map_err(map_worker_err)?;
+
+                return Ok(Response::new(SetSandboxActivationResponse {
+                    revision: runtime_after.revision,
+                    activate: true,
+                    sandbox_id: request.sandbox_id,
+                    effective_at_utc: runtime_after
+                        .pending_sandbox_activation
+                        .map(|entry| unix_ms_to_timestamp(entry.execute_at_unix_ms)),
+                }));
             } else if !request.sandbox_id.trim().is_empty() {
                 return Err(Status::invalid_argument(
                     "sandbox_id must be empty when activate=false",
@@ -201,13 +228,12 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
             }
 
             let pending = EnginePendingSandboxActivation {
-                activate: request.activate,
-                sandbox_id: if request.activate {
-                    request.sandbox_id.clone()
-                } else {
-                    String::new()
-                },
+                activate: false,
+                sandbox_id: String::new(),
                 execute_at_unix_ms,
+                map_id: None,
+                time_of_day_preset: None,
+                ghost_mode_settings: None,
             };
             let runtime_after = self
                 .engine
@@ -217,15 +243,11 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
 
             return Ok(Response::new(SetSandboxActivationResponse {
                 revision: runtime_after.revision,
-                activate: request.activate,
-                sandbox_id: if request.activate {
-                    request.sandbox_id
-                } else {
-                    String::new()
-                },
-                effective_at_utc: runtime_after.pending_sandbox_activation.map(|entry| {
-                    crate::services::sandbox_mappers::unix_ms_to_timestamp(entry.execute_at_unix_ms)
-                }),
+                activate: false,
+                sandbox_id: String::new(),
+                effective_at_utc: runtime_after
+                    .pending_sandbox_activation
+                    .map(|entry| unix_ms_to_timestamp(entry.execute_at_unix_ms)),
             }));
         }
 
