@@ -42,12 +42,18 @@ pub enum EngineCommand {
     },
     SetRuntimeTimeOfDay {
         expected_revision: u64,
+        sandbox_id: Option<String>,
         preset: EngineRuntimeTimeOfDayPreset,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
     SetPendingSandboxActivation {
         expected_revision: u64,
-        pending: Option<EnginePendingSandboxActivation>,
+        pending: EnginePendingSandboxActivation,
+        reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
+    },
+    DeactivateSandbox {
+        expected_revision: u64,
+        sandbox_id: String,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
     SetGhostModeSettings {

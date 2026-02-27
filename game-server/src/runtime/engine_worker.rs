@@ -73,6 +73,14 @@ pub struct EnginePendingSandboxActivation {
     pub ghost_mode_settings: Option<GhostModeSettings>,
 }
 
+/// Active sandbox runtime details tracked by the engine worker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineActiveSandboxState {
+    pub sandbox_id: String,
+    pub map_id: String,
+    pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
+}
+
 /// Minimal runtime state owned by the engine worker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineRuntimeState {
@@ -80,8 +88,9 @@ pub struct EngineRuntimeState {
     pub activity_kind: EngineActivityKind,
     pub map_id: String,
     pub active_sandbox_id: Option<String>,
+    pub active_sandboxes: Vec<EngineActiveSandboxState>,
     pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
-    pub pending_sandbox_activation: Option<EnginePendingSandboxActivation>,
+    pub pending_sandbox_activations: Vec<EnginePendingSandboxActivation>,
 }
 
 /// Errors returned by the engine worker boundary.
@@ -230,12 +239,14 @@ impl EngineClient {
     pub async fn set_runtime_time_of_day(
         &self,
         expected_revision: u64,
+        sandbox_id: Option<String>,
         preset: EngineRuntimeTimeOfDayPreset,
     ) -> Result<EngineRuntimeState, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::SetRuntimeTimeOfDay {
                 expected_revision,
+                sandbox_id,
                 preset,
                 reply_tx,
             })
@@ -251,13 +262,34 @@ impl EngineClient {
     pub async fn set_pending_sandbox_activation(
         &self,
         expected_revision: u64,
-        pending: Option<EnginePendingSandboxActivation>,
+        pending: EnginePendingSandboxActivation,
     ) -> Result<EngineRuntimeState, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::SetPendingSandboxActivation {
                 expected_revision,
                 pending,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Deactivates target sandbox runtime session.
+    pub async fn deactivate_sandbox(
+        &self,
+        expected_revision: u64,
+        sandbox_id: String,
+    ) -> Result<EngineRuntimeState, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::DeactivateSandbox {
+                expected_revision,
+                sandbox_id,
                 reply_tx,
             })
             .await
@@ -314,8 +346,9 @@ pub async fn spawn(
         activity_kind: EngineActivityKind::OfficialRace,
         map_id: DEFAULT_MAP_ID.to_string(),
         active_sandbox_id: None,
+        active_sandboxes: Vec::new(),
         time_of_day_preset: EngineRuntimeTimeOfDayPreset::Unspecified,
-        pending_sandbox_activation: None,
+        pending_sandbox_activations: Vec::new(),
     };
     let mut engine = build_engine(&cfg, &runtime_state.map_id)?;
     let ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
@@ -518,10 +551,12 @@ fn handle_command(
         }
         EngineCommand::SetRuntimeTimeOfDay {
             expected_revision,
+            sandbox_id,
             preset,
             reply_tx,
         } => {
-            let result = set_runtime_time_of_day(runtime_state, expected_revision, preset);
+            let result =
+                set_runtime_time_of_day(runtime_state, expected_revision, sandbox_id, preset);
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -531,6 +566,22 @@ fn handle_command(
             reply_tx,
         } => {
             let result = set_pending_sandbox_activation(runtime_state, expected_revision, pending);
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::DeactivateSandbox {
+            expected_revision,
+            sandbox_id,
+            reply_tx,
+        } => {
+            let result = deactivate_sandbox(
+                engine,
+                cfg,
+                runtime_state,
+                expected_revision,
+                &sandbox_id,
+                ghost_mode_settings,
+            );
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -571,14 +622,21 @@ fn switch_runtime(
             actual: runtime_state.revision,
         });
     }
-    validate_map_id(&map_id)?;
-    let mut new_engine = build_engine(cfg, &map_id)?;
-    new_engine
-        .set_ghost_mode_settings(ghost_mode_settings)
-        .map_err(EngineWorkerError::Engine)?;
-    *engine = new_engine;
+    match activity_kind {
+        EngineActivityKind::None | EngineActivityKind::OfficialRace => {
+            validate_map_id(&map_id)?;
+            let mut new_engine = build_engine(cfg, &map_id)?;
+            new_engine
+                .set_ghost_mode_settings(ghost_mode_settings)
+                .map_err(EngineWorkerError::Engine)?;
+            *engine = new_engine;
 
-    let normalized_active_sandbox_id = match activity_kind {
+            runtime_state.activity_kind = activity_kind;
+            runtime_state.map_id = map_id;
+            runtime_state.active_sandbox_id = None;
+            runtime_state.active_sandboxes.clear();
+            runtime_state.time_of_day_preset = time_of_day_preset;
+        }
         EngineActivityKind::Sandbox => {
             let active_sandbox_id = active_sandbox_id.ok_or_else(|| {
                 EngineWorkerError::InvalidArgument(
@@ -590,26 +648,140 @@ fn switch_runtime(
                     "active_sandbox_id must be non-empty for sandbox runtime".to_string(),
                 ));
             }
-            Some(active_sandbox_id)
+            validate_map_id(&map_id)?;
+
+            if !matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
+                let mut new_engine = build_engine(cfg, &map_id)?;
+                new_engine
+                    .set_ghost_mode_settings(ghost_mode_settings)
+                    .map_err(EngineWorkerError::Engine)?;
+                *engine = new_engine;
+
+                runtime_state.activity_kind = EngineActivityKind::Sandbox;
+                runtime_state.map_id = map_id.clone();
+                runtime_state.active_sandbox_id = Some(active_sandbox_id.clone());
+                runtime_state.time_of_day_preset = time_of_day_preset;
+                runtime_state.active_sandboxes = vec![EngineActiveSandboxState {
+                    sandbox_id: active_sandbox_id,
+                    map_id,
+                    time_of_day_preset,
+                }];
+            } else {
+                upsert_active_sandbox(
+                    &mut runtime_state.active_sandboxes,
+                    EngineActiveSandboxState {
+                        sandbox_id: active_sandbox_id.clone(),
+                        map_id: map_id.clone(),
+                        time_of_day_preset,
+                    },
+                );
+                let mut new_engine = build_engine(cfg, &map_id)?;
+                new_engine
+                    .set_ghost_mode_settings(ghost_mode_settings)
+                    .map_err(EngineWorkerError::Engine)?;
+                *engine = new_engine;
+                runtime_state.map_id = map_id;
+                runtime_state.active_sandbox_id = Some(active_sandbox_id);
+                runtime_state.time_of_day_preset = time_of_day_preset;
+            }
         }
-        EngineActivityKind::None | EngineActivityKind::OfficialRace => None,
-    };
+    }
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);
-    runtime_state.activity_kind = activity_kind;
-    runtime_state.map_id = map_id;
-    runtime_state.active_sandbox_id = normalized_active_sandbox_id;
-    runtime_state.time_of_day_preset = time_of_day_preset;
-    runtime_state.pending_sandbox_activation = None;
+    if let Some(active_id) = runtime_state.active_sandbox_id.clone() {
+        runtime_state
+            .pending_sandbox_activations
+            .retain(|pending| pending.sandbox_id != active_id);
+    }
 
     tracing::info!(
         revision = runtime_state.revision,
         activity_kind = ?runtime_state.activity_kind,
         map_id = %runtime_state.map_id,
         active_sandbox_id = ?runtime_state.active_sandbox_id,
+        active_sandboxes = runtime_state.active_sandboxes.len(),
         time_of_day_preset = ?runtime_state.time_of_day_preset,
-        pending_sandbox_activation = ?runtime_state.pending_sandbox_activation,
+        pending_sandbox_activations = runtime_state.pending_sandbox_activations.len(),
         "engine worker: runtime switched"
+    );
+
+    Ok(runtime_state.clone())
+}
+
+fn deactivate_sandbox(
+    engine: &mut Engine,
+    cfg: &Config,
+    runtime_state: &mut EngineRuntimeState,
+    expected_revision: u64,
+    sandbox_id: &str,
+    ghost_mode_settings: &mut GhostModeSettings,
+) -> Result<EngineRuntimeState, EngineWorkerError> {
+    if runtime_state.revision != expected_revision {
+        return Err(EngineWorkerError::RevisionMismatch {
+            expected: expected_revision,
+            actual: runtime_state.revision,
+        });
+    }
+    if sandbox_id.trim().is_empty() {
+        return Err(EngineWorkerError::InvalidArgument(
+            "sandbox_id must be non-empty for deactivation".to_string(),
+        ));
+    }
+    if !matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
+        return Err(EngineWorkerError::InvalidArgument(
+            "sandbox deactivation requires active sandbox runtime".to_string(),
+        ));
+    }
+
+    let position = runtime_state
+        .active_sandboxes
+        .iter()
+        .position(|entry| entry.sandbox_id == sandbox_id)
+        .ok_or_else(|| {
+            EngineWorkerError::InvalidArgument(
+                "sandbox_id does not match active sandbox session".to_string(),
+            )
+        })?;
+    runtime_state.active_sandboxes.remove(position);
+    runtime_state
+        .pending_sandbox_activations
+        .retain(|pending| pending.sandbox_id != sandbox_id);
+
+    if runtime_state.active_sandbox_id.as_deref() == Some(sandbox_id) {
+        if let Some(next_primary) = runtime_state.active_sandboxes.first().cloned() {
+            let mut new_engine = build_engine(cfg, &next_primary.map_id)?;
+            new_engine
+                .set_ghost_mode_settings(*ghost_mode_settings)
+                .map_err(EngineWorkerError::Engine)?;
+            *engine = new_engine;
+
+            runtime_state.activity_kind = EngineActivityKind::Sandbox;
+            runtime_state.map_id = next_primary.map_id;
+            runtime_state.active_sandbox_id = Some(next_primary.sandbox_id);
+            runtime_state.time_of_day_preset = next_primary.time_of_day_preset;
+        } else {
+            let next_map_id = runtime_state.map_id.clone();
+            let mut new_engine = build_engine(cfg, &next_map_id)?;
+            new_engine
+                .set_ghost_mode_settings(DEFAULT_GHOST_MODE_SETTINGS)
+                .map_err(EngineWorkerError::Engine)?;
+            *engine = new_engine;
+            *ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
+
+            runtime_state.activity_kind = EngineActivityKind::None;
+            runtime_state.active_sandbox_id = None;
+            runtime_state.time_of_day_preset = EngineRuntimeTimeOfDayPreset::Unspecified;
+        }
+    }
+
+    runtime_state.revision = runtime_state.revision.saturating_add(1);
+
+    tracing::info!(
+        revision = runtime_state.revision,
+        sandbox_id = %sandbox_id,
+        activity_kind = ?runtime_state.activity_kind,
+        active_sandboxes = runtime_state.active_sandboxes.len(),
+        "engine worker: sandbox deactivated"
     );
 
     Ok(runtime_state.clone())
@@ -618,6 +790,7 @@ fn switch_runtime(
 fn set_runtime_time_of_day(
     runtime_state: &mut EngineRuntimeState,
     expected_revision: u64,
+    sandbox_id: Option<String>,
     preset: EngineRuntimeTimeOfDayPreset,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
     if runtime_state.revision != expected_revision {
@@ -631,37 +804,80 @@ fn set_runtime_time_of_day(
             "sandbox time-of-day override requires active sandbox runtime".to_string(),
         ));
     }
-    if runtime_state.active_sandbox_id.is_none() {
-        return Err(EngineWorkerError::InvalidArgument(
-            "sandbox time-of-day override requires active_sandbox_id".to_string(),
-        ));
-    }
     if matches!(preset, EngineRuntimeTimeOfDayPreset::Unspecified) {
         return Err(EngineWorkerError::InvalidArgument(
             "time-of-day preset must be specified".to_string(),
         ));
     }
 
+    let target_sandbox_id = match sandbox_id {
+        Some(sandbox_id) => {
+            if sandbox_id.trim().is_empty() {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "sandbox_id must be non-empty when provided".to_string(),
+                ));
+            }
+            sandbox_id
+        }
+        None => {
+            if runtime_state.active_sandboxes.len() == 1 {
+                runtime_state.active_sandboxes[0].sandbox_id.clone()
+            } else {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "sandbox_id is required when multiple sandbox sessions are active".to_string(),
+                ));
+            }
+        }
+    };
+
+    let target = runtime_state
+        .active_sandboxes
+        .iter_mut()
+        .find(|entry| entry.sandbox_id == target_sandbox_id)
+        .ok_or_else(|| {
+            EngineWorkerError::InvalidArgument(
+                "sandbox_id does not match active sandbox session".to_string(),
+            )
+        })?;
+    target.time_of_day_preset = preset;
+    if runtime_state.active_sandbox_id.as_deref() == Some(target_sandbox_id.as_str()) {
+        runtime_state.time_of_day_preset = preset;
+    }
+
     runtime_state.revision = runtime_state.revision.saturating_add(1);
-    runtime_state.time_of_day_preset = preset;
 
     tracing::info!(
         revision = runtime_state.revision,
         activity_kind = ?runtime_state.activity_kind,
         map_id = %runtime_state.map_id,
         active_sandbox_id = ?runtime_state.active_sandbox_id,
+        active_sandboxes = runtime_state.active_sandboxes.len(),
         time_of_day_preset = ?runtime_state.time_of_day_preset,
-        pending_sandbox_activation = ?runtime_state.pending_sandbox_activation,
+        pending_sandbox_activations = runtime_state.pending_sandbox_activations.len(),
         "engine worker: sandbox time-of-day updated"
     );
 
     Ok(runtime_state.clone())
 }
 
+fn upsert_active_sandbox(
+    active_sandboxes: &mut Vec<EngineActiveSandboxState>,
+    next: EngineActiveSandboxState,
+) {
+    if let Some(current) = active_sandboxes
+        .iter_mut()
+        .find(|entry| entry.sandbox_id == next.sandbox_id)
+    {
+        *current = next;
+        return;
+    }
+    active_sandboxes.push(next);
+}
+
 fn set_pending_sandbox_activation(
     runtime_state: &mut EngineRuntimeState,
     expected_revision: u64,
-    pending: Option<EnginePendingSandboxActivation>,
+    pending: EnginePendingSandboxActivation,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
     if runtime_state.revision != expected_revision {
         return Err(EngineWorkerError::RevisionMismatch {
@@ -670,62 +886,63 @@ fn set_pending_sandbox_activation(
         });
     }
 
-    if let Some(pending) = pending.as_ref() {
-        if pending.activate && pending.sandbox_id.trim().is_empty() {
+    if pending.sandbox_id.trim().is_empty() {
+        return Err(EngineWorkerError::InvalidArgument(
+            "sandbox_id must be non-empty for pending activation/deactivation".to_string(),
+        ));
+    }
+    if pending.activate {
+        let map_id = pending.map_id.as_ref().ok_or_else(|| {
+            EngineWorkerError::InvalidArgument(
+                "map_id must be set for scheduled activation".to_string(),
+            )
+        })?;
+        if map_id.trim().is_empty() {
             return Err(EngineWorkerError::InvalidArgument(
-                "sandbox_id must be non-empty for scheduled activation".to_string(),
+                "map_id must be non-empty for scheduled activation".to_string(),
             ));
         }
-        if !pending.activate && !pending.sandbox_id.trim().is_empty() {
+        let time_of_day_preset = pending.time_of_day_preset.ok_or_else(|| {
+            EngineWorkerError::InvalidArgument(
+                "time_of_day_preset must be set for scheduled activation".to_string(),
+            )
+        })?;
+        if matches!(
+            time_of_day_preset,
+            EngineRuntimeTimeOfDayPreset::Unspecified
+        ) {
             return Err(EngineWorkerError::InvalidArgument(
-                "sandbox_id must be empty for scheduled deactivation".to_string(),
+                "time_of_day_preset must be specified for scheduled activation".to_string(),
             ));
         }
-        if pending.activate {
-            let map_id = pending.map_id.as_ref().ok_or_else(|| {
-                EngineWorkerError::InvalidArgument(
-                    "map_id must be set for scheduled activation".to_string(),
-                )
-            })?;
-            if map_id.trim().is_empty() {
-                return Err(EngineWorkerError::InvalidArgument(
-                    "map_id must be non-empty for scheduled activation".to_string(),
-                ));
-            }
-            let time_of_day_preset = pending.time_of_day_preset.ok_or_else(|| {
-                EngineWorkerError::InvalidArgument(
-                    "time_of_day_preset must be set for scheduled activation".to_string(),
-                )
-            })?;
-            if matches!(
-                time_of_day_preset,
-                EngineRuntimeTimeOfDayPreset::Unspecified
-            ) {
-                return Err(EngineWorkerError::InvalidArgument(
-                    "time_of_day_preset must be specified for scheduled activation".to_string(),
-                ));
-            }
-            if pending.ghost_mode_settings.is_none() {
-                return Err(EngineWorkerError::InvalidArgument(
-                    "ghost_mode_settings must be set for scheduled activation".to_string(),
-                ));
-            }
-        } else if pending.map_id.is_some()
-            || pending.time_of_day_preset.is_some()
-            || pending.ghost_mode_settings.is_some()
-        {
+        if pending.ghost_mode_settings.is_none() {
             return Err(EngineWorkerError::InvalidArgument(
-                "scheduled deactivation must not include activation payload".to_string(),
+                "ghost_mode_settings must be set for scheduled activation".to_string(),
             ));
         }
+    } else if pending.map_id.is_some()
+        || pending.time_of_day_preset.is_some()
+        || pending.ghost_mode_settings.is_some()
+    {
+        return Err(EngineWorkerError::InvalidArgument(
+            "scheduled deactivation must not include activation payload".to_string(),
+        ));
     }
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);
-    runtime_state.pending_sandbox_activation = pending;
+    if let Some(existing) = runtime_state
+        .pending_sandbox_activations
+        .iter_mut()
+        .find(|entry| entry.sandbox_id == pending.sandbox_id)
+    {
+        *existing = pending;
+    } else {
+        runtime_state.pending_sandbox_activations.push(pending);
+    }
 
     tracing::info!(
         revision = runtime_state.revision,
-        pending_sandbox_activation = ?runtime_state.pending_sandbox_activation,
+        pending_sandbox_activations = runtime_state.pending_sandbox_activations.len(),
         "engine worker: pending sandbox activation updated"
     );
 
@@ -738,58 +955,68 @@ fn maybe_execute_due_pending_sandbox_activation(
     runtime_state: &mut EngineRuntimeState,
     ghost_mode_settings: &mut GhostModeSettings,
 ) -> Result<(), EngineWorkerError> {
-    let Some(pending) = runtime_state.pending_sandbox_activation.clone() else {
-        return Ok(());
-    };
-    if pending.execute_at_unix_ms > current_unix_ms() {
+    if runtime_state.pending_sandbox_activations.is_empty() {
         return Ok(());
     }
-
-    if pending.activate {
-        let map_id = pending.map_id.ok_or_else(|| {
-            EngineWorkerError::InvalidArgument("scheduled activation is missing map_id".to_string())
-        })?;
-        let time_of_day_preset = pending.time_of_day_preset.ok_or_else(|| {
-            EngineWorkerError::InvalidArgument(
-                "scheduled activation is missing time_of_day_preset".to_string(),
-            )
-        })?;
-        let scheduled_ghost_mode_settings = pending.ghost_mode_settings.ok_or_else(|| {
-            EngineWorkerError::InvalidArgument(
-                "scheduled activation is missing ghost_mode_settings".to_string(),
-            )
-        })?;
-
-        let _ = switch_runtime(
-            engine,
-            cfg,
-            runtime_state,
-            runtime_state.revision,
-            EngineActivityKind::Sandbox,
-            map_id,
-            Some(pending.sandbox_id),
-            time_of_day_preset,
-            scheduled_ghost_mode_settings,
-        )?;
-        *ghost_mode_settings = scheduled_ghost_mode_settings;
-        tracing::info!("engine worker: scheduled sandbox activation executed");
+    let now_unix_ms = current_unix_ms();
+    let mut due: Vec<_> = runtime_state
+        .pending_sandbox_activations
+        .iter()
+        .filter(|entry| entry.execute_at_unix_ms <= now_unix_ms)
+        .cloned()
+        .collect();
+    if due.is_empty() {
         return Ok(());
     }
+    due.sort_by_key(|entry| entry.execute_at_unix_ms);
 
-    let deactivation_ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
-    let _ = switch_runtime(
-        engine,
-        cfg,
-        runtime_state,
-        runtime_state.revision,
-        EngineActivityKind::None,
-        runtime_state.map_id.clone(),
-        None,
-        runtime_state.time_of_day_preset,
-        deactivation_ghost_mode_settings,
-    )?;
-    *ghost_mode_settings = deactivation_ghost_mode_settings;
-    tracing::info!("engine worker: scheduled sandbox deactivation executed");
+    for pending in due {
+        if pending.activate {
+            let map_id = pending.map_id.clone().ok_or_else(|| {
+                EngineWorkerError::InvalidArgument(
+                    "scheduled activation is missing map_id".to_string(),
+                )
+            })?;
+            let time_of_day_preset = pending.time_of_day_preset.ok_or_else(|| {
+                EngineWorkerError::InvalidArgument(
+                    "scheduled activation is missing time_of_day_preset".to_string(),
+                )
+            })?;
+            let scheduled_ghost_mode_settings = pending.ghost_mode_settings.ok_or_else(|| {
+                EngineWorkerError::InvalidArgument(
+                    "scheduled activation is missing ghost_mode_settings".to_string(),
+                )
+            })?;
+
+            let _ = switch_runtime(
+                engine,
+                cfg,
+                runtime_state,
+                runtime_state.revision,
+                EngineActivityKind::Sandbox,
+                map_id,
+                Some(pending.sandbox_id.clone()),
+                time_of_day_preset,
+                scheduled_ghost_mode_settings,
+            )?;
+            *ghost_mode_settings = scheduled_ghost_mode_settings;
+            tracing::info!(sandbox_id = %pending.sandbox_id, "engine worker: scheduled sandbox activation executed");
+        } else {
+            let _ = deactivate_sandbox(
+                engine,
+                cfg,
+                runtime_state,
+                runtime_state.revision,
+                &pending.sandbox_id,
+                ghost_mode_settings,
+            )?;
+            tracing::info!(sandbox_id = %pending.sandbox_id, "engine worker: scheduled sandbox deactivation executed");
+        }
+        runtime_state
+            .pending_sandbox_activations
+            .retain(|entry| entry.sandbox_id != pending.sandbox_id);
+    }
+
     Ok(())
 }
 
