@@ -168,14 +168,6 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
             ));
         }
 
-        let runtime_before = self.engine.runtime_state().await.map_err(map_worker_err)?;
-        if runtime_before.revision != request.expected_revision {
-            return Err(Status::failed_precondition(format!(
-                "runtime revision mismatch: expected {}, actual {}",
-                request.expected_revision, runtime_before.revision
-            )));
-        }
-
         if request.activate {
             if request.sandbox_id.trim().is_empty() {
                 return Err(Status::invalid_argument(
@@ -197,13 +189,14 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
 
             let runtime_after = self
                 .engine
-                .switch_runtime(EngineActivityKind::Sandbox, sandbox.config.map_id.clone())
-                .await
-                .map_err(map_worker_err)?;
-            self.engine
-                .set_ghost_mode_settings(engine_ghost_mode_settings_from_record(
-                    sandbox.config.ghost_mode.as_ref(),
-                ))
+                .switch_runtime(
+                    request.expected_revision,
+                    EngineActivityKind::Sandbox,
+                    sandbox.config.map_id.clone(),
+                    Some(engine_ghost_mode_settings_from_record(
+                        sandbox.config.ghost_mode.as_ref(),
+                    )),
+                )
                 .await
                 .map_err(map_worker_err)?;
 
@@ -217,11 +210,12 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
 
         let runtime_after = self
             .engine
-            .switch_runtime(EngineActivityKind::None, runtime_before.map_id)
-            .await
-            .map_err(map_worker_err)?;
-        self.engine
-            .set_ghost_mode_settings(default_engine_ghost_mode_settings())
+            .switch_runtime(
+                request.expected_revision,
+                EngineActivityKind::None,
+                current_runtime_map_id_for_deactivation(&self.engine).await?,
+                Some(default_engine_ghost_mode_settings()),
+            )
             .await
             .map_err(map_worker_err)?;
 
@@ -314,6 +308,11 @@ fn map_repo_error_to_status(err: SandboxConfigRepoError) -> Status {
         | SandboxConfigRepoError::NumericOutOfRange { .. }
         | SandboxConfigRepoError::RevisionOverflow => Status::internal(err.to_string()),
     }
+}
+
+async fn current_runtime_map_id_for_deactivation(engine: &EngineClient) -> Result<String, Status> {
+    let runtime_before = engine.runtime_state().await.map_err(map_worker_err)?;
+    Ok(runtime_before.map_id)
 }
 
 fn default_engine_ghost_mode_settings() -> EngineGhostModeSettings {

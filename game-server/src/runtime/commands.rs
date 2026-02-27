@@ -29,8 +29,10 @@ pub enum EngineCommand {
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
     SwitchRuntime {
+        expected_revision: u64,
         activity_kind: EngineActivityKind,
         map_id: String,
+        ghost_mode_settings: Option<GhostModeSettings>,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
     SetGhostModeSettings {

@@ -11,6 +11,9 @@ pub(crate) fn map_worker_err(err: EngineWorkerError) -> Status {
         EngineWorkerError::Engine(e) => map_engine_err(e),
         EngineWorkerError::WorkerStopped => Status::unavailable("engine worker stopped"),
         EngineWorkerError::InvalidArgument(msg) => Status::invalid_argument(msg),
+        EngineWorkerError::RevisionMismatch { expected, actual } => Status::failed_precondition(
+            format!("runtime revision mismatch: expected {expected}, actual {actual}"),
+        ),
     }
 }
 

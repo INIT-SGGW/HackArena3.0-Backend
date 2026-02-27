@@ -71,6 +71,8 @@ pub enum EngineWorkerError {
     Engine(BoinkError),
     /// Invalid runtime control request.
     InvalidArgument(String),
+    /// Runtime revision did not match expected value for compare-and-swap operation.
+    RevisionMismatch { expected: u64, actual: u64 },
 }
 
 /// A lightweight handle used by API services to interact with the engine worker.
@@ -87,6 +89,10 @@ impl fmt::Display for EngineWorkerError {
             EngineWorkerError::WorkerStopped => write!(f, "engine worker is stopped"),
             EngineWorkerError::Engine(e) => write!(f, "engine error: {e}"),
             EngineWorkerError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
+            EngineWorkerError::RevisionMismatch { expected, actual } => write!(
+                f,
+                "runtime revision mismatch: expected {expected}, actual {actual}"
+            ),
         }
     }
 }
@@ -170,14 +176,18 @@ impl EngineClient {
     /// Switches activity kind and active map by rebuilding engine world.
     pub async fn switch_runtime(
         &self,
+        expected_revision: u64,
         activity_kind: EngineActivityKind,
         map_id: String,
+        ghost_mode_settings: Option<GhostModeSettings>,
     ) -> Result<EngineRuntimeState, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::SwitchRuntime {
+                expected_revision,
                 activity_kind,
                 map_id,
+                ghost_mode_settings,
                 reply_tx,
             })
             .await
@@ -388,18 +398,26 @@ fn handle_command(
             Ok(())
         }
         EngineCommand::SwitchRuntime {
+            expected_revision,
             activity_kind,
             map_id,
+            ghost_mode_settings: next_ghost_mode_settings,
             reply_tx,
         } => {
+            let target_ghost_mode_settings =
+                next_ghost_mode_settings.unwrap_or(*ghost_mode_settings);
             let result = switch_runtime(
                 engine,
                 cfg,
                 runtime_state,
-                *ghost_mode_settings,
+                expected_revision,
                 activity_kind,
                 map_id,
+                target_ghost_mode_settings,
             );
+            if result.is_ok() {
+                *ghost_mode_settings = target_ghost_mode_settings;
+            }
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -427,10 +445,17 @@ fn switch_runtime(
     engine: &mut Engine,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
-    ghost_mode_settings: GhostModeSettings,
+    expected_revision: u64,
     activity_kind: EngineActivityKind,
     map_id: String,
+    ghost_mode_settings: GhostModeSettings,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
+    if runtime_state.revision != expected_revision {
+        return Err(EngineWorkerError::RevisionMismatch {
+            expected: expected_revision,
+            actual: runtime_state.revision,
+        });
+    }
     validate_map_id(&map_id)?;
     let mut new_engine = build_engine(cfg, &map_id)?;
     new_engine
