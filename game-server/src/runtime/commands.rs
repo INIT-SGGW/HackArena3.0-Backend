@@ -4,7 +4,8 @@ use boink::model::{Controls, GhostModeSettings, TrackData, VehicleState};
 use tokio::sync::oneshot;
 
 use super::engine_worker::{
-    EngineActivityKind, EngineRuntimeState, EngineRuntimeTimeOfDayPreset, EngineWorkerError,
+    EngineActivityKind, EnginePendingSandboxActivation, EngineRuntimeState,
+    EngineRuntimeTimeOfDayPreset, EngineWorkerError,
 };
 
 /// Commands processed by the engine worker.
@@ -42,6 +43,11 @@ pub enum EngineCommand {
     SetRuntimeTimeOfDay {
         expected_revision: u64,
         preset: EngineRuntimeTimeOfDayPreset,
+        reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
+    },
+    SetPendingSandboxActivation {
+        expected_revision: u64,
+        pending: Option<EnginePendingSandboxActivation>,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
     SetGhostModeSettings {

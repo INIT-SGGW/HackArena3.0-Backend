@@ -62,6 +62,14 @@ pub enum EngineRuntimeTimeOfDayPreset {
     Night,
 }
 
+/// Scheduled sandbox activation/deactivation stored in runtime metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnginePendingSandboxActivation {
+    pub activate: bool,
+    pub sandbox_id: String,
+    pub execute_at_unix_ms: i64,
+}
+
 /// Minimal runtime state owned by the engine worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineRuntimeState {
@@ -70,6 +78,7 @@ pub struct EngineRuntimeState {
     pub map_id: String,
     pub active_sandbox_id: Option<String>,
     pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
+    pub pending_sandbox_activation: Option<EnginePendingSandboxActivation>,
 }
 
 /// Errors returned by the engine worker boundary.
@@ -235,6 +244,27 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Stores or clears scheduled sandbox activation metadata.
+    pub async fn set_pending_sandbox_activation(
+        &self,
+        expected_revision: u64,
+        pending: Option<EnginePendingSandboxActivation>,
+    ) -> Result<EngineRuntimeState, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetPendingSandboxActivation {
+                expected_revision,
+                pending,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Updates global ghost mode settings in the active engine world.
     pub async fn set_ghost_mode_settings(
         &self,
@@ -282,6 +312,7 @@ pub async fn spawn(
         map_id: DEFAULT_MAP_ID.to_string(),
         active_sandbox_id: None,
         time_of_day_preset: EngineRuntimeTimeOfDayPreset::Unspecified,
+        pending_sandbox_activation: None,
     };
     let mut engine = build_engine(&cfg, &runtime_state.map_id)?;
     let ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
@@ -475,6 +506,15 @@ fn handle_command(
             let _ = reply_tx.send(result);
             Ok(())
         }
+        EngineCommand::SetPendingSandboxActivation {
+            expected_revision,
+            pending,
+            reply_tx,
+        } => {
+            let result = set_pending_sandbox_activation(runtime_state, expected_revision, pending);
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
         EngineCommand::SetGhostModeSettings { settings, reply_tx } => {
             let result = engine
                 .set_ghost_mode_settings(settings)
@@ -541,6 +581,7 @@ fn switch_runtime(
     runtime_state.map_id = map_id;
     runtime_state.active_sandbox_id = normalized_active_sandbox_id;
     runtime_state.time_of_day_preset = time_of_day_preset;
+    runtime_state.pending_sandbox_activation = None;
 
     tracing::info!(
         revision = runtime_state.revision,
@@ -548,6 +589,7 @@ fn switch_runtime(
         map_id = %runtime_state.map_id,
         active_sandbox_id = ?runtime_state.active_sandbox_id,
         time_of_day_preset = ?runtime_state.time_of_day_preset,
+        pending_sandbox_activation = ?runtime_state.pending_sandbox_activation,
         "engine worker: runtime switched"
     );
 
@@ -590,7 +632,45 @@ fn set_runtime_time_of_day(
         map_id = %runtime_state.map_id,
         active_sandbox_id = ?runtime_state.active_sandbox_id,
         time_of_day_preset = ?runtime_state.time_of_day_preset,
+        pending_sandbox_activation = ?runtime_state.pending_sandbox_activation,
         "engine worker: sandbox time-of-day updated"
+    );
+
+    Ok(runtime_state.clone())
+}
+
+fn set_pending_sandbox_activation(
+    runtime_state: &mut EngineRuntimeState,
+    expected_revision: u64,
+    pending: Option<EnginePendingSandboxActivation>,
+) -> Result<EngineRuntimeState, EngineWorkerError> {
+    if runtime_state.revision != expected_revision {
+        return Err(EngineWorkerError::RevisionMismatch {
+            expected: expected_revision,
+            actual: runtime_state.revision,
+        });
+    }
+
+    if let Some(pending) = pending.as_ref() {
+        if pending.activate && pending.sandbox_id.trim().is_empty() {
+            return Err(EngineWorkerError::InvalidArgument(
+                "sandbox_id must be non-empty for scheduled activation".to_string(),
+            ));
+        }
+        if !pending.activate && !pending.sandbox_id.trim().is_empty() {
+            return Err(EngineWorkerError::InvalidArgument(
+                "sandbox_id must be empty for scheduled deactivation".to_string(),
+            ));
+        }
+    }
+
+    runtime_state.revision = runtime_state.revision.saturating_add(1);
+    runtime_state.pending_sandbox_activation = pending;
+
+    tracing::info!(
+        revision = runtime_state.revision,
+        pending_sandbox_activation = ?runtime_state.pending_sandbox_activation,
+        "engine worker: pending sandbox activation updated"
     );
 
     Ok(runtime_state.clone())

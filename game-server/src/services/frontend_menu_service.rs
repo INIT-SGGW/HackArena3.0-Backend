@@ -13,8 +13,9 @@ use crate::db::repos::sandbox_config::SandboxConfigRepo;
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
-    find_sandbox_by_id, runtime_activity_kind_to_proto, runtime_time_of_day_preset_to_proto,
-    sandbox_runtime_info_from_record, sandbox_to_proto, utc_now_timestamp,
+    find_sandbox_by_id, pending_sandbox_activation_to_proto, runtime_activity_kind_to_proto,
+    runtime_time_of_day_preset_to_proto, sandbox_runtime_info_from_record, sandbox_to_proto,
+    utc_now_timestamp,
 };
 
 const STREAM_CHANNEL_CAPACITY: usize = 16;
@@ -60,7 +61,9 @@ impl FrontendMenuServiceImpl {
                 })
                 .into_iter()
                 .collect(),
-            pending_sandbox_activation: None,
+            pending_sandbox_activation: runtime
+                .pending_sandbox_activation
+                .map(pending_sandbox_activation_to_proto),
             server_time_utc: Some(utc_now_timestamp()),
         };
 

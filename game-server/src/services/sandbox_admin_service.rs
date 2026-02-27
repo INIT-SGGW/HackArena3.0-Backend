@@ -18,13 +18,16 @@ use crate::auth::auth_claims::TokenValidator;
 use crate::db::repos::sandbox_config::{
     SandboxConfigInputRecord, SandboxConfigRecord, SandboxConfigRepo, SandboxConfigRepoError,
 };
-use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
+use crate::runtime::engine_worker::{
+    EngineActivityKind, EngineClient, EnginePendingSandboxActivation,
+};
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
     default_engine_ghost_mode_settings, engine_ghost_mode_settings_from_record, find_sandbox_by_id,
-    runtime_activity_kind_to_proto, runtime_time_of_day_preset_from_proto,
-    runtime_time_of_day_preset_to_proto, sandbox_input_from_proto,
-    sandbox_runtime_info_from_record, sandbox_to_proto, utc_now_timestamp,
+    pending_sandbox_activation_to_proto, runtime_activity_kind_to_proto,
+    runtime_time_of_day_preset_from_proto, runtime_time_of_day_preset_to_proto,
+    sandbox_input_from_proto, sandbox_runtime_info_from_record, sandbox_to_proto,
+    timestamp_to_unix_ms, utc_now_timestamp,
 };
 
 /// SandboxAdmin service backed by persisted sandbox config snapshot.
@@ -161,10 +164,69 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
         self.require_admin(request.metadata()).await?;
         let request = request.into_inner();
 
-        if request.effective_at_utc.is_some() {
-            return Err(Status::unimplemented(
-                "scheduled sandbox activation is not implemented yet",
-            ));
+        if let Some(effective_at_utc) = request.effective_at_utc.as_ref() {
+            let execute_at_unix_ms = timestamp_to_unix_ms(effective_at_utc)?;
+            let now = utc_now_timestamp();
+            let now_unix_ms = timestamp_to_unix_ms(&now)?;
+            if execute_at_unix_ms <= now_unix_ms {
+                return Err(Status::invalid_argument(
+                    "effective_at_utc must be in the future",
+                ));
+            }
+
+            if request.activate {
+                if request.sandbox_id.trim().is_empty() {
+                    return Err(Status::invalid_argument(
+                        "sandbox_id must be non-empty when activate=true",
+                    ));
+                }
+                let exists = self
+                    .repo
+                    .get_snapshot()
+                    .await
+                    .map_err(map_repo_error_to_status)?
+                    .sandboxes
+                    .into_iter()
+                    .any(|entry| entry.sandbox_id == request.sandbox_id);
+                if !exists {
+                    return Err(Status::not_found(format!(
+                        "sandbox config not found: {}",
+                        request.sandbox_id
+                    )));
+                }
+            } else if !request.sandbox_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "sandbox_id must be empty when activate=false",
+                ));
+            }
+
+            let pending = EnginePendingSandboxActivation {
+                activate: request.activate,
+                sandbox_id: if request.activate {
+                    request.sandbox_id.clone()
+                } else {
+                    String::new()
+                },
+                execute_at_unix_ms,
+            };
+            let runtime_after = self
+                .engine
+                .set_pending_sandbox_activation(request.expected_revision, Some(pending))
+                .await
+                .map_err(map_worker_err)?;
+
+            return Ok(Response::new(SetSandboxActivationResponse {
+                revision: runtime_after.revision,
+                activate: request.activate,
+                sandbox_id: if request.activate {
+                    request.sandbox_id
+                } else {
+                    String::new()
+                },
+                effective_at_utc: runtime_after.pending_sandbox_activation.map(|entry| {
+                    crate::services::sandbox_mappers::unix_ms_to_timestamp(entry.execute_at_unix_ms)
+                }),
+            }));
         }
 
         if request.activate {
@@ -323,7 +385,9 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
                 })
                 .into_iter()
                 .collect(),
-            pending_sandbox_activation: None,
+            pending_sandbox_activation: runtime
+                .pending_sandbox_activation
+                .map(pending_sandbox_activation_to_proto),
             server_time_utc: Some(utc_now_timestamp()),
         };
         Ok(Response::new(GetRuntimeStateResponse {

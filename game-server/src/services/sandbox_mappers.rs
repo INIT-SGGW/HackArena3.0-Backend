@@ -6,8 +6,8 @@ use boink::model::{
 };
 use prost_types::Timestamp;
 use proto::race::v1::{
-    GhostModeConditionLogic, GhostModeSettings as ProtoGhostModeSettings, RuntimeActivityKind,
-    RuntimeTimeOfDayPreset, SandboxConfig as ProtoSandboxConfig,
+    GhostModeConditionLogic, GhostModeSettings as ProtoGhostModeSettings, PendingSandboxActivation,
+    RuntimeActivityKind, RuntimeTimeOfDayPreset, SandboxConfig as ProtoSandboxConfig,
     SandboxConfigInput as ProtoSandboxConfigInput, SandboxRuntimeInfo,
 };
 use tonic::Status;
@@ -15,7 +15,9 @@ use tonic::Status;
 use crate::db::repos::sandbox_config::{
     GhostModeSettingsRecord, SandboxConfigInputRecord, SandboxConfigRecord,
 };
-use crate::runtime::engine_worker::{EngineActivityKind, EngineRuntimeTimeOfDayPreset};
+use crate::runtime::engine_worker::{
+    EngineActivityKind, EnginePendingSandboxActivation, EngineRuntimeTimeOfDayPreset,
+};
 
 /// Maps protobuf input payload into repository input shape.
 pub fn sandbox_input_from_proto(
@@ -218,6 +220,42 @@ fn proto_condition_logic_to_engine(
         GhostModeConditionLogic::Or => EngineGhostModeConditionLogic::Or,
         GhostModeConditionLogic::Unspecified => EngineGhostModeConditionLogic::Unspecified,
     }
+}
+
+/// Maps runtime pending sandbox activation metadata to protobuf.
+pub fn pending_sandbox_activation_to_proto(
+    pending: EnginePendingSandboxActivation,
+) -> PendingSandboxActivation {
+    PendingSandboxActivation {
+        activate: pending.activate,
+        sandbox_id: pending.sandbox_id,
+        execute_at_utc: Some(unix_ms_to_timestamp(pending.execute_at_unix_ms)),
+    }
+}
+
+/// Converts protobuf timestamp to unix milliseconds.
+pub fn timestamp_to_unix_ms(timestamp: &Timestamp) -> Result<i64, Status> {
+    if !(0..1_000_000_000).contains(&timestamp.nanos) {
+        return Err(Status::invalid_argument(
+            "timestamp nanos must be in range 0..1_000_000_000",
+        ));
+    }
+
+    let seconds_ms = timestamp
+        .seconds
+        .checked_mul(1000)
+        .ok_or_else(|| Status::out_of_range("timestamp seconds overflow"))?;
+    let nanos_ms = i64::from(timestamp.nanos / 1_000_000);
+    seconds_ms
+        .checked_add(nanos_ms)
+        .ok_or_else(|| Status::out_of_range("timestamp overflow"))
+}
+
+/// Converts unix milliseconds to protobuf timestamp.
+pub fn unix_ms_to_timestamp(ms: i64) -> Timestamp {
+    let seconds = ms.div_euclid(1000);
+    let nanos = (ms.rem_euclid(1000) as i32) * 1_000_000;
+    Timestamp { seconds, nanos }
 }
 
 /// Returns current UTC timestamp.
