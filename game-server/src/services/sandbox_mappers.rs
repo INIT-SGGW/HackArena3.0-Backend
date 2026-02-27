@@ -1,15 +1,21 @@
 //! Sandbox admin service mapping helpers.
 
+use boink::model::{
+    GhostModeConditionLogic as EngineGhostModeConditionLogic,
+    GhostModeSettings as EngineGhostModeSettings,
+};
 use prost_types::Timestamp;
 use proto::race::v1::{
-    GhostModeConditionLogic, GhostModeSettings as ProtoGhostModeSettings, RuntimeTimeOfDayPreset,
-    SandboxConfig as ProtoSandboxConfig, SandboxConfigInput as ProtoSandboxConfigInput,
+    GhostModeConditionLogic, GhostModeSettings as ProtoGhostModeSettings, RuntimeActivityKind,
+    RuntimeTimeOfDayPreset, SandboxConfig as ProtoSandboxConfig,
+    SandboxConfigInput as ProtoSandboxConfigInput, SandboxRuntimeInfo,
 };
 use tonic::Status;
 
 use crate::db::repos::sandbox_config::{
     GhostModeSettingsRecord, SandboxConfigInputRecord, SandboxConfigRecord,
 };
+use crate::runtime::engine_worker::{EngineActivityKind, EngineRuntimeTimeOfDayPreset};
 
 /// Maps protobuf input payload into repository input shape.
 pub fn sandbox_input_from_proto(
@@ -105,6 +111,119 @@ fn ghost_mode_to_proto(record: GhostModeSettingsRecord) -> ProtoGhostModeSetting
         min_completed_laps: record.min_completed_laps,
         condition_logic: record.condition_logic as i32,
         overlap_exit_delay_ms: record.overlap_exit_delay_ms,
+    }
+}
+
+/// Maps runtime activity kind from engine worker to protobuf.
+pub fn runtime_activity_kind_to_proto(kind: EngineActivityKind) -> RuntimeActivityKind {
+    match kind {
+        EngineActivityKind::None => RuntimeActivityKind::None,
+        EngineActivityKind::OfficialRace => RuntimeActivityKind::OfficialRace,
+        EngineActivityKind::Sandbox => RuntimeActivityKind::Sandbox,
+    }
+}
+
+/// Maps runtime time-of-day preset from engine worker to protobuf.
+pub fn runtime_time_of_day_preset_to_proto(
+    preset: EngineRuntimeTimeOfDayPreset,
+) -> RuntimeTimeOfDayPreset {
+    match preset {
+        EngineRuntimeTimeOfDayPreset::Unspecified => RuntimeTimeOfDayPreset::Unspecified,
+        EngineRuntimeTimeOfDayPreset::Morning => RuntimeTimeOfDayPreset::Morning,
+        EngineRuntimeTimeOfDayPreset::Noon => RuntimeTimeOfDayPreset::Noon,
+        EngineRuntimeTimeOfDayPreset::Evening => RuntimeTimeOfDayPreset::Evening,
+        EngineRuntimeTimeOfDayPreset::Night => RuntimeTimeOfDayPreset::Night,
+    }
+}
+
+/// Maps runtime time-of-day preset from protobuf to engine worker.
+pub fn runtime_time_of_day_preset_from_proto(
+    preset: RuntimeTimeOfDayPreset,
+) -> EngineRuntimeTimeOfDayPreset {
+    match preset {
+        RuntimeTimeOfDayPreset::Unspecified => EngineRuntimeTimeOfDayPreset::Unspecified,
+        RuntimeTimeOfDayPreset::Morning => EngineRuntimeTimeOfDayPreset::Morning,
+        RuntimeTimeOfDayPreset::Noon => EngineRuntimeTimeOfDayPreset::Noon,
+        RuntimeTimeOfDayPreset::Evening => EngineRuntimeTimeOfDayPreset::Evening,
+        RuntimeTimeOfDayPreset::Night => EngineRuntimeTimeOfDayPreset::Night,
+    }
+}
+
+/// Maps persisted sandbox record into runtime payload.
+pub fn sandbox_runtime_info_from_record(
+    record: SandboxConfigRecord,
+    active_time_of_day_preset: RuntimeTimeOfDayPreset,
+) -> SandboxRuntimeInfo {
+    SandboxRuntimeInfo {
+        sandbox_id: record.sandbox_id,
+        sandbox_name: record.config.sandbox_name,
+        map_id: record.config.map_id,
+        active_time_of_day_preset: active_time_of_day_preset as i32,
+        ghost_mode: record.config.ghost_mode.map(ghost_mode_to_proto),
+        started_at_utc: None,
+        closes_at_utc: None,
+    }
+}
+
+/// Finds a unique sandbox record by map_id.
+pub fn find_unique_sandbox_by_map_id(
+    sandboxes: &[SandboxConfigRecord],
+    map_id: &str,
+) -> Result<Option<SandboxConfigRecord>, &'static str> {
+    let mut matching = sandboxes
+        .iter()
+        .filter(|entry| entry.config.map_id == map_id);
+    let first = matching.next().cloned();
+    let second_exists = matching.next().is_some();
+
+    if second_exists {
+        return Err("multiple sandbox configs share the same map_id");
+    }
+
+    Ok(first)
+}
+
+/// Returns disabled/default ghost mode settings for engine runtime.
+pub fn default_engine_ghost_mode_settings() -> EngineGhostModeSettings {
+    EngineGhostModeSettings {
+        enabled: false,
+        min_speed_enter_mps: 0.0,
+        min_speed_exit_mps: 0.0,
+        enter_delay_ms: 0,
+        exit_delay_ms: 0,
+        min_completed_laps: 0,
+        condition_logic: EngineGhostModeConditionLogic::Unspecified,
+        overlap_exit_delay_ms: 0,
+    }
+}
+
+/// Maps persisted ghost-mode settings into engine runtime shape.
+pub fn engine_ghost_mode_settings_from_record(
+    record: Option<&GhostModeSettingsRecord>,
+) -> EngineGhostModeSettings {
+    let Some(record) = record else {
+        return default_engine_ghost_mode_settings();
+    };
+
+    EngineGhostModeSettings {
+        enabled: record.enabled,
+        min_speed_enter_mps: record.min_speed_enter_mps,
+        min_speed_exit_mps: record.min_speed_exit_mps,
+        enter_delay_ms: record.enter_delay_ms,
+        exit_delay_ms: record.exit_delay_ms,
+        min_completed_laps: record.min_completed_laps,
+        condition_logic: proto_condition_logic_to_engine(record.condition_logic),
+        overlap_exit_delay_ms: record.overlap_exit_delay_ms,
+    }
+}
+
+fn proto_condition_logic_to_engine(
+    value: GhostModeConditionLogic,
+) -> EngineGhostModeConditionLogic {
+    match value {
+        GhostModeConditionLogic::And => EngineGhostModeConditionLogic::And,
+        GhostModeConditionLogic::Or => EngineGhostModeConditionLogic::Or,
+        GhostModeConditionLogic::Unspecified => EngineGhostModeConditionLogic::Unspecified,
     }
 }
 

@@ -3,7 +3,9 @@
 use boink::model::{Controls, GhostModeSettings, TrackData, VehicleState};
 use tokio::sync::oneshot;
 
-use super::engine_worker::{EngineActivityKind, EngineRuntimeState, EngineWorkerError};
+use super::engine_worker::{
+    EngineActivityKind, EngineRuntimeState, EngineRuntimeTimeOfDayPreset, EngineWorkerError,
+};
 
 /// Commands processed by the engine worker.
 ///
@@ -32,7 +34,13 @@ pub enum EngineCommand {
         expected_revision: u64,
         activity_kind: EngineActivityKind,
         map_id: String,
+        time_of_day_preset: Option<EngineRuntimeTimeOfDayPreset>,
         ghost_mode_settings: Option<GhostModeSettings>,
+        reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
+    },
+    SetRuntimeTimeOfDay {
+        expected_revision: u64,
+        preset: EngineRuntimeTimeOfDayPreset,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
     SetGhostModeSettings {

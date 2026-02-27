@@ -2,16 +2,11 @@
 
 use std::sync::Arc;
 
-use boink::model::{
-    GhostModeConditionLogic as EngineGhostModeConditionLogic,
-    GhostModeSettings as EngineGhostModeSettings,
-};
 use proto::race::v1::sandbox_admin_service_server::SandboxAdminService;
 use proto::race::v1::{
     CreateSandboxConfigRequest, CreateSandboxConfigResponse, DeleteSandboxConfigRequest,
     DeleteSandboxConfigResponse, GetRuntimeStateRequest, GetRuntimeStateResponse,
-    GetSandboxConfigsRequest, GetSandboxConfigsResponse,
-    GhostModeConditionLogic as ProtoGhostModeConditionLogic, RuntimeActivityKind, RuntimeState,
+    GetSandboxConfigsRequest, GetSandboxConfigsResponse, RuntimeState, RuntimeTimeOfDayPreset,
     SetSandboxActivationRequest, SetSandboxActivationResponse, SetSandboxTimeOfDayRequest,
     SetSandboxTimeOfDayResponse, UpdateSandboxConfigRequest, UpdateSandboxConfigResponse,
 };
@@ -21,13 +16,16 @@ use uuid::Uuid;
 
 use crate::auth::auth_claims::TokenValidator;
 use crate::db::repos::sandbox_config::{
-    GhostModeSettingsRecord, SandboxConfigInputRecord, SandboxConfigRecord, SandboxConfigRepo,
-    SandboxConfigRepoError,
+    SandboxConfigInputRecord, SandboxConfigRecord, SandboxConfigRepo, SandboxConfigRepoError,
 };
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
-    sandbox_input_from_proto, sandbox_to_proto, utc_now_timestamp,
+    default_engine_ghost_mode_settings, engine_ghost_mode_settings_from_record,
+    find_unique_sandbox_by_map_id, runtime_activity_kind_to_proto,
+    runtime_time_of_day_preset_from_proto, runtime_time_of_day_preset_to_proto,
+    sandbox_input_from_proto, sandbox_runtime_info_from_record, sandbox_to_proto,
+    utc_now_timestamp,
 };
 
 /// SandboxAdmin service backed by persisted sandbox config snapshot.
@@ -111,6 +109,7 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
         if request.sandbox_id.trim().is_empty() {
             return Err(Status::invalid_argument("sandbox_id must be non-empty"));
         }
+        self.require_sandbox_not_active(&request.sandbox_id).await?;
         let config = request
             .config
             .as_ref()
@@ -142,6 +141,7 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
         if request.sandbox_id.trim().is_empty() {
             return Err(Status::invalid_argument("sandbox_id must be non-empty"));
         }
+        self.require_sandbox_not_active(&request.sandbox_id).await?;
 
         let revision = self
             .repo
@@ -193,6 +193,9 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
                     request.expected_revision,
                     EngineActivityKind::Sandbox,
                     sandbox.config.map_id.clone(),
+                    Some(runtime_time_of_day_preset_from_proto(
+                        sandbox.config.time_of_day_preset,
+                    )),
                     Some(engine_ghost_mode_settings_from_record(
                         sandbox.config.ghost_mode.as_ref(),
                     )),
@@ -214,6 +217,7 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
                 request.expected_revision,
                 EngineActivityKind::None,
                 current_runtime_map_id_for_deactivation(&self.engine).await?,
+                None,
                 Some(default_engine_ghost_mode_settings()),
             )
             .await
@@ -232,10 +236,56 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
         request: Request<SetSandboxTimeOfDayRequest>,
     ) -> Result<Response<SetSandboxTimeOfDayResponse>, Status> {
         self.require_admin(request.metadata()).await?;
-        let _ = request;
-        Err(Status::unimplemented(
-            "sandbox time-of-day override flow not implemented yet",
-        ))
+        let request = request.into_inner();
+        let preset = RuntimeTimeOfDayPreset::try_from(request.preset)
+            .map_err(|_| Status::invalid_argument("invalid preset"))?;
+        if matches!(preset, RuntimeTimeOfDayPreset::Unspecified) {
+            return Err(Status::invalid_argument("preset must be specified"));
+        }
+
+        let runtime_before = self.engine.runtime_state().await.map_err(map_worker_err)?;
+        if !matches!(runtime_before.activity_kind, EngineActivityKind::Sandbox) {
+            return Err(Status::failed_precondition(
+                "sandbox time-of-day override requires active sandbox runtime",
+            ));
+        }
+
+        let snapshot = self
+            .repo
+            .get_snapshot()
+            .await
+            .map_err(map_repo_error_to_status)?;
+        let active_sandbox =
+            find_unique_sandbox_by_map_id(&snapshot.sandboxes, &runtime_before.map_id)
+                .map_err(Status::failed_precondition)?
+                .ok_or_else(|| {
+                    Status::failed_precondition(
+                        "active sandbox runtime does not match configured sandbox entry",
+                    )
+                })?;
+
+        if !request.sandbox_id.trim().is_empty() && request.sandbox_id != active_sandbox.sandbox_id
+        {
+            return Err(Status::failed_precondition(
+                "requested sandbox_id is not the currently active sandbox",
+            ));
+        }
+
+        let runtime_after = self
+            .engine
+            .set_runtime_time_of_day(
+                request.expected_revision,
+                runtime_time_of_day_preset_from_proto(preset),
+            )
+            .await
+            .map_err(map_worker_err)?;
+
+        Ok(Response::new(SetSandboxTimeOfDayResponse {
+            revision: runtime_after.revision,
+            sandbox_id: active_sandbox.sandbox_id,
+            preset: runtime_time_of_day_preset_to_proto(runtime_after.time_of_day_preset) as i32,
+            applied_at_utc: Some(utc_now_timestamp()),
+        }))
     }
 
     async fn get_runtime_state(
@@ -244,11 +294,40 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
     ) -> Result<Response<GetRuntimeStateResponse>, Status> {
         self.require_admin(request.metadata()).await?;
         let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
+        let snapshot = self
+            .repo
+            .get_snapshot()
+            .await
+            .map_err(map_repo_error_to_status)?;
+
+        let active_sandbox = if matches!(runtime.activity_kind, EngineActivityKind::Sandbox) {
+            match find_unique_sandbox_by_map_id(&snapshot.sandboxes, &runtime.map_id) {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        map_id = %runtime.map_id,
+                        "unable to resolve unique active sandbox by map_id"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let state = RuntimeState {
             revision: runtime.revision,
             activity_kind: runtime_activity_kind_to_proto(runtime.activity_kind) as i32,
-            sandboxes: Vec::new(),
+            sandboxes: active_sandbox
+                .map(|record| {
+                    sandbox_runtime_info_from_record(
+                        record,
+                        runtime_time_of_day_preset_to_proto(runtime.time_of_day_preset),
+                    )
+                })
+                .into_iter()
+                .collect(),
             pending_sandbox_activation: None,
             server_time_utc: Some(utc_now_timestamp()),
         };
@@ -263,6 +342,33 @@ impl SandboxAdminServiceImpl {
         let is_admin = self.token_validator.is_admin(metadata).await?;
         if !is_admin {
             return Err(Status::permission_denied("admin role required"));
+        }
+        Ok(())
+    }
+
+    async fn require_sandbox_not_active(&self, sandbox_id: &str) -> Result<(), Status> {
+        let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
+        if !matches!(runtime.activity_kind, EngineActivityKind::Sandbox) {
+            return Ok(());
+        }
+
+        let snapshot = self
+            .repo
+            .get_snapshot()
+            .await
+            .map_err(map_repo_error_to_status)?;
+        let target = snapshot
+            .sandboxes
+            .iter()
+            .find(|entry| entry.sandbox_id == sandbox_id);
+        let Some(target) = target else {
+            return Ok(());
+        };
+
+        if target.config.map_id == runtime.map_id {
+            return Err(Status::failed_precondition(
+                "active sandbox cannot be modified",
+            ));
         }
         Ok(())
     }
@@ -281,14 +387,6 @@ fn sandbox_id_v5(config: &SandboxConfigInputRecord, expected_revision: u64) -> S
         duration.as_nanos(),
     );
     Uuid::new_v5(&Uuid::NAMESPACE_OID, payload.as_bytes()).to_string()
-}
-
-fn runtime_activity_kind_to_proto(kind: EngineActivityKind) -> RuntimeActivityKind {
-    match kind {
-        EngineActivityKind::None => RuntimeActivityKind::None,
-        EngineActivityKind::OfficialRace => RuntimeActivityKind::OfficialRace,
-        EngineActivityKind::Sandbox => RuntimeActivityKind::Sandbox,
-    }
 }
 
 fn map_repo_error_to_status(err: SandboxConfigRepoError) -> Status {
@@ -313,46 +411,4 @@ fn map_repo_error_to_status(err: SandboxConfigRepoError) -> Status {
 async fn current_runtime_map_id_for_deactivation(engine: &EngineClient) -> Result<String, Status> {
     let runtime_before = engine.runtime_state().await.map_err(map_worker_err)?;
     Ok(runtime_before.map_id)
-}
-
-fn default_engine_ghost_mode_settings() -> EngineGhostModeSettings {
-    EngineGhostModeSettings {
-        enabled: false,
-        min_speed_enter_mps: 0.0,
-        min_speed_exit_mps: 0.0,
-        enter_delay_ms: 0,
-        exit_delay_ms: 0,
-        min_completed_laps: 0,
-        condition_logic: EngineGhostModeConditionLogic::Unspecified,
-        overlap_exit_delay_ms: 0,
-    }
-}
-
-fn engine_ghost_mode_settings_from_record(
-    record: Option<&GhostModeSettingsRecord>,
-) -> EngineGhostModeSettings {
-    let Some(record) = record else {
-        return default_engine_ghost_mode_settings();
-    };
-
-    EngineGhostModeSettings {
-        enabled: record.enabled,
-        min_speed_enter_mps: record.min_speed_enter_mps,
-        min_speed_exit_mps: record.min_speed_exit_mps,
-        enter_delay_ms: record.enter_delay_ms,
-        exit_delay_ms: record.exit_delay_ms,
-        min_completed_laps: record.min_completed_laps,
-        condition_logic: proto_condition_logic_to_engine(record.condition_logic),
-        overlap_exit_delay_ms: record.overlap_exit_delay_ms,
-    }
-}
-
-fn proto_condition_logic_to_engine(
-    value: ProtoGhostModeConditionLogic,
-) -> EngineGhostModeConditionLogic {
-    match value {
-        ProtoGhostModeConditionLogic::And => EngineGhostModeConditionLogic::And,
-        ProtoGhostModeConditionLogic::Or => EngineGhostModeConditionLogic::Or,
-        ProtoGhostModeConditionLogic::Unspecified => EngineGhostModeConditionLogic::Unspecified,
-    }
 }

@@ -52,12 +52,23 @@ pub enum EngineActivityKind {
     Sandbox,
 }
 
+/// Backend runtime time-of-day preset reflected by engine worker state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineRuntimeTimeOfDayPreset {
+    Unspecified,
+    Morning,
+    Noon,
+    Evening,
+    Night,
+}
+
 /// Minimal runtime state owned by the engine worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineRuntimeState {
     pub revision: u64,
     pub activity_kind: EngineActivityKind,
     pub map_id: String,
+    pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
 }
 
 /// Errors returned by the engine worker boundary.
@@ -179,6 +190,7 @@ impl EngineClient {
         expected_revision: u64,
         activity_kind: EngineActivityKind,
         map_id: String,
+        time_of_day_preset: Option<EngineRuntimeTimeOfDayPreset>,
         ghost_mode_settings: Option<GhostModeSettings>,
     ) -> Result<EngineRuntimeState, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -187,7 +199,29 @@ impl EngineClient {
                 expected_revision,
                 activity_kind,
                 map_id,
+                time_of_day_preset,
                 ghost_mode_settings,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Updates runtime time-of-day metadata without rebuilding the engine world.
+    pub async fn set_runtime_time_of_day(
+        &self,
+        expected_revision: u64,
+        preset: EngineRuntimeTimeOfDayPreset,
+    ) -> Result<EngineRuntimeState, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetRuntimeTimeOfDay {
+                expected_revision,
+                preset,
                 reply_tx,
             })
             .await
@@ -243,6 +277,7 @@ pub async fn spawn(
         revision: 0,
         activity_kind: EngineActivityKind::OfficialRace,
         map_id: DEFAULT_MAP_ID.to_string(),
+        time_of_day_preset: EngineRuntimeTimeOfDayPreset::Unspecified,
     };
     let mut engine = build_engine(&cfg, &runtime_state.map_id)?;
     let ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
@@ -401,11 +436,14 @@ fn handle_command(
             expected_revision,
             activity_kind,
             map_id,
+            time_of_day_preset: next_time_of_day_preset,
             ghost_mode_settings: next_ghost_mode_settings,
             reply_tx,
         } => {
             let target_ghost_mode_settings =
                 next_ghost_mode_settings.unwrap_or(*ghost_mode_settings);
+            let target_time_of_day_preset =
+                next_time_of_day_preset.unwrap_or(runtime_state.time_of_day_preset);
             let result = switch_runtime(
                 engine,
                 cfg,
@@ -413,11 +451,21 @@ fn handle_command(
                 expected_revision,
                 activity_kind,
                 map_id,
+                target_time_of_day_preset,
                 target_ghost_mode_settings,
             );
             if result.is_ok() {
                 *ghost_mode_settings = target_ghost_mode_settings;
             }
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetRuntimeTimeOfDay {
+            expected_revision,
+            preset,
+            reply_tx,
+        } => {
+            let result = set_runtime_time_of_day(runtime_state, expected_revision, preset);
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -448,6 +496,7 @@ fn switch_runtime(
     expected_revision: u64,
     activity_kind: EngineActivityKind,
     map_id: String,
+    time_of_day_preset: EngineRuntimeTimeOfDayPreset,
     ghost_mode_settings: GhostModeSettings,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
     if runtime_state.revision != expected_revision {
@@ -466,12 +515,50 @@ fn switch_runtime(
     runtime_state.revision = runtime_state.revision.saturating_add(1);
     runtime_state.activity_kind = activity_kind;
     runtime_state.map_id = map_id;
+    runtime_state.time_of_day_preset = time_of_day_preset;
 
     tracing::info!(
         revision = runtime_state.revision,
         activity_kind = ?runtime_state.activity_kind,
         map_id = %runtime_state.map_id,
+        time_of_day_preset = ?runtime_state.time_of_day_preset,
         "engine worker: runtime switched"
+    );
+
+    Ok(runtime_state.clone())
+}
+
+fn set_runtime_time_of_day(
+    runtime_state: &mut EngineRuntimeState,
+    expected_revision: u64,
+    preset: EngineRuntimeTimeOfDayPreset,
+) -> Result<EngineRuntimeState, EngineWorkerError> {
+    if runtime_state.revision != expected_revision {
+        return Err(EngineWorkerError::RevisionMismatch {
+            expected: expected_revision,
+            actual: runtime_state.revision,
+        });
+    }
+    if !matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
+        return Err(EngineWorkerError::InvalidArgument(
+            "sandbox time-of-day override requires active sandbox runtime".to_string(),
+        ));
+    }
+    if matches!(preset, EngineRuntimeTimeOfDayPreset::Unspecified) {
+        return Err(EngineWorkerError::InvalidArgument(
+            "time-of-day preset must be specified".to_string(),
+        ));
+    }
+
+    runtime_state.revision = runtime_state.revision.saturating_add(1);
+    runtime_state.time_of_day_preset = preset;
+
+    tracing::info!(
+        revision = runtime_state.revision,
+        activity_kind = ?runtime_state.activity_kind,
+        map_id = %runtime_state.map_id,
+        time_of_day_preset = ?runtime_state.time_of_day_preset,
+        "engine worker: sandbox time-of-day updated"
     );
 
     Ok(runtime_state.clone())
