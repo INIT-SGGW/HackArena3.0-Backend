@@ -55,6 +55,11 @@ pub enum EngineCommand {
         pending: EnginePendingSandboxActivation,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
+    CancelPendingSandboxActivation {
+        expected_revision: u64,
+        sandbox_id: String,
+        reply_tx: oneshot::Sender<Result<(EngineRuntimeState, bool), EngineWorkerError>>,
+    },
     DeactivateSandbox {
         expected_revision: u64,
         sandbox_id: String,

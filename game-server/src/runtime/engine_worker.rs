@@ -373,6 +373,27 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Cancels scheduled sandbox activation/deactivation metadata.
+    pub async fn cancel_pending_sandbox_activation(
+        &self,
+        expected_revision: u64,
+        sandbox_id: String,
+    ) -> Result<(EngineRuntimeState, bool), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::CancelPendingSandboxActivation {
+                expected_revision,
+                sandbox_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Deactivates target sandbox runtime session.
     pub async fn deactivate_sandbox(
         &self,
@@ -822,6 +843,16 @@ fn handle_command(
             let _ = reply_tx.send(result);
             Ok(())
         }
+        EngineCommand::CancelPendingSandboxActivation {
+            expected_revision,
+            sandbox_id,
+            reply_tx,
+        } => {
+            let result =
+                cancel_pending_sandbox_activation(runtime_state, expected_revision, &sandbox_id);
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
         EngineCommand::DeactivateSandbox {
             expected_revision,
             sandbox_id,
@@ -1225,6 +1256,44 @@ fn set_pending_sandbox_activation(
     );
 
     Ok(runtime_state.clone())
+}
+
+fn cancel_pending_sandbox_activation(
+    runtime_state: &mut EngineRuntimeState,
+    expected_revision: u64,
+    sandbox_id: &str,
+) -> Result<(EngineRuntimeState, bool), EngineWorkerError> {
+    if runtime_state.revision != expected_revision {
+        return Err(EngineWorkerError::RevisionMismatch {
+            expected: expected_revision,
+            actual: runtime_state.revision,
+        });
+    }
+    if sandbox_id.trim().is_empty() {
+        return Err(EngineWorkerError::InvalidArgument(
+            "sandbox_id must be non-empty for pending cancellation".to_string(),
+        ));
+    }
+
+    let before_len = runtime_state.pending_sandbox_activations.len();
+    runtime_state
+        .pending_sandbox_activations
+        .retain(|entry| entry.sandbox_id != sandbox_id);
+    let canceled = runtime_state.pending_sandbox_activations.len() != before_len;
+
+    if canceled {
+        runtime_state.revision = runtime_state.revision.saturating_add(1);
+    }
+
+    tracing::info!(
+        revision = runtime_state.revision,
+        sandbox_id = %sandbox_id,
+        canceled,
+        pending_sandbox_activations = runtime_state.pending_sandbox_activations.len(),
+        "engine worker: pending sandbox activation cancellation processed"
+    );
+
+    Ok((runtime_state.clone(), canceled))
 }
 
 fn maybe_execute_due_pending_sandbox_activation(

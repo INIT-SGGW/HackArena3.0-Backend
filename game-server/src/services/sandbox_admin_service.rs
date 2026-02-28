@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use proto::race::v1::sandbox_admin_service_server::SandboxAdminService;
 use proto::race::v1::{
+    CancelSandboxActivationScheduleRequest, CancelSandboxActivationScheduleResponse,
     CreateSandboxConfigRequest, CreateSandboxConfigResponse, DeleteSandboxConfigRequest,
     DeleteSandboxConfigResponse, GetRuntimeStateRequest, GetRuntimeStateResponse,
     GetSandboxConfigsRequest, GetSandboxConfigsResponse, RuntimeState, RuntimeTimeOfDayPreset,
@@ -289,6 +290,32 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
             activate: false,
             sandbox_id: request.sandbox_id,
             effective_at_utc: Some(utc_now_timestamp()),
+        }))
+    }
+
+    async fn cancel_sandbox_activation_schedule(
+        &self,
+        request: Request<CancelSandboxActivationScheduleRequest>,
+    ) -> Result<Response<CancelSandboxActivationScheduleResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
+        let request = request.into_inner();
+        if request.sandbox_id.trim().is_empty() {
+            return Err(Status::invalid_argument("sandbox_id must be non-empty"));
+        }
+
+        let (runtime_after, canceled) = self
+            .engine
+            .cancel_pending_sandbox_activation(
+                request.expected_revision,
+                request.sandbox_id.clone(),
+            )
+            .await
+            .map_err(map_worker_err)?;
+
+        Ok(Response::new(CancelSandboxActivationScheduleResponse {
+            revision: runtime_after.revision,
+            sandbox_id: request.sandbox_id,
+            canceled,
         }))
     }
 
