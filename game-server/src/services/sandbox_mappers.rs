@@ -97,8 +97,8 @@ fn ghost_mode_from_proto(
     }
     Ok(GhostModeSettingsRecord {
         enabled: proto.enabled,
-        min_speed_enter_mps: proto.max_speed_enter_mps,
-        min_speed_exit_mps: proto.max_speed_exit_mps,
+        max_speed_enter_mps: proto.max_speed_enter_mps,
+        max_speed_exit_mps: proto.max_speed_exit_mps,
         enter_delay_ms: proto.enter_delay_ms,
         exit_delay_ms: proto.exit_delay_ms,
         min_completed_laps: proto.min_completed_laps,
@@ -110,8 +110,8 @@ fn ghost_mode_from_proto(
 fn ghost_mode_to_proto(record: GhostModeSettingsRecord) -> ProtoGhostModeSettings {
     ProtoGhostModeSettings {
         enabled: record.enabled,
-        max_speed_enter_mps: record.min_speed_enter_mps,
-        max_speed_exit_mps: record.min_speed_exit_mps,
+        max_speed_enter_mps: record.max_speed_enter_mps,
+        max_speed_exit_mps: record.max_speed_exit_mps,
         enter_delay_ms: record.enter_delay_ms,
         exit_delay_ms: record.exit_delay_ms,
         min_completed_laps: record.min_completed_laps,
@@ -206,8 +206,8 @@ pub fn engine_ghost_mode_settings_from_record(
 
     EngineGhostModeSettings {
         enabled: record.enabled,
-        min_speed_enter_mps: record.min_speed_enter_mps,
-        min_speed_exit_mps: record.min_speed_exit_mps,
+        min_speed_enter_mps: record.max_speed_enter_mps,
+        min_speed_exit_mps: record.max_speed_exit_mps,
         enter_delay_ms: record.enter_delay_ms,
         exit_delay_ms: record.exit_delay_ms,
         min_completed_laps: record.min_completed_laps,

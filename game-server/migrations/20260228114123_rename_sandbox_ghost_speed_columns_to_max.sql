@@ -1,0 +1,9 @@
+ALTER TABLE sandbox_configs
+RENAME COLUMN ghost_min_speed_enter_mps TO ghost_max_speed_enter_mps;
+
+ALTER TABLE sandbox_configs
+RENAME COLUMN ghost_min_speed_exit_mps TO ghost_max_speed_exit_mps;
+
+ALTER TABLE sandbox_configs
+RENAME CONSTRAINT sandbox_configs_ghost_speed_threshold_order_chk
+TO sandbox_configs_ghost_max_speed_threshold_order_chk;

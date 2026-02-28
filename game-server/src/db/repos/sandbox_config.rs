@@ -8,8 +8,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq)]
 pub struct GhostModeSettingsRecord {
     pub enabled: bool,
-    pub min_speed_enter_mps: f32,
-    pub min_speed_exit_mps: f32,
+    pub max_speed_enter_mps: f32,
+    pub max_speed_exit_mps: f32,
     pub enter_delay_ms: u32,
     pub exit_delay_ms: u32,
     pub min_completed_laps: u32,
@@ -319,8 +319,8 @@ async fn insert_config(
             map_id,
             time_of_day_preset,
             ghost_mode_enabled,
-            ghost_min_speed_enter_mps,
-            ghost_min_speed_exit_mps,
+            ghost_max_speed_enter_mps,
+            ghost_max_speed_exit_mps,
             ghost_enter_delay_ms,
             ghost_exit_delay_ms,
             ghost_min_completed_laps,
@@ -335,8 +335,8 @@ async fn insert_config(
         sandbox.config.map_id,
         time_of_day_preset as _,
         ghost.enabled,
-        ghost.min_speed_enter_mps,
-        ghost.min_speed_exit_mps,
+        ghost.max_speed_enter_mps,
+        ghost.max_speed_exit_mps,
         ghost.enter_delay_ms,
         ghost.exit_delay_ms,
         ghost.min_completed_laps,
@@ -363,8 +363,8 @@ async fn replace_config(
             map_id = $3,
             time_of_day_preset = $4,
             ghost_mode_enabled = $5,
-            ghost_min_speed_enter_mps = $6,
-            ghost_min_speed_exit_mps = $7,
+            ghost_max_speed_enter_mps = $6,
+            ghost_max_speed_exit_mps = $7,
             ghost_enter_delay_ms = $8,
             ghost_exit_delay_ms = $9,
             ghost_min_completed_laps = $10,
@@ -377,8 +377,8 @@ async fn replace_config(
         sandbox.config.map_id,
         time_of_day_preset as _,
         ghost.enabled,
-        ghost.min_speed_enter_mps,
-        ghost.min_speed_exit_mps,
+        ghost.max_speed_enter_mps,
+        ghost.max_speed_exit_mps,
         ghost.enter_delay_ms,
         ghost.exit_delay_ms,
         ghost.min_completed_laps,
@@ -402,8 +402,8 @@ async fn read_configs(
             map_id,
             time_of_day_preset AS "time_of_day_preset: DbTimeOfDayPreset",
             ghost_mode_enabled,
-            ghost_min_speed_enter_mps,
-            ghost_min_speed_exit_mps,
+            ghost_max_speed_enter_mps,
+            ghost_max_speed_exit_mps,
             ghost_enter_delay_ms,
             ghost_exit_delay_ms,
             ghost_min_completed_laps,
@@ -422,8 +422,8 @@ async fn read_configs(
         let ghost_mode = decode_ghost_mode(
             &sandbox_id,
             row.ghost_mode_enabled,
-            row.ghost_min_speed_enter_mps,
-            row.ghost_min_speed_exit_mps,
+            row.ghost_max_speed_enter_mps,
+            row.ghost_max_speed_exit_mps,
             row.ghost_enter_delay_ms,
             row.ghost_exit_delay_ms,
             row.ghost_min_completed_laps,
@@ -449,8 +449,8 @@ async fn read_configs(
 fn decode_ghost_mode(
     sandbox_id: &str,
     enabled: Option<bool>,
-    min_speed_enter_mps: Option<f32>,
-    min_speed_exit_mps: Option<f32>,
+    max_speed_enter_mps: Option<f32>,
+    max_speed_exit_mps: Option<f32>,
     enter_delay_ms_raw: Option<i64>,
     exit_delay_ms_raw: Option<i64>,
     min_completed_laps_raw: Option<i64>,
@@ -458,8 +458,8 @@ fn decode_ghost_mode(
     overlap_exit_delay_ms_raw: Option<i64>,
 ) -> Result<Option<GhostModeSettingsRecord>, SandboxConfigRepoError> {
     let all_none = enabled.is_none()
-        && min_speed_enter_mps.is_none()
-        && min_speed_exit_mps.is_none()
+        && max_speed_enter_mps.is_none()
+        && max_speed_exit_mps.is_none()
         && enter_delay_ms_raw.is_none()
         && exit_delay_ms_raw.is_none()
         && min_completed_laps_raw.is_none()
@@ -474,12 +474,12 @@ fn decode_ghost_mode(
             sandbox_id: sandbox_id.to_string(),
         });
     };
-    let Some(min_speed_enter_mps) = min_speed_enter_mps else {
+    let Some(max_speed_enter_mps) = max_speed_enter_mps else {
         return Err(SandboxConfigRepoError::PartialGhostData {
             sandbox_id: sandbox_id.to_string(),
         });
     };
-    let Some(min_speed_exit_mps) = min_speed_exit_mps else {
+    let Some(max_speed_exit_mps) = max_speed_exit_mps else {
         return Err(SandboxConfigRepoError::PartialGhostData {
             sandbox_id: sandbox_id.to_string(),
         });
@@ -533,8 +533,8 @@ fn decode_ghost_mode(
 
     Ok(Some(GhostModeSettingsRecord {
         enabled,
-        min_speed_enter_mps,
-        min_speed_exit_mps,
+        max_speed_enter_mps,
+        max_speed_exit_mps,
         enter_delay_ms,
         exit_delay_ms,
         min_completed_laps,
@@ -546,8 +546,8 @@ fn decode_ghost_mode(
 #[derive(Debug, Clone)]
 struct DbGhostModeFields {
     enabled: Option<bool>,
-    min_speed_enter_mps: Option<f32>,
-    min_speed_exit_mps: Option<f32>,
+    max_speed_enter_mps: Option<f32>,
+    max_speed_exit_mps: Option<f32>,
     enter_delay_ms: Option<i64>,
     exit_delay_ms: Option<i64>,
     min_completed_laps: Option<i64>,
@@ -562,8 +562,8 @@ impl DbGhostModeFields {
         let Some(record) = record else {
             return Ok(Self {
                 enabled: None,
-                min_speed_enter_mps: None,
-                min_speed_exit_mps: None,
+                max_speed_enter_mps: None,
+                max_speed_exit_mps: None,
                 enter_delay_ms: None,
                 exit_delay_ms: None,
                 min_completed_laps: None,
@@ -576,8 +576,8 @@ impl DbGhostModeFields {
 
         Ok(Self {
             enabled: Some(record.enabled),
-            min_speed_enter_mps: Some(record.min_speed_enter_mps),
-            min_speed_exit_mps: Some(record.min_speed_exit_mps),
+            max_speed_enter_mps: Some(record.max_speed_enter_mps),
+            max_speed_exit_mps: Some(record.max_speed_exit_mps),
             enter_delay_ms: Some(i64::from(record.enter_delay_ms)),
             exit_delay_ms: Some(i64::from(record.exit_delay_ms)),
             min_completed_laps: Some(i64::from(record.min_completed_laps)),

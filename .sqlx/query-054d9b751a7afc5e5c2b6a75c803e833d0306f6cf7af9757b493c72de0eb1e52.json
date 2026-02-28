@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE sandbox_configs\n        SET sandbox_name = $2,\n            map_id = $3,\n            time_of_day_preset = $4,\n            ghost_mode_enabled = $5,\n            ghost_min_speed_enter_mps = $6,\n            ghost_min_speed_exit_mps = $7,\n            ghost_enter_delay_ms = $8,\n            ghost_exit_delay_ms = $9,\n            ghost_min_completed_laps = $10,\n            ghost_condition_logic = $11,\n            ghost_overlap_exit_delay_ms = $12\n        WHERE sandbox_id = $1\n        ",
+  "query": "\n        INSERT INTO sandbox_configs (\n            sandbox_id,\n            sandbox_name,\n            map_id,\n            time_of_day_preset,\n            ghost_mode_enabled,\n            ghost_max_speed_enter_mps,\n            ghost_max_speed_exit_mps,\n            ghost_enter_delay_ms,\n            ghost_exit_delay_ms,\n            ghost_min_completed_laps,\n            ghost_condition_logic,\n            ghost_overlap_exit_delay_ms\n        ) VALUES (\n            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12\n        )\n        ",
   "describe": {
     "columns": [],
     "parameters": {
@@ -43,5 +43,5 @@
     },
     "nullable": []
   },
-  "hash": "db4624cb521f4ed6b507e68751f597773d2ecde613188100286f5a1b265bf4cb"
+  "hash": "054d9b751a7afc5e5c2b6a75c803e833d0306f6cf7af9757b493c72de0eb1e52"
 }
