@@ -11,7 +11,7 @@ pub mod race_service;
 #[cfg(feature = "official")]
 pub mod sandbox_admin_service;
 #[cfg(feature = "official")]
-mod sandbox_mappers;
+pub(crate) mod sandbox_mappers;
 pub mod track_service;
 pub mod weather_admin_service;
 mod weather_mappers;

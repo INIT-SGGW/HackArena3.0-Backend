@@ -506,17 +506,21 @@ pub async fn spawn(
 
     let runtime_state = EngineRuntimeState {
         revision: 0,
-        activity_kind: EngineActivityKind::OfficialRace,
+        activity_kind: EngineActivityKind::None,
         map_id: DEFAULT_MAP_ID.to_string(),
         active_sandboxes: Vec::new(),
         time_of_day_preset: EngineRuntimeTimeOfDayPreset::Unspecified,
         pending_sandbox_activations: Vec::new(),
     };
+    let sandbox_engines: HashMap<String, EngineWorldSlot> = HashMap::new();
     let mut engine = build_engine(&cfg, &runtime_state.map_id)?;
     let ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
     engine
         .set_ghost_mode_settings(ghost_mode_settings)
         .map_err(EngineWorkerError::Engine)?;
+
+    tracing::info!("engine worker: startup runtime is idle");
+
     let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f32;
     let run_cfg = Arc::clone(&cfg);
     let handle = tokio::task::spawn_local(async move {
@@ -529,7 +533,7 @@ pub async fn spawn(
             run_cfg,
             runtime_state,
             ghost_mode_settings,
-            HashMap::new(),
+            sandbox_engines,
         )
         .await;
     });

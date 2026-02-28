@@ -103,11 +103,25 @@ async fn start_engine_worker(
 ) -> Result<(EngineClient, JoinHandle<()>), Box<dyn Error>> {
     #[cfg(feature = "official")]
     let weather_sync = runtime::weather_sync::WeatherSyncState::with_repo(
-        crate::db::repos::weather::WeatherRepo::new(official_db_pool),
+        crate::db::repos::weather::WeatherRepo::new(official_db_pool.clone()),
     );
     #[cfg(not(feature = "official"))]
     let weather_sync = runtime::weather_sync::WeatherSyncState::disabled();
 
-    let (client, handle) = runtime::engine_worker::spawn(cfg, weather_sync, shutdown_rx).await?;
+    let (client, handle) =
+        runtime::engine_worker::spawn(cfg.clone(), weather_sync, shutdown_rx).await?;
+
+    #[cfg(feature = "official")]
+    if cfg!(debug_assertions) && cfg.env.is_development() {
+        let sandbox_repo =
+            crate::db::repos::sandbox_config::SandboxConfigRepo::new(official_db_pool);
+        runtime::bootstrap::bootstrap_first_configured_sandbox_for_official_dev(
+            &cfg,
+            &client,
+            &sandbox_repo,
+        )
+        .await;
+    }
+
     Ok((client, handle))
 }

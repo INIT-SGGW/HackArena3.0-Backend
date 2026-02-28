@@ -26,6 +26,10 @@ impl AppEnv {
     pub fn is_production(self) -> bool {
         matches!(self, AppEnv::Production)
     }
+
+    pub fn is_development(self) -> bool {
+        matches!(self, AppEnv::Development)
+    }
 }
 
 #[derive(Debug)]
