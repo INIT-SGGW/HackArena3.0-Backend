@@ -8,6 +8,7 @@
 //! - gRPC services remain thin and communicate with the worker via commands,
 //!   avoiding shared mutable state and complex locking.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -52,6 +53,13 @@ pub enum EngineActivityKind {
     Sandbox,
 }
 
+/// Target runtime world for simulation commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineCommandTarget {
+    OfficialRace,
+    Sandbox { sandbox_id: String },
+}
+
 /// Backend runtime time-of-day preset reflected by engine worker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineRuntimeTimeOfDayPreset {
@@ -81,13 +89,17 @@ pub struct EngineActiveSandboxState {
     pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
 }
 
+struct EngineWorldSlot {
+    engine: Engine,
+    ghost_mode_settings: GhostModeSettings,
+}
+
 /// Minimal runtime state owned by the engine worker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineRuntimeState {
     pub revision: u64,
     pub activity_kind: EngineActivityKind,
     pub map_id: String,
-    pub active_sandbox_id: Option<String>,
     pub active_sandboxes: Vec<EngineActiveSandboxState>,
     pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
     pub pending_sandbox_activations: Vec<EnginePendingSandboxActivation>,
@@ -133,11 +145,25 @@ impl fmt::Display for EngineWorkerError {
 impl std::error::Error for EngineWorkerError {}
 
 impl EngineClient {
-    /// Spawns a vehicle and returns its engine-assigned ID.
+    /// Spawns a vehicle in official race runtime world.
     pub async fn spawn_car(&self) -> Result<u64, EngineWorkerError> {
+        self.spawn_car_in(EngineCommandTarget::OfficialRace).await
+    }
+
+    /// Spawns a vehicle in target sandbox runtime world.
+    pub async fn spawn_sandbox_car(&self, sandbox_id: String) -> Result<u64, EngineWorkerError> {
+        self.spawn_car_in(EngineCommandTarget::Sandbox { sandbox_id })
+            .await
+    }
+
+    /// Spawns a vehicle in target runtime world and returns its engine-assigned ID.
+    pub async fn spawn_car_in(
+        &self,
+        target: EngineCommandTarget,
+    ) -> Result<u64, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(EngineCommand::SpawnCar { reply_tx })
+            .send(EngineCommand::SpawnCar { target, reply_tx })
             .await
             .map_err(|_| EngineWorkerError::WorkerStopped)?;
 
@@ -146,15 +172,42 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
-    /// Sets controls for a given car.
+    /// Sets controls for a given official-race car.
     pub async fn set_controls(
         &self,
+        car_id: u64,
+        controls: Controls,
+    ) -> Result<(), EngineWorkerError> {
+        self.set_controls_in(EngineCommandTarget::OfficialRace, car_id, controls)
+            .await
+    }
+
+    /// Sets controls for a given sandbox car.
+    pub async fn set_sandbox_controls(
+        &self,
+        sandbox_id: String,
+        car_id: u64,
+        controls: Controls,
+    ) -> Result<(), EngineWorkerError> {
+        self.set_controls_in(
+            EngineCommandTarget::Sandbox { sandbox_id },
+            car_id,
+            controls,
+        )
+        .await
+    }
+
+    /// Sets controls for a given car in target runtime world.
+    pub async fn set_controls_in(
+        &self,
+        target: EngineCommandTarget,
         car_id: u64,
         controls: Controls,
     ) -> Result<(), EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::SetControls {
+                target,
                 car_id,
                 controls,
                 reply_tx,
@@ -167,11 +220,35 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
-    /// Reads the latest state for a given vehicle.
+    /// Reads the latest state for a given official-race vehicle.
     pub async fn read_car_state(&self, car_id: u64) -> Result<VehicleState, EngineWorkerError> {
+        self.read_car_state_in(EngineCommandTarget::OfficialRace, car_id)
+            .await
+    }
+
+    /// Reads the latest state for a given sandbox vehicle.
+    pub async fn read_sandbox_car_state(
+        &self,
+        sandbox_id: String,
+        car_id: u64,
+    ) -> Result<VehicleState, EngineWorkerError> {
+        self.read_car_state_in(EngineCommandTarget::Sandbox { sandbox_id }, car_id)
+            .await
+    }
+
+    /// Reads the latest state for a given vehicle in target runtime world.
+    pub async fn read_car_state_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<VehicleState, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(EngineCommand::ReadCarState { car_id, reply_tx })
+            .send(EngineCommand::ReadCarState {
+                target,
+                car_id,
+                reply_tx,
+            })
             .await
             .map_err(|_| EngineWorkerError::WorkerStopped)?;
 
@@ -180,11 +257,28 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
-    /// Reads static track geometry from the engine world.
+    /// Reads static track geometry from the official-race engine world.
     pub async fn track_data(&self) -> Result<TrackData, EngineWorkerError> {
+        self.track_data_in(EngineCommandTarget::OfficialRace).await
+    }
+
+    /// Reads static track geometry from the target sandbox engine world.
+    pub async fn sandbox_track_data(
+        &self,
+        sandbox_id: String,
+    ) -> Result<TrackData, EngineWorkerError> {
+        self.track_data_in(EngineCommandTarget::Sandbox { sandbox_id })
+            .await
+    }
+
+    /// Reads static track geometry from the target runtime world.
+    pub async fn track_data_in(
+        &self,
+        target: EngineCommandTarget,
+    ) -> Result<TrackData, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(EngineCommand::GetTrackData { reply_tx })
+            .send(EngineCommand::GetTrackData { target, reply_tx })
             .await
             .map_err(|_| EngineWorkerError::WorkerStopped)?;
 
@@ -212,7 +306,7 @@ impl EngineClient {
         expected_revision: u64,
         activity_kind: EngineActivityKind,
         map_id: String,
-        active_sandbox_id: Option<String>,
+        sandbox_id: Option<String>,
         time_of_day_preset: Option<EngineRuntimeTimeOfDayPreset>,
         ghost_mode_settings: Option<GhostModeSettings>,
     ) -> Result<EngineRuntimeState, EngineWorkerError> {
@@ -222,7 +316,7 @@ impl EngineClient {
                 expected_revision,
                 activity_kind,
                 map_id,
-                active_sandbox_id,
+                sandbox_id,
                 time_of_day_preset,
                 ghost_mode_settings,
                 reply_tx,
@@ -300,14 +394,38 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
-    /// Updates global ghost mode settings in the active engine world.
+    /// Updates ghost mode settings in official-race world.
     pub async fn set_ghost_mode_settings(
         &self,
         settings: GhostModeSettings,
     ) -> Result<(), EngineWorkerError> {
+        self.set_ghost_mode_settings_in(EngineCommandTarget::OfficialRace, settings)
+            .await
+    }
+
+    /// Updates ghost mode settings in target sandbox world.
+    pub async fn set_sandbox_ghost_mode_settings(
+        &self,
+        sandbox_id: String,
+        settings: GhostModeSettings,
+    ) -> Result<(), EngineWorkerError> {
+        self.set_ghost_mode_settings_in(EngineCommandTarget::Sandbox { sandbox_id }, settings)
+            .await
+    }
+
+    /// Updates ghost mode settings in target runtime world.
+    pub async fn set_ghost_mode_settings_in(
+        &self,
+        target: EngineCommandTarget,
+        settings: GhostModeSettings,
+    ) -> Result<(), EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(EngineCommand::SetGhostModeSettings { settings, reply_tx })
+            .send(EngineCommand::SetGhostModeSettings {
+                target,
+                settings,
+                reply_tx,
+            })
             .await
             .map_err(|_| EngineWorkerError::WorkerStopped)?;
 
@@ -316,11 +434,35 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
-    /// Despawns a car, releasing it from the engine world.
+    /// Despawns an official-race car, releasing it from the engine world.
     pub async fn despawn_car(&self, car_id: u64) -> Result<(), EngineWorkerError> {
+        self.despawn_car_in(EngineCommandTarget::OfficialRace, car_id)
+            .await
+    }
+
+    /// Despawns a sandbox car, releasing it from the engine world.
+    pub async fn despawn_sandbox_car(
+        &self,
+        sandbox_id: String,
+        car_id: u64,
+    ) -> Result<(), EngineWorkerError> {
+        self.despawn_car_in(EngineCommandTarget::Sandbox { sandbox_id }, car_id)
+            .await
+    }
+
+    /// Despawns a car in target runtime world.
+    pub async fn despawn_car_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<(), EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(EngineCommand::DespawnCar { car_id, reply_tx })
+            .send(EngineCommand::DespawnCar {
+                target,
+                car_id,
+                reply_tx,
+            })
             .await
             .map_err(|_| EngineWorkerError::WorkerStopped)?;
 
@@ -345,7 +487,6 @@ pub async fn spawn(
         revision: 0,
         activity_kind: EngineActivityKind::OfficialRace,
         map_id: DEFAULT_MAP_ID.to_string(),
-        active_sandbox_id: None,
         active_sandboxes: Vec::new(),
         time_of_day_preset: EngineRuntimeTimeOfDayPreset::Unspecified,
         pending_sandbox_activations: Vec::new(),
@@ -367,6 +508,7 @@ pub async fn spawn(
             run_cfg,
             runtime_state,
             ghost_mode_settings,
+            HashMap::new(),
         )
         .await;
     });
@@ -375,15 +517,20 @@ pub async fn spawn(
 }
 
 async fn run_worker(
-    mut engine: Engine,
+    official_engine: Engine,
     rx: &mut mpsc::Receiver<EngineCommand>,
     shutdown_rx: &mut broadcast::Receiver<()>,
     simulation_dt_seconds: f32,
     weather_sync: WeatherSyncState,
     cfg: Arc<Config>,
     mut runtime_state: EngineRuntimeState,
-    mut ghost_mode_settings: GhostModeSettings,
+    official_ghost_mode_settings: GhostModeSettings,
+    mut sandbox_engines: HashMap<String, EngineWorldSlot>,
 ) {
+    let mut official_engine = EngineWorldSlot {
+        engine: official_engine,
+        ghost_mode_settings: official_ghost_mode_settings,
+    };
     let mut ticker =
         tokio::time::interval(tokio::time::Duration::from_secs_f32(simulation_dt_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -396,8 +543,15 @@ async fn run_worker(
         weather_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         tracing::info!("weather sync enabled (interval=60s)");
-        if let Err(err) = apply_weather_from_schedule(&mut engine, &weather_sync).await {
-            tracing::warn!(error = %err, "initial weather apply failed");
+        if matches!(
+            runtime_state.activity_kind,
+            EngineActivityKind::OfficialRace
+        ) {
+            if let Err(err) =
+                apply_weather_from_schedule(&mut official_engine.engine, &weather_sync).await
+            {
+                tracing::warn!(error = %err, "initial weather apply failed");
+            }
         }
         weather_tick
     };
@@ -411,9 +565,40 @@ async fn run_worker(
 
             _ = ticker.tick() => {
                 let tick_start = Instant::now();
-                if let Err(err) = engine.step(simulation_dt_seconds) {
-                    tracing::warn!(error = ?err, "engine worker: tick failed");
+                let mut should_stop = false;
+
+                match runtime_state.activity_kind {
+                    EngineActivityKind::OfficialRace => {
+                        if let Err(err) = official_engine.engine.step(simulation_dt_seconds) {
+                            tracing::warn!(error = ?err, "engine worker: official tick failed");
+                        }
+                        if official_engine.engine.should_close_debug() {
+                            tracing::info!("engine worker: official debug drawer requested close");
+                            should_stop = true;
+                        }
+                    }
+                    EngineActivityKind::Sandbox => {
+                        for (sandbox_id, sandbox_slot) in sandbox_engines.iter_mut() {
+                            if let Err(err) = sandbox_slot.engine.step(simulation_dt_seconds) {
+                                tracing::warn!(
+                                    sandbox_id = %sandbox_id,
+                                    error = ?err,
+                                    "engine worker: sandbox tick failed"
+                                );
+                            }
+                            if sandbox_slot.engine.should_close_debug() {
+                                tracing::info!(
+                                    sandbox_id = %sandbox_id,
+                                    "engine worker: sandbox debug drawer requested close"
+                                );
+                                should_stop = true;
+                                break;
+                            }
+                        }
+                    }
+                    EngineActivityKind::None => {}
                 }
+
                 let elapsed = tick_start.elapsed();
                 let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
                 tracing::debug!(
@@ -427,23 +612,40 @@ async fn run_worker(
                         "engine worker: tick exceeded budget"
                     );
                 }
-                if engine.should_close_debug() {
-                    tracing::info!("engine worker: debug drawer requested close");
+                if should_stop {
                     break;
                 }
                 if let Err(err) = maybe_execute_due_pending_sandbox_activation(
-                    &mut engine,
+                    &mut official_engine,
                     &cfg,
                     &mut runtime_state,
-                    &mut ghost_mode_settings,
+                    &mut sandbox_engines,
                 ) {
                     tracing::warn!("engine worker: pending sandbox activation failed: {err}");
                 }
             }
 
             _ = weather_tick.tick() => {
-                if let Err(err) = apply_weather_from_schedule(&mut engine, &weather_sync).await {
-                    tracing::warn!(error = %err, "engine worker: scheduled weather apply failed");
+                match runtime_state.activity_kind {
+                    EngineActivityKind::OfficialRace => {
+                        if let Err(err) = apply_weather_from_schedule(&mut official_engine.engine, &weather_sync).await {
+                            tracing::warn!(error = %err, "engine worker: official scheduled weather apply failed");
+                        }
+                    }
+                    EngineActivityKind::Sandbox => {
+                        for (sandbox_id, sandbox_slot) in sandbox_engines.iter_mut() {
+                            if let Err(err) =
+                                apply_weather_from_schedule(&mut sandbox_slot.engine, &weather_sync).await
+                            {
+                                tracing::warn!(
+                                    sandbox_id = %sandbox_id,
+                                    error = %err,
+                                    "engine worker: sandbox scheduled weather apply failed"
+                                );
+                            }
+                        }
+                    }
+                    EngineActivityKind::None => {}
                 }
             }
 
@@ -454,19 +656,19 @@ async fn run_worker(
                 };
 
                 if let Err(err) = handle_command(
-                    &mut engine,
+                    &mut official_engine,
                     &cfg,
                     &mut runtime_state,
-                    &mut ghost_mode_settings,
+                    &mut sandbox_engines,
                     cmd,
                 ) {
                     tracing::warn!("engine worker: command failed: {err}");
                 }
                 if let Err(err) = maybe_execute_due_pending_sandbox_activation(
-                    &mut engine,
+                    &mut official_engine,
                     &cfg,
                     &mut runtime_state,
-                    &mut ghost_mode_settings,
+                    &mut sandbox_engines,
                 ) {
                     tracing::warn!("engine worker: pending sandbox activation failed: {err}");
                 }
@@ -477,41 +679,96 @@ async fn run_worker(
     tracing::info!("engine worker: stopped");
 }
 
+fn target_slot_mut<'a>(
+    target: &EngineCommandTarget,
+    runtime_state: &EngineRuntimeState,
+    official_engine: &'a mut EngineWorldSlot,
+    sandbox_engines: &'a mut HashMap<String, EngineWorldSlot>,
+) -> Result<&'a mut EngineWorldSlot, EngineWorkerError> {
+    match target {
+        EngineCommandTarget::OfficialRace => {
+            if !matches!(
+                runtime_state.activity_kind,
+                EngineActivityKind::OfficialRace
+            ) {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "official race runtime is not active".to_string(),
+                ));
+            }
+            Ok(official_engine)
+        }
+        EngineCommandTarget::Sandbox { sandbox_id } => {
+            if sandbox_id.trim().is_empty() {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "sandbox_id must be non-empty".to_string(),
+                ));
+            }
+            if !matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "sandbox runtime is not active".to_string(),
+                ));
+            }
+            sandbox_engines.get_mut(sandbox_id).ok_or_else(|| {
+                EngineWorkerError::InvalidArgument(
+                    "sandbox_id does not match active sandbox session".to_string(),
+                )
+            })
+        }
+    }
+}
+
 fn handle_command(
-    engine: &mut Engine,
+    official_engine: &mut EngineWorldSlot,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
-    ghost_mode_settings: &mut GhostModeSettings,
+    sandbox_engines: &mut HashMap<String, EngineWorldSlot>,
     cmd: EngineCommand,
 ) -> Result<(), EngineWorkerError> {
     match cmd {
-        EngineCommand::SpawnCar { reply_tx } => {
-            let result = engine.spawn_vehicle().map_err(EngineWorkerError::Engine);
+        EngineCommand::SpawnCar { target, reply_tx } => {
+            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
+                .and_then(|slot| {
+                    slot.engine
+                        .spawn_vehicle()
+                        .map_err(EngineWorkerError::Engine)
+                });
             let _ = reply_tx.send(result);
             Ok(())
         }
 
         EngineCommand::SetControls {
+            target,
             car_id,
             controls,
             reply_tx,
         } => {
-            let result = engine
-                .set_controls(car_id, controls)
-                .map_err(EngineWorkerError::Engine);
+            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
+                .and_then(|slot| {
+                    slot.engine
+                        .set_controls(car_id, controls)
+                        .map_err(EngineWorkerError::Engine)
+                });
             let _ = reply_tx.send(result);
             Ok(())
         }
 
-        EngineCommand::ReadCarState { car_id, reply_tx } => {
-            let result = engine
-                .read_vehicle_state(car_id)
-                .map_err(EngineWorkerError::Engine);
+        EngineCommand::ReadCarState {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
+                .and_then(|slot| {
+                    slot.engine
+                        .read_vehicle_state(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                });
             let _ = reply_tx.send(result);
             Ok(())
         }
-        EngineCommand::GetTrackData { reply_tx } => {
-            let result = engine.track_data().map_err(EngineWorkerError::Engine);
+        EngineCommand::GetTrackData { target, reply_tx } => {
+            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
+                .and_then(|slot| slot.engine.track_data().map_err(EngineWorkerError::Engine));
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -523,29 +780,25 @@ fn handle_command(
             expected_revision,
             activity_kind,
             map_id,
-            active_sandbox_id: next_active_sandbox_id,
+            sandbox_id,
             time_of_day_preset: next_time_of_day_preset,
             ghost_mode_settings: next_ghost_mode_settings,
             reply_tx,
         } => {
-            let target_ghost_mode_settings =
-                next_ghost_mode_settings.unwrap_or(*ghost_mode_settings);
             let target_time_of_day_preset =
                 next_time_of_day_preset.unwrap_or(runtime_state.time_of_day_preset);
             let result = switch_runtime(
-                engine,
+                official_engine,
                 cfg,
                 runtime_state,
+                sandbox_engines,
                 expected_revision,
                 activity_kind,
                 map_id,
-                next_active_sandbox_id,
+                sandbox_id,
                 target_time_of_day_preset,
-                target_ghost_mode_settings,
+                next_ghost_mode_settings,
             );
-            if result.is_ok() {
-                *ghost_mode_settings = target_ghost_mode_settings;
-            }
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -575,30 +828,41 @@ fn handle_command(
             reply_tx,
         } => {
             let result = deactivate_sandbox(
-                engine,
-                cfg,
                 runtime_state,
+                sandbox_engines,
                 expected_revision,
                 &sandbox_id,
-                ghost_mode_settings,
             );
             let _ = reply_tx.send(result);
             Ok(())
         }
-        EngineCommand::SetGhostModeSettings { settings, reply_tx } => {
-            let result = engine
-                .set_ghost_mode_settings(settings)
-                .map_err(EngineWorkerError::Engine);
-            if result.is_ok() {
-                *ghost_mode_settings = settings;
-            }
+        EngineCommand::SetGhostModeSettings {
+            target,
+            settings,
+            reply_tx,
+        } => {
+            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
+                .and_then(|slot| {
+                    slot.engine
+                        .set_ghost_mode_settings(settings)
+                        .map_err(EngineWorkerError::Engine)?;
+                    slot.ghost_mode_settings = settings;
+                    Ok(())
+                });
             let _ = reply_tx.send(result);
             Ok(())
         }
-        EngineCommand::DespawnCar { car_id, reply_tx } => {
-            let result = engine
-                .despawn_vehicle(car_id)
-                .map_err(EngineWorkerError::Engine);
+        EngineCommand::DespawnCar {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
+                .and_then(|slot| {
+                    slot.engine
+                        .despawn_vehicle(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                });
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -606,15 +870,16 @@ fn handle_command(
 }
 
 fn switch_runtime(
-    engine: &mut Engine,
+    official_engine: &mut EngineWorldSlot,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
+    sandbox_engines: &mut HashMap<String, EngineWorldSlot>,
     expected_revision: u64,
     activity_kind: EngineActivityKind,
     map_id: String,
-    active_sandbox_id: Option<String>,
+    sandbox_id: Option<String>,
     time_of_day_preset: EngineRuntimeTimeOfDayPreset,
-    ghost_mode_settings: GhostModeSettings,
+    ghost_mode_settings: Option<GhostModeSettings>,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
     if runtime_state.revision != expected_revision {
         return Err(EngineWorkerError::RevisionMismatch {
@@ -622,99 +887,124 @@ fn switch_runtime(
             actual: runtime_state.revision,
         });
     }
+
+    let mut upserted_sandbox_id: Option<String> = None;
+
     match activity_kind {
         EngineActivityKind::None | EngineActivityKind::OfficialRace => {
             validate_map_id(&map_id)?;
+            let target_ghost_mode_settings =
+                ghost_mode_settings.unwrap_or(official_engine.ghost_mode_settings);
             let mut new_engine = build_engine(cfg, &map_id)?;
             new_engine
-                .set_ghost_mode_settings(ghost_mode_settings)
+                .set_ghost_mode_settings(target_ghost_mode_settings)
                 .map_err(EngineWorkerError::Engine)?;
-            *engine = new_engine;
+            official_engine.engine = new_engine;
+            official_engine.ghost_mode_settings = target_ghost_mode_settings;
+            sandbox_engines.clear();
 
             runtime_state.activity_kind = activity_kind;
             runtime_state.map_id = map_id;
-            runtime_state.active_sandbox_id = None;
             runtime_state.active_sandboxes.clear();
             runtime_state.time_of_day_preset = time_of_day_preset;
         }
         EngineActivityKind::Sandbox => {
-            let active_sandbox_id = active_sandbox_id.ok_or_else(|| {
+            let sandbox_id = sandbox_id.ok_or_else(|| {
                 EngineWorkerError::InvalidArgument(
-                    "active_sandbox_id is required for sandbox runtime".to_string(),
+                    "sandbox_id is required for sandbox runtime".to_string(),
                 )
             })?;
-            if active_sandbox_id.trim().is_empty() {
+            if sandbox_id.trim().is_empty() {
                 return Err(EngineWorkerError::InvalidArgument(
-                    "active_sandbox_id must be non-empty for sandbox runtime".to_string(),
+                    "sandbox_id must be non-empty for sandbox runtime".to_string(),
+                ));
+            }
+            if matches!(
+                time_of_day_preset,
+                EngineRuntimeTimeOfDayPreset::Unspecified
+            ) {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "time_of_day_preset must be specified for sandbox runtime".to_string(),
                 ));
             }
             validate_map_id(&map_id)?;
-
-            if !matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
-                let mut new_engine = build_engine(cfg, &map_id)?;
-                new_engine
-                    .set_ghost_mode_settings(ghost_mode_settings)
-                    .map_err(EngineWorkerError::Engine)?;
-                *engine = new_engine;
-
-                runtime_state.activity_kind = EngineActivityKind::Sandbox;
-                runtime_state.map_id = map_id.clone();
-                runtime_state.active_sandbox_id = Some(active_sandbox_id.clone());
-                runtime_state.time_of_day_preset = time_of_day_preset;
-                runtime_state.active_sandboxes = vec![EngineActiveSandboxState {
-                    sandbox_id: active_sandbox_id,
-                    map_id,
-                    time_of_day_preset,
-                }];
-            } else {
-                upsert_active_sandbox(
-                    &mut runtime_state.active_sandboxes,
-                    EngineActiveSandboxState {
-                        sandbox_id: active_sandbox_id.clone(),
-                        map_id: map_id.clone(),
-                        time_of_day_preset,
-                    },
-                );
-                let mut new_engine = build_engine(cfg, &map_id)?;
-                new_engine
-                    .set_ghost_mode_settings(ghost_mode_settings)
-                    .map_err(EngineWorkerError::Engine)?;
-                *engine = new_engine;
-                runtime_state.map_id = map_id;
-                runtime_state.active_sandbox_id = Some(active_sandbox_id);
-                runtime_state.time_of_day_preset = time_of_day_preset;
+            if is_sandbox_active(runtime_state, &sandbox_id) {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "sandbox_id is already active".to_string(),
+                ));
             }
+
+            let fallback_ghost_mode_settings = sandbox_engines
+                .get(&sandbox_id)
+                .map(|slot| slot.ghost_mode_settings)
+                .unwrap_or(DEFAULT_GHOST_MODE_SETTINGS);
+            let target_ghost_mode_settings =
+                ghost_mode_settings.unwrap_or(fallback_ghost_mode_settings);
+
+            let mut sandbox_engine = build_engine(cfg, &map_id)?;
+            sandbox_engine
+                .set_ghost_mode_settings(target_ghost_mode_settings)
+                .map_err(EngineWorkerError::Engine)?;
+            sandbox_engines.insert(
+                sandbox_id.clone(),
+                EngineWorldSlot {
+                    engine: sandbox_engine,
+                    ghost_mode_settings: target_ghost_mode_settings,
+                },
+            );
+
+            upsert_active_sandbox(
+                &mut runtime_state.active_sandboxes,
+                EngineActiveSandboxState {
+                    sandbox_id: sandbox_id.clone(),
+                    map_id: map_id.clone(),
+                    time_of_day_preset,
+                },
+            );
+            upserted_sandbox_id = Some(sandbox_id.clone());
+            runtime_state.activity_kind = EngineActivityKind::Sandbox;
+            runtime_state.time_of_day_preset = time_of_day_preset;
+            runtime_state
+                .pending_sandbox_activations
+                .retain(|pending| pending.sandbox_id != sandbox_id);
         }
     }
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);
-    if let Some(active_id) = runtime_state.active_sandbox_id.clone() {
-        runtime_state
-            .pending_sandbox_activations
-            .retain(|pending| pending.sandbox_id != active_id);
-    }
 
-    tracing::info!(
-        revision = runtime_state.revision,
-        activity_kind = ?runtime_state.activity_kind,
-        map_id = %runtime_state.map_id,
-        active_sandbox_id = ?runtime_state.active_sandbox_id,
-        active_sandboxes = runtime_state.active_sandboxes.len(),
-        time_of_day_preset = ?runtime_state.time_of_day_preset,
-        pending_sandbox_activations = runtime_state.pending_sandbox_activations.len(),
-        "engine worker: runtime switched"
-    );
+    if matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
+        tracing::info!(
+            revision = runtime_state.revision,
+            sandbox_id = ?upserted_sandbox_id,
+            activity_kind = ?runtime_state.activity_kind,
+            map_id = %runtime_state.map_id,
+            active_sandboxes = runtime_state.active_sandboxes.len(),
+            sandbox_engines = sandbox_engines.len(),
+            time_of_day_preset = ?runtime_state.time_of_day_preset,
+            pending_sandbox_activations = runtime_state.pending_sandbox_activations.len(),
+            "engine worker: sandbox upserted"
+        );
+    } else {
+        tracing::info!(
+            revision = runtime_state.revision,
+            activity_kind = ?runtime_state.activity_kind,
+            map_id = %runtime_state.map_id,
+            active_sandboxes = runtime_state.active_sandboxes.len(),
+            sandbox_engines = sandbox_engines.len(),
+            time_of_day_preset = ?runtime_state.time_of_day_preset,
+            pending_sandbox_activations = runtime_state.pending_sandbox_activations.len(),
+            "engine worker: runtime switched"
+        );
+    }
 
     Ok(runtime_state.clone())
 }
 
 fn deactivate_sandbox(
-    engine: &mut Engine,
-    cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
+    sandbox_engines: &mut HashMap<String, EngineWorldSlot>,
     expected_revision: u64,
     sandbox_id: &str,
-    ghost_mode_settings: &mut GhostModeSettings,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
     if runtime_state.revision != expected_revision {
         return Err(EngineWorkerError::RevisionMismatch {
@@ -727,51 +1017,28 @@ fn deactivate_sandbox(
             "sandbox_id must be non-empty for deactivation".to_string(),
         ));
     }
-    if !matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
-        return Err(EngineWorkerError::InvalidArgument(
-            "sandbox deactivation requires active sandbox runtime".to_string(),
-        ));
-    }
 
-    let position = runtime_state
+    let mut removed = false;
+    if let Some(position) = runtime_state
         .active_sandboxes
         .iter()
         .position(|entry| entry.sandbox_id == sandbox_id)
-        .ok_or_else(|| {
-            EngineWorkerError::InvalidArgument(
-                "sandbox_id does not match active sandbox session".to_string(),
-            )
-        })?;
-    runtime_state.active_sandboxes.remove(position);
+    {
+        runtime_state.active_sandboxes.remove(position);
+        removed = true;
+    }
+    if sandbox_engines.remove(sandbox_id).is_some() {
+        removed = true;
+    }
     runtime_state
         .pending_sandbox_activations
         .retain(|pending| pending.sandbox_id != sandbox_id);
 
-    if runtime_state.active_sandbox_id.as_deref() == Some(sandbox_id) {
-        if let Some(next_primary) = runtime_state.active_sandboxes.first().cloned() {
-            let mut new_engine = build_engine(cfg, &next_primary.map_id)?;
-            new_engine
-                .set_ghost_mode_settings(*ghost_mode_settings)
-                .map_err(EngineWorkerError::Engine)?;
-            *engine = new_engine;
-
-            runtime_state.activity_kind = EngineActivityKind::Sandbox;
-            runtime_state.map_id = next_primary.map_id;
-            runtime_state.active_sandbox_id = Some(next_primary.sandbox_id);
-            runtime_state.time_of_day_preset = next_primary.time_of_day_preset;
-        } else {
-            let next_map_id = runtime_state.map_id.clone();
-            let mut new_engine = build_engine(cfg, &next_map_id)?;
-            new_engine
-                .set_ghost_mode_settings(DEFAULT_GHOST_MODE_SETTINGS)
-                .map_err(EngineWorkerError::Engine)?;
-            *engine = new_engine;
-            *ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
-
-            runtime_state.activity_kind = EngineActivityKind::None;
-            runtime_state.active_sandbox_id = None;
-            runtime_state.time_of_day_preset = EngineRuntimeTimeOfDayPreset::Unspecified;
-        }
+    if runtime_state.active_sandboxes.is_empty()
+        && matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox)
+    {
+        runtime_state.activity_kind = EngineActivityKind::None;
+        runtime_state.time_of_day_preset = EngineRuntimeTimeOfDayPreset::Unspecified;
     }
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);
@@ -779,8 +1046,10 @@ fn deactivate_sandbox(
     tracing::info!(
         revision = runtime_state.revision,
         sandbox_id = %sandbox_id,
+        removed,
         activity_kind = ?runtime_state.activity_kind,
         active_sandboxes = runtime_state.active_sandboxes.len(),
+        sandbox_engines = sandbox_engines.len(),
         "engine worker: sandbox deactivated"
     );
 
@@ -840,9 +1109,7 @@ fn set_runtime_time_of_day(
             )
         })?;
     target.time_of_day_preset = preset;
-    if runtime_state.active_sandbox_id.as_deref() == Some(target_sandbox_id.as_str()) {
-        runtime_state.time_of_day_preset = preset;
-    }
+    runtime_state.time_of_day_preset = preset;
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);
 
@@ -850,7 +1117,6 @@ fn set_runtime_time_of_day(
         revision = runtime_state.revision,
         activity_kind = ?runtime_state.activity_kind,
         map_id = %runtime_state.map_id,
-        active_sandbox_id = ?runtime_state.active_sandbox_id,
         active_sandboxes = runtime_state.active_sandboxes.len(),
         time_of_day_preset = ?runtime_state.time_of_day_preset,
         pending_sandbox_activations = runtime_state.pending_sandbox_activations.len(),
@@ -874,6 +1140,13 @@ fn upsert_active_sandbox(
     active_sandboxes.push(next);
 }
 
+fn is_sandbox_active(runtime_state: &EngineRuntimeState, sandbox_id: &str) -> bool {
+    runtime_state
+        .active_sandboxes
+        .iter()
+        .any(|entry| entry.sandbox_id == sandbox_id)
+}
+
 fn set_pending_sandbox_activation(
     runtime_state: &mut EngineRuntimeState,
     expected_revision: u64,
@@ -892,6 +1165,11 @@ fn set_pending_sandbox_activation(
         ));
     }
     if pending.activate {
+        if is_sandbox_active(runtime_state, &pending.sandbox_id) {
+            return Err(EngineWorkerError::InvalidArgument(
+                "sandbox_id is already active".to_string(),
+            ));
+        }
         let map_id = pending.map_id.as_ref().ok_or_else(|| {
             EngineWorkerError::InvalidArgument(
                 "map_id must be set for scheduled activation".to_string(),
@@ -950,10 +1228,10 @@ fn set_pending_sandbox_activation(
 }
 
 fn maybe_execute_due_pending_sandbox_activation(
-    engine: &mut Engine,
+    official_engine: &mut EngineWorldSlot,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
-    ghost_mode_settings: &mut GhostModeSettings,
+    sandbox_engines: &mut HashMap<String, EngineWorldSlot>,
 ) -> Result<(), EngineWorkerError> {
     if runtime_state.pending_sandbox_activations.is_empty() {
         return Ok(());
@@ -972,6 +1250,16 @@ fn maybe_execute_due_pending_sandbox_activation(
 
     for pending in due {
         if pending.activate {
+            if is_sandbox_active(runtime_state, &pending.sandbox_id) {
+                tracing::info!(
+                    sandbox_id = %pending.sandbox_id,
+                    "engine worker: scheduled sandbox activation skipped (already active)"
+                );
+                runtime_state
+                    .pending_sandbox_activations
+                    .retain(|entry| entry.sandbox_id != pending.sandbox_id);
+                continue;
+            }
             let map_id = pending.map_id.clone().ok_or_else(|| {
                 EngineWorkerError::InvalidArgument(
                     "scheduled activation is missing map_id".to_string(),
@@ -989,26 +1277,24 @@ fn maybe_execute_due_pending_sandbox_activation(
             })?;
 
             let _ = switch_runtime(
-                engine,
+                official_engine,
                 cfg,
                 runtime_state,
+                sandbox_engines,
                 runtime_state.revision,
                 EngineActivityKind::Sandbox,
                 map_id,
                 Some(pending.sandbox_id.clone()),
                 time_of_day_preset,
-                scheduled_ghost_mode_settings,
+                Some(scheduled_ghost_mode_settings),
             )?;
-            *ghost_mode_settings = scheduled_ghost_mode_settings;
             tracing::info!(sandbox_id = %pending.sandbox_id, "engine worker: scheduled sandbox activation executed");
         } else {
             let _ = deactivate_sandbox(
-                engine,
-                cfg,
                 runtime_state,
+                sandbox_engines,
                 runtime_state.revision,
                 &pending.sandbox_id,
-                ghost_mode_settings,
             )?;
             tracing::info!(sandbox_id = %pending.sandbox_id, "engine worker: scheduled sandbox deactivation executed");
         }
@@ -1019,7 +1305,6 @@ fn maybe_execute_due_pending_sandbox_activation(
 
     Ok(())
 }
-
 fn current_unix_ms() -> i64 {
     let now = std::time::SystemTime::now();
     let duration = now

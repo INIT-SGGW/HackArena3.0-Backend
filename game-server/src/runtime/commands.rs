@@ -4,7 +4,7 @@ use boink::model::{Controls, GhostModeSettings, TrackData, VehicleState};
 use tokio::sync::oneshot;
 
 use super::engine_worker::{
-    EngineActivityKind, EnginePendingSandboxActivation, EngineRuntimeState,
+    EngineActivityKind, EngineCommandTarget, EnginePendingSandboxActivation, EngineRuntimeState,
     EngineRuntimeTimeOfDayPreset, EngineWorkerError,
 };
 
@@ -14,18 +14,22 @@ use super::engine_worker::{
 #[derive(Debug)]
 pub enum EngineCommand {
     SpawnCar {
+        target: EngineCommandTarget,
         reply_tx: oneshot::Sender<Result<u64, EngineWorkerError>>,
     },
     SetControls {
+        target: EngineCommandTarget,
         car_id: u64,
         controls: Controls,
         reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
     },
     ReadCarState {
+        target: EngineCommandTarget,
         car_id: u64,
         reply_tx: oneshot::Sender<Result<VehicleState, EngineWorkerError>>,
     },
     GetTrackData {
+        target: EngineCommandTarget,
         reply_tx: oneshot::Sender<Result<TrackData, EngineWorkerError>>,
     },
     GetRuntimeState {
@@ -35,7 +39,7 @@ pub enum EngineCommand {
         expected_revision: u64,
         activity_kind: EngineActivityKind,
         map_id: String,
-        active_sandbox_id: Option<String>,
+        sandbox_id: Option<String>,
         time_of_day_preset: Option<EngineRuntimeTimeOfDayPreset>,
         ghost_mode_settings: Option<GhostModeSettings>,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
@@ -57,10 +61,12 @@ pub enum EngineCommand {
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
     SetGhostModeSettings {
+        target: EngineCommandTarget,
         settings: GhostModeSettings,
         reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
     },
     DespawnCar {
+        target: EngineCommandTarget,
         car_id: u64,
         reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
     },
