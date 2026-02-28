@@ -20,6 +20,14 @@ use crate::services::sandbox_mappers::{
 const STREAM_CHANNEL_CAPACITY: usize = 16;
 const STREAM_POLL_INTERVAL_MS: u64 = 1000;
 
+fn comparable_menu_state(state: &PublicMenuState) -> PublicMenuState {
+    let mut comparable = state.clone();
+    if let Some(runtime) = comparable.runtime.as_mut() {
+        runtime.server_time_utc = None;
+    }
+    comparable
+}
+
 /// PublicMenu service backed by sandbox config repository and runtime worker state.
 #[derive(Clone)]
 pub struct PublicMenuServiceImpl {
@@ -85,15 +93,16 @@ impl PublicMenuService for PublicMenuServiceImpl {
         let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
 
         tokio::spawn(async move {
-            let mut last_state: Option<PublicMenuState> = None;
+            let mut last_comparable_state: Option<PublicMenuState> = None;
             let mut ticker =
                 tokio::time::interval(tokio::time::Duration::from_millis(STREAM_POLL_INTERVAL_MS));
 
             loop {
                 match service.build_menu_state().await {
                     Ok(state) => {
-                        if last_state.as_ref() != Some(&state) {
-                            last_state = Some(state.clone());
+                        let comparable = comparable_menu_state(&state);
+                        if last_comparable_state.as_ref() != Some(&comparable) {
+                            last_comparable_state = Some(comparable);
                             if tx.send(Ok(state)).await.is_err() {
                                 break;
                             }
