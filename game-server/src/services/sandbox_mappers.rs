@@ -80,21 +80,25 @@ fn ghost_mode_from_proto(
         ));
     }
 
-    if !proto.min_speed_enter_mps.is_finite() || proto.min_speed_enter_mps < 0.0 {
+    if !proto.max_speed_enter_mps.is_finite() || proto.max_speed_enter_mps < 0.0 {
         return Err(Status::invalid_argument(
-            "ghost_mode.min_speed_enter_mps must be finite and >= 0",
+            "ghost_mode.max_speed_enter_mps must be finite and >= 0",
         ));
     }
-    if !proto.min_speed_exit_mps.is_finite() || proto.min_speed_exit_mps < 0.0 {
+    if !proto.max_speed_exit_mps.is_finite() || proto.max_speed_exit_mps < 0.0 {
         return Err(Status::invalid_argument(
-            "ghost_mode.min_speed_exit_mps must be finite and >= 0",
+            "ghost_mode.max_speed_exit_mps must be finite and >= 0",
         ));
     }
-
+    if proto.max_speed_enter_mps > proto.max_speed_exit_mps {
+        return Err(Status::invalid_argument(
+            "ghost_mode.max_speed_enter_mps must be <= ghost_mode.max_speed_exit_mps",
+        ));
+    }
     Ok(GhostModeSettingsRecord {
         enabled: proto.enabled,
-        min_speed_enter_mps: proto.min_speed_enter_mps,
-        min_speed_exit_mps: proto.min_speed_exit_mps,
+        min_speed_enter_mps: proto.max_speed_enter_mps,
+        min_speed_exit_mps: proto.max_speed_exit_mps,
         enter_delay_ms: proto.enter_delay_ms,
         exit_delay_ms: proto.exit_delay_ms,
         min_completed_laps: proto.min_completed_laps,
@@ -106,8 +110,8 @@ fn ghost_mode_from_proto(
 fn ghost_mode_to_proto(record: GhostModeSettingsRecord) -> ProtoGhostModeSettings {
     ProtoGhostModeSettings {
         enabled: record.enabled,
-        min_speed_enter_mps: record.min_speed_enter_mps,
-        min_speed_exit_mps: record.min_speed_exit_mps,
+        max_speed_enter_mps: record.min_speed_enter_mps,
+        max_speed_exit_mps: record.min_speed_exit_mps,
         enter_delay_ms: record.enter_delay_ms,
         exit_delay_ms: record.exit_delay_ms,
         min_completed_laps: record.min_completed_laps,
