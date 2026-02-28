@@ -1,9 +1,9 @@
-//! gRPC FrontendMenuService implementation.
+//! gRPC PublicMenuService implementation.
 
-use proto::race::v1::frontend_menu_service_server::FrontendMenuService;
+use proto::race::v1::public_menu_service_server::PublicMenuService;
 use proto::race::v1::{
-    FrontendMenuState, GetFrontendMenuStateRequest, GetFrontendMenuStateResponse, RuntimeState,
-    StreamFrontendMenuStateRequest,
+    GetPublicMenuStateRequest, GetPublicMenuStateResponse, PublicMenuState, PublicRuntimeState,
+    StreamPublicMenuStateRequest,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -13,15 +13,14 @@ use crate::db::repos::sandbox_config::SandboxConfigRepo;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
-    find_sandbox_by_id, pending_sandbox_activation_to_proto, runtime_activity_kind_to_proto,
-    runtime_time_of_day_preset_to_proto, sandbox_runtime_info_from_record, sandbox_to_proto,
-    utc_now_timestamp,
+    find_sandbox_by_id, public_sandbox_runtime_info_from_record, runtime_activity_kind_to_proto,
+    runtime_time_of_day_preset_to_proto, utc_now_timestamp,
 };
 
 const STREAM_CHANNEL_CAPACITY: usize = 16;
 const STREAM_POLL_INTERVAL_MS: u64 = 1000;
 
-/// FrontendMenu service backed by sandbox config repository and runtime worker state.
+/// PublicMenu service backed by sandbox config repository and runtime worker state.
 #[derive(Clone)]
 pub struct FrontendMenuServiceImpl {
     repo: SandboxConfigRepo,
@@ -33,71 +32,60 @@ impl FrontendMenuServiceImpl {
         Self { repo, engine }
     }
 
-    async fn build_menu_state(&self) -> Result<FrontendMenuState, Status> {
+    async fn build_menu_state(&self) -> Result<PublicMenuState, Status> {
         let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
         let snapshot =
             self.repo.get_snapshot().await.map_err(|err| {
                 Status::internal(format!("failed to load sandbox configs: {err}"))
             })?;
 
-        let runtime_state = RuntimeState {
-            revision: runtime.revision,
+        let runtime_state = PublicRuntimeState {
             activity_kind: runtime_activity_kind_to_proto(runtime.activity_kind) as i32,
-            sandboxes: runtime
+            active_sandboxes: runtime
                 .active_sandboxes
                 .iter()
                 .filter_map(|active| {
                     find_sandbox_by_id(&snapshot.sandboxes, &active.sandbox_id).map(|record| {
-                        sandbox_runtime_info_from_record(
+                        public_sandbox_runtime_info_from_record(
                             record,
                             runtime_time_of_day_preset_to_proto(active.time_of_day_preset),
+                            0,
                         )
                     })
                 })
                 .collect(),
-            pending_sandbox_activations: runtime
-                .pending_sandbox_activations
-                .iter()
-                .cloned()
-                .map(pending_sandbox_activation_to_proto)
-                .collect(),
             server_time_utc: Some(utc_now_timestamp()),
         };
 
-        Ok(FrontendMenuState {
+        Ok(PublicMenuState {
             runtime: Some(runtime_state),
-            configured_sandboxes: snapshot
-                .sandboxes
-                .into_iter()
-                .map(sandbox_to_proto)
-                .collect(),
         })
     }
 }
 
 #[tonic::async_trait]
-impl FrontendMenuService for FrontendMenuServiceImpl {
-    type StreamFrontendMenuStateStream = ReceiverStream<Result<FrontendMenuState, Status>>;
+impl PublicMenuService for FrontendMenuServiceImpl {
+    type StreamPublicMenuStateStream = ReceiverStream<Result<PublicMenuState, Status>>;
 
-    async fn get_frontend_menu_state(
+    async fn get_public_menu_state(
         &self,
-        _request: Request<GetFrontendMenuStateRequest>,
-    ) -> Result<Response<GetFrontendMenuStateResponse>, Status> {
+        _request: Request<GetPublicMenuStateRequest>,
+    ) -> Result<Response<GetPublicMenuStateResponse>, Status> {
         let state = self.build_menu_state().await?;
-        Ok(Response::new(GetFrontendMenuStateResponse {
+        Ok(Response::new(GetPublicMenuStateResponse {
             state: Some(state),
         }))
     }
 
-    async fn stream_frontend_menu_state(
+    async fn stream_public_menu_state(
         &self,
-        _request: Request<StreamFrontendMenuStateRequest>,
-    ) -> Result<Response<Self::StreamFrontendMenuStateStream>, Status> {
+        _request: Request<StreamPublicMenuStateRequest>,
+    ) -> Result<Response<Self::StreamPublicMenuStateStream>, Status> {
         let service = self.clone();
         let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
 
         tokio::spawn(async move {
-            let mut last_state: Option<FrontendMenuState> = None;
+            let mut last_state: Option<PublicMenuState> = None;
             let mut ticker =
                 tokio::time::interval(tokio::time::Duration::from_millis(STREAM_POLL_INTERVAL_MS));
 

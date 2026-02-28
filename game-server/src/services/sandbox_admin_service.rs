@@ -1,15 +1,17 @@
-//! gRPC SandboxAdminService implementation.
+//! gRPC sandbox admin services implementation.
 
 use std::sync::Arc;
 
-use proto::race::v1::sandbox_admin_service_server::SandboxAdminService;
+use proto::race::v1::sandbox_config_admin_service_server::SandboxConfigAdminService;
+use proto::race::v1::sandbox_runtime_admin_service_server::SandboxRuntimeAdminService;
 use proto::race::v1::{
-    CancelSandboxActivationScheduleRequest, CancelSandboxActivationScheduleResponse,
-    CreateSandboxConfigRequest, CreateSandboxConfigResponse, DeleteSandboxConfigRequest,
-    DeleteSandboxConfigResponse, GetRuntimeStateRequest, GetRuntimeStateResponse,
-    GetSandboxConfigsRequest, GetSandboxConfigsResponse, RuntimeState, RuntimeTimeOfDayPreset,
-    SetSandboxActivationRequest, SetSandboxActivationResponse, SetSandboxTimeOfDayRequest,
-    SetSandboxTimeOfDayResponse, UpdateSandboxConfigRequest, UpdateSandboxConfigResponse,
+    AdminRuntimeState, CancelSandboxActivationScheduleRequest,
+    CancelSandboxActivationScheduleResponse, CreateSandboxConfigRequest,
+    CreateSandboxConfigResponse, DeleteSandboxConfigRequest, DeleteSandboxConfigResponse,
+    GetAdminRuntimeStateRequest, GetAdminRuntimeStateResponse, GetSandboxConfigsRequest,
+    GetSandboxConfigsResponse, RuntimeTimeOfDayPreset, ScheduleSandboxActivationRequest,
+    ScheduleSandboxActivationResponse, UpdateSandboxConfigRequest, UpdateSandboxConfigResponse,
+    UpdateSandboxTimeOfDayRequest, UpdateSandboxTimeOfDayResponse,
 };
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
@@ -24,14 +26,14 @@ use crate::runtime::engine_worker::{
 };
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
-    engine_ghost_mode_settings_from_record, find_sandbox_by_id,
-    pending_sandbox_activation_to_proto, runtime_activity_kind_to_proto,
+    admin_sandbox_runtime_info_from_record, engine_ghost_mode_settings_from_record,
+    find_sandbox_by_id, pending_sandbox_operation_to_proto, runtime_activity_kind_to_proto,
     runtime_time_of_day_preset_from_proto, runtime_time_of_day_preset_to_proto,
-    sandbox_input_from_proto, sandbox_runtime_info_from_record, sandbox_to_proto,
-    timestamp_to_unix_ms, unix_ms_to_timestamp, utc_now_timestamp,
+    sandbox_input_from_proto, sandbox_to_proto, timestamp_to_unix_ms, unix_ms_to_timestamp,
+    utc_now_timestamp,
 };
 
-/// SandboxAdmin service backed by persisted sandbox config snapshot.
+/// Sandbox admin services backed by persisted sandbox config snapshot.
 #[derive(Clone)]
 pub struct SandboxAdminServiceImpl {
     repo: SandboxConfigRepo,
@@ -54,7 +56,7 @@ impl SandboxAdminServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SandboxAdminService for SandboxAdminServiceImpl {
+impl SandboxConfigAdminService for SandboxAdminServiceImpl {
     async fn get_sandbox_configs(
         &self,
         request: Request<GetSandboxConfigsRequest>,
@@ -158,171 +160,10 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
         }))
     }
 
-    async fn set_sandbox_activation(
+    async fn update_sandbox_time_of_day(
         &self,
-        request: Request<SetSandboxActivationRequest>,
-    ) -> Result<Response<SetSandboxActivationResponse>, Status> {
-        self.require_admin(request.metadata()).await?;
-        let request = request.into_inner();
-        if request.sandbox_id.trim().is_empty() {
-            return Err(Status::invalid_argument("sandbox_id must be non-empty"));
-        }
-
-        if let Some(effective_at_utc) = request.effective_at_utc.as_ref() {
-            let execute_at_unix_ms = timestamp_to_unix_ms(effective_at_utc)?;
-            let now = utc_now_timestamp();
-            let now_unix_ms = timestamp_to_unix_ms(&now)?;
-            if execute_at_unix_ms <= now_unix_ms {
-                return Err(Status::invalid_argument(
-                    "effective_at_utc must be in the future",
-                ));
-            }
-
-            if request.activate {
-                let sandbox = self
-                    .repo
-                    .get_snapshot()
-                    .await
-                    .map_err(map_repo_error_to_status)?
-                    .sandboxes
-                    .into_iter()
-                    .find(|entry| entry.sandbox_id == request.sandbox_id)
-                    .ok_or_else(|| {
-                        Status::not_found(format!(
-                            "sandbox config not found: {}",
-                            request.sandbox_id
-                        ))
-                    })?;
-                let pending = EnginePendingSandboxActivation {
-                    activate: true,
-                    sandbox_id: request.sandbox_id.clone(),
-                    execute_at_unix_ms,
-                    map_id: Some(sandbox.config.map_id),
-                    time_of_day_preset: Some(runtime_time_of_day_preset_from_proto(
-                        sandbox.config.time_of_day_preset,
-                    )),
-                    ghost_mode_settings: Some(engine_ghost_mode_settings_from_record(
-                        sandbox.config.ghost_mode.as_ref(),
-                    )),
-                };
-                let runtime_after = self
-                    .engine
-                    .set_pending_sandbox_activation(request.expected_revision, pending)
-                    .await
-                    .map_err(map_worker_err)?;
-
-                return Ok(Response::new(SetSandboxActivationResponse {
-                    revision: runtime_after.revision,
-                    activate: true,
-                    sandbox_id: request.sandbox_id,
-                    effective_at_utc: Some(unix_ms_to_timestamp(execute_at_unix_ms)),
-                }));
-            }
-
-            let pending = EnginePendingSandboxActivation {
-                activate: false,
-                sandbox_id: request.sandbox_id.clone(),
-                execute_at_unix_ms,
-                map_id: None,
-                time_of_day_preset: None,
-                ghost_mode_settings: None,
-            };
-            let runtime_after = self
-                .engine
-                .set_pending_sandbox_activation(request.expected_revision, pending)
-                .await
-                .map_err(map_worker_err)?;
-
-            return Ok(Response::new(SetSandboxActivationResponse {
-                revision: runtime_after.revision,
-                activate: false,
-                sandbox_id: request.sandbox_id,
-                effective_at_utc: Some(unix_ms_to_timestamp(execute_at_unix_ms)),
-            }));
-        }
-
-        if request.activate {
-            let sandbox = self
-                .repo
-                .get_snapshot()
-                .await
-                .map_err(map_repo_error_to_status)?
-                .sandboxes
-                .into_iter()
-                .find(|entry| entry.sandbox_id == request.sandbox_id)
-                .ok_or_else(|| {
-                    Status::not_found(format!("sandbox config not found: {}", request.sandbox_id))
-                })?;
-
-            let runtime_after = self
-                .engine
-                .switch_runtime(
-                    request.expected_revision,
-                    EngineActivityKind::Sandbox,
-                    sandbox.config.map_id.clone(),
-                    Some(sandbox.sandbox_id.clone()),
-                    Some(runtime_time_of_day_preset_from_proto(
-                        sandbox.config.time_of_day_preset,
-                    )),
-                    Some(engine_ghost_mode_settings_from_record(
-                        sandbox.config.ghost_mode.as_ref(),
-                    )),
-                )
-                .await
-                .map_err(map_worker_err)?;
-
-            return Ok(Response::new(SetSandboxActivationResponse {
-                revision: runtime_after.revision,
-                activate: true,
-                sandbox_id: sandbox.sandbox_id,
-                effective_at_utc: Some(utc_now_timestamp()),
-            }));
-        }
-
-        let runtime_after = self
-            .engine
-            .deactivate_sandbox(request.expected_revision, request.sandbox_id.clone())
-            .await
-            .map_err(map_worker_err)?;
-
-        Ok(Response::new(SetSandboxActivationResponse {
-            revision: runtime_after.revision,
-            activate: false,
-            sandbox_id: request.sandbox_id,
-            effective_at_utc: Some(utc_now_timestamp()),
-        }))
-    }
-
-    async fn cancel_sandbox_activation_schedule(
-        &self,
-        request: Request<CancelSandboxActivationScheduleRequest>,
-    ) -> Result<Response<CancelSandboxActivationScheduleResponse>, Status> {
-        self.require_admin(request.metadata()).await?;
-        let request = request.into_inner();
-        if request.sandbox_id.trim().is_empty() {
-            return Err(Status::invalid_argument("sandbox_id must be non-empty"));
-        }
-
-        let (runtime_after, canceled) = self
-            .engine
-            .cancel_pending_sandbox_activation(
-                request.expected_revision,
-                request.sandbox_id.clone(),
-            )
-            .await
-            .map_err(map_worker_err)?;
-
-        Ok(Response::new(CancelSandboxActivationScheduleResponse {
-            revision: runtime_after.revision,
-            sandbox_id: request.sandbox_id,
-            canceled,
-        }))
-    }
-
-    async fn set_sandbox_time_of_day(
-        &self,
-        request: Request<SetSandboxTimeOfDayRequest>,
-    ) -> Result<Response<SetSandboxTimeOfDayResponse>, Status> {
+        request: Request<UpdateSandboxTimeOfDayRequest>,
+    ) -> Result<Response<UpdateSandboxTimeOfDayResponse>, Status> {
         self.require_admin(request.metadata()).await?;
         let request = request.into_inner();
         if request.sandbox_id.trim().is_empty() {
@@ -398,7 +239,7 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
             }
         }
 
-        Ok(Response::new(SetSandboxTimeOfDayResponse {
+        Ok(Response::new(UpdateSandboxTimeOfDayResponse {
             revision,
             sandbox_id: updated.sandbox_id,
             preset: preset as i32,
@@ -406,11 +247,175 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
             applied_to_active_runtime,
         }))
     }
+}
 
-    async fn get_runtime_state(
+#[tonic::async_trait]
+impl SandboxRuntimeAdminService for SandboxAdminServiceImpl {
+    async fn schedule_sandbox_activation(
         &self,
-        request: Request<GetRuntimeStateRequest>,
-    ) -> Result<Response<GetRuntimeStateResponse>, Status> {
+        request: Request<ScheduleSandboxActivationRequest>,
+    ) -> Result<Response<ScheduleSandboxActivationResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
+        let request = request.into_inner();
+        if request.sandbox_id.trim().is_empty() {
+            return Err(Status::invalid_argument("sandbox_id must be non-empty"));
+        }
+
+        if let Some(effective_at_utc) = request.effective_at_utc.as_ref() {
+            let execute_at_unix_ms = timestamp_to_unix_ms(effective_at_utc)?;
+            let now = utc_now_timestamp();
+            let now_unix_ms = timestamp_to_unix_ms(&now)?;
+            if execute_at_unix_ms <= now_unix_ms {
+                return Err(Status::invalid_argument(
+                    "effective_at_utc must be in the future",
+                ));
+            }
+
+            if request.activate {
+                let sandbox = self
+                    .repo
+                    .get_snapshot()
+                    .await
+                    .map_err(map_repo_error_to_status)?
+                    .sandboxes
+                    .into_iter()
+                    .find(|entry| entry.sandbox_id == request.sandbox_id)
+                    .ok_or_else(|| {
+                        Status::not_found(format!(
+                            "sandbox config not found: {}",
+                            request.sandbox_id
+                        ))
+                    })?;
+                let pending = EnginePendingSandboxActivation {
+                    activate: true,
+                    sandbox_id: request.sandbox_id.clone(),
+                    execute_at_unix_ms,
+                    map_id: Some(sandbox.config.map_id),
+                    time_of_day_preset: Some(runtime_time_of_day_preset_from_proto(
+                        sandbox.config.time_of_day_preset,
+                    )),
+                    ghost_mode_settings: Some(engine_ghost_mode_settings_from_record(
+                        sandbox.config.ghost_mode.as_ref(),
+                    )),
+                };
+                let runtime_after = self
+                    .engine
+                    .set_pending_sandbox_activation(request.expected_revision, pending)
+                    .await
+                    .map_err(map_worker_err)?;
+
+                return Ok(Response::new(ScheduleSandboxActivationResponse {
+                    revision: runtime_after.revision,
+                    activate: true,
+                    sandbox_id: request.sandbox_id,
+                    effective_at_utc: Some(unix_ms_to_timestamp(execute_at_unix_ms)),
+                }));
+            }
+
+            let pending = EnginePendingSandboxActivation {
+                activate: false,
+                sandbox_id: request.sandbox_id.clone(),
+                execute_at_unix_ms,
+                map_id: None,
+                time_of_day_preset: None,
+                ghost_mode_settings: None,
+            };
+            let runtime_after = self
+                .engine
+                .set_pending_sandbox_activation(request.expected_revision, pending)
+                .await
+                .map_err(map_worker_err)?;
+
+            return Ok(Response::new(ScheduleSandboxActivationResponse {
+                revision: runtime_after.revision,
+                activate: false,
+                sandbox_id: request.sandbox_id,
+                effective_at_utc: Some(unix_ms_to_timestamp(execute_at_unix_ms)),
+            }));
+        }
+
+        if request.activate {
+            let sandbox = self
+                .repo
+                .get_snapshot()
+                .await
+                .map_err(map_repo_error_to_status)?
+                .sandboxes
+                .into_iter()
+                .find(|entry| entry.sandbox_id == request.sandbox_id)
+                .ok_or_else(|| {
+                    Status::not_found(format!("sandbox config not found: {}", request.sandbox_id))
+                })?;
+
+            let runtime_after = self
+                .engine
+                .switch_runtime(
+                    request.expected_revision,
+                    EngineActivityKind::Sandbox,
+                    sandbox.config.map_id.clone(),
+                    Some(sandbox.sandbox_id.clone()),
+                    Some(runtime_time_of_day_preset_from_proto(
+                        sandbox.config.time_of_day_preset,
+                    )),
+                    Some(engine_ghost_mode_settings_from_record(
+                        sandbox.config.ghost_mode.as_ref(),
+                    )),
+                )
+                .await
+                .map_err(map_worker_err)?;
+
+            return Ok(Response::new(ScheduleSandboxActivationResponse {
+                revision: runtime_after.revision,
+                activate: true,
+                sandbox_id: sandbox.sandbox_id,
+                effective_at_utc: Some(utc_now_timestamp()),
+            }));
+        }
+
+        let runtime_after = self
+            .engine
+            .deactivate_sandbox(request.expected_revision, request.sandbox_id.clone())
+            .await
+            .map_err(map_worker_err)?;
+
+        Ok(Response::new(ScheduleSandboxActivationResponse {
+            revision: runtime_after.revision,
+            activate: false,
+            sandbox_id: request.sandbox_id,
+            effective_at_utc: Some(utc_now_timestamp()),
+        }))
+    }
+
+    async fn cancel_sandbox_activation_schedule(
+        &self,
+        request: Request<CancelSandboxActivationScheduleRequest>,
+    ) -> Result<Response<CancelSandboxActivationScheduleResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
+        let request = request.into_inner();
+        if request.sandbox_id.trim().is_empty() {
+            return Err(Status::invalid_argument("sandbox_id must be non-empty"));
+        }
+
+        let (runtime_after, canceled) = self
+            .engine
+            .cancel_pending_sandbox_activation(
+                request.expected_revision,
+                request.sandbox_id.clone(),
+            )
+            .await
+            .map_err(map_worker_err)?;
+
+        Ok(Response::new(CancelSandboxActivationScheduleResponse {
+            revision: runtime_after.revision,
+            sandbox_id: request.sandbox_id,
+            canceled,
+        }))
+    }
+
+    async fn get_admin_runtime_state(
+        &self,
+        request: Request<GetAdminRuntimeStateRequest>,
+    ) -> Result<Response<GetAdminRuntimeStateResponse>, Status> {
         self.require_admin(request.metadata()).await?;
         let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
         let snapshot = self
@@ -419,7 +424,7 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
             .await
             .map_err(map_repo_error_to_status)?;
 
-        let state = RuntimeState {
+        let state = AdminRuntimeState {
             revision: runtime.revision,
             activity_kind: runtime_activity_kind_to_proto(runtime.activity_kind) as i32,
             sandboxes: runtime
@@ -427,22 +432,22 @@ impl SandboxAdminService for SandboxAdminServiceImpl {
                 .iter()
                 .filter_map(|active| {
                     find_sandbox_by_id(&snapshot.sandboxes, &active.sandbox_id).map(|record| {
-                        sandbox_runtime_info_from_record(
+                        admin_sandbox_runtime_info_from_record(
                             record,
                             runtime_time_of_day_preset_to_proto(active.time_of_day_preset),
                         )
                     })
                 })
                 .collect(),
-            pending_sandbox_activations: runtime
+            pending_sandbox_operations: runtime
                 .pending_sandbox_activations
                 .iter()
                 .cloned()
-                .map(pending_sandbox_activation_to_proto)
+                .map(pending_sandbox_operation_to_proto)
                 .collect(),
             server_time_utc: Some(utc_now_timestamp()),
         };
-        Ok(Response::new(GetRuntimeStateResponse {
+        Ok(Response::new(GetAdminRuntimeStateResponse {
             state: Some(state),
         }))
     }

@@ -6,9 +6,10 @@ use boink::model::{
 };
 use prost_types::Timestamp;
 use proto::race::v1::{
-    GhostModeConditionLogic, GhostModeSettings as ProtoGhostModeSettings, PendingSandboxActivation,
-    RuntimeActivityKind, RuntimeTimeOfDayPreset, SandboxConfig as ProtoSandboxConfig,
-    SandboxConfigInput as ProtoSandboxConfigInput, SandboxRuntimeInfo,
+    AdminPendingSandboxOperation, AdminSandboxRuntimeInfo, GhostModeConditionLogic,
+    GhostModeSettings as ProtoGhostModeSettings, PublicSandboxRuntimeInfo, RuntimeActivityKind,
+    RuntimeTimeOfDayPreset, SandboxConfig as ProtoSandboxConfig,
+    SandboxConfigInput as ProtoSandboxConfigInput,
 };
 use tonic::Status;
 
@@ -156,11 +157,11 @@ pub fn runtime_time_of_day_preset_from_proto(
 }
 
 /// Maps persisted sandbox record into runtime payload.
-pub fn sandbox_runtime_info_from_record(
+pub fn admin_sandbox_runtime_info_from_record(
     record: SandboxConfigRecord,
     active_time_of_day_preset: RuntimeTimeOfDayPreset,
-) -> SandboxRuntimeInfo {
-    SandboxRuntimeInfo {
+) -> AdminSandboxRuntimeInfo {
+    AdminSandboxRuntimeInfo {
         sandbox_id: record.sandbox_id,
         sandbox_name: record.config.sandbox_name,
         map_id: record.config.map_id,
@@ -168,6 +169,22 @@ pub fn sandbox_runtime_info_from_record(
         ghost_mode: record.config.ghost_mode.map(ghost_mode_to_proto),
         started_at_utc: None,
         closes_at_utc: None,
+    }
+}
+
+/// Maps persisted sandbox record into public runtime payload.
+pub fn public_sandbox_runtime_info_from_record(
+    record: SandboxConfigRecord,
+    active_time_of_day_preset: RuntimeTimeOfDayPreset,
+    active_player_count: u32,
+) -> PublicSandboxRuntimeInfo {
+    PublicSandboxRuntimeInfo {
+        sandbox_id: record.sandbox_id,
+        sandbox_name: record.config.sandbox_name,
+        map_id: record.config.map_id,
+        active_time_of_day_preset: active_time_of_day_preset as i32,
+        ghost_mode: record.config.ghost_mode.map(ghost_mode_to_proto),
+        active_player_count,
     }
 }
 
@@ -227,10 +244,10 @@ fn proto_condition_logic_to_engine(
 }
 
 /// Maps runtime pending sandbox activation metadata to protobuf.
-pub fn pending_sandbox_activation_to_proto(
+pub fn pending_sandbox_operation_to_proto(
     pending: EnginePendingSandboxActivation,
-) -> PendingSandboxActivation {
-    PendingSandboxActivation {
+) -> AdminPendingSandboxOperation {
+    AdminPendingSandboxOperation {
         activate: pending.activate,
         sandbox_id: pending.sandbox_id,
         execute_at_utc: Some(unix_ms_to_timestamp(pending.execute_at_unix_ms)),

@@ -5,12 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "official")]
-use proto::race::v1::frontend_menu_service_server::FrontendMenuServiceServer;
+use proto::race::v1::public_menu_service_server::PublicMenuServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
 #[cfg(feature = "official")]
-use proto::race::v1::sandbox_admin_service_server::SandboxAdminServiceServer;
+use proto::race::v1::sandbox_config_admin_service_server::SandboxConfigAdminServiceServer;
+#[cfg(feature = "official")]
+use proto::race::v1::sandbox_runtime_admin_service_server::SandboxRuntimeAdminServiceServer;
 use proto::race::v1::track_service_server::TrackServiceServer;
 #[cfg(feature = "official")]
 use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
@@ -84,11 +86,15 @@ pub async fn serve_grpc(
         .await;
     #[cfg(feature = "official")]
     health_reporter
-        .set_serving::<SandboxAdminServiceServer<SandboxAdminServiceImpl>>()
+        .set_serving::<SandboxConfigAdminServiceServer<SandboxAdminServiceImpl>>()
         .await;
     #[cfg(feature = "official")]
     health_reporter
-        .set_serving::<FrontendMenuServiceServer<FrontendMenuServiceImpl>>()
+        .set_serving::<SandboxRuntimeAdminServiceServer<SandboxAdminServiceImpl>>()
+        .await;
+    #[cfg(feature = "official")]
+    health_reporter
+        .set_serving::<PublicMenuServiceServer<FrontendMenuServiceImpl>>()
         .await;
 
     #[cfg(feature = "official")]
@@ -183,9 +189,13 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let server = server.add_service(RaceConfigAdminServiceServer::new(race_config_admin_impl));
     #[cfg(feature = "official")]
-    let server = server.add_service(SandboxAdminServiceServer::new(sandbox_admin_impl));
+    let server = server.add_service(SandboxConfigAdminServiceServer::new(
+        sandbox_admin_impl.clone(),
+    ));
     #[cfg(feature = "official")]
-    let server = server.add_service(FrontendMenuServiceServer::new(frontend_menu_impl));
+    let server = server.add_service(SandboxRuntimeAdminServiceServer::new(sandbox_admin_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(PublicMenuServiceServer::new(frontend_menu_impl));
 
     server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))
