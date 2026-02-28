@@ -2,9 +2,9 @@
 
 pub mod asset_service;
 mod error_map;
-#[cfg(feature = "official")]
-pub mod frontend_menu_service;
 mod mappers;
+#[cfg(feature = "official")]
+pub mod public_menu_service;
 pub mod race_config_admin_service;
 mod race_config_mappers;
 pub mod race_service;

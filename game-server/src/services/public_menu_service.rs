@@ -22,12 +22,12 @@ const STREAM_POLL_INTERVAL_MS: u64 = 1000;
 
 /// PublicMenu service backed by sandbox config repository and runtime worker state.
 #[derive(Clone)]
-pub struct FrontendMenuServiceImpl {
+pub struct PublicMenuServiceImpl {
     repo: SandboxConfigRepo,
     engine: EngineClient,
 }
 
-impl FrontendMenuServiceImpl {
+impl PublicMenuServiceImpl {
     pub fn with_repo(repo: SandboxConfigRepo, engine: EngineClient) -> Self {
         Self { repo, engine }
     }
@@ -64,7 +64,7 @@ impl FrontendMenuServiceImpl {
 }
 
 #[tonic::async_trait]
-impl PublicMenuService for FrontendMenuServiceImpl {
+impl PublicMenuService for PublicMenuServiceImpl {
     type StreamPublicMenuStateStream = ReceiverStream<Result<PublicMenuState, Status>>;
 
     async fn get_public_menu_state(

@@ -40,7 +40,7 @@ use crate::db::repos::weather::WeatherRepo;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
 #[cfg(feature = "official")]
-use crate::services::frontend_menu_service::FrontendMenuServiceImpl;
+use crate::services::public_menu_service::PublicMenuServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::race_config_admin_service::RaceConfigAdminServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
@@ -94,7 +94,7 @@ pub async fn serve_grpc(
         .await;
     #[cfg(feature = "official")]
     health_reporter
-        .set_serving::<PublicMenuServiceServer<FrontendMenuServiceImpl>>()
+        .set_serving::<PublicMenuServiceServer<PublicMenuServiceImpl>>()
         .await;
 
     #[cfg(feature = "official")]
@@ -111,7 +111,7 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let sandbox_engine = engine.clone();
     #[cfg(feature = "official")]
-    let frontend_menu_engine = engine.clone();
+    let public_menu_engine = engine.clone();
     let track_impl = TrackServiceImpl::new(engine);
 
     #[cfg(feature = "official")]
@@ -120,7 +120,7 @@ pub async fn serve_grpc(
         weather_admin_impl,
         race_config_admin_impl,
         sandbox_admin_impl,
-        frontend_menu_impl,
+        public_menu_impl,
     ) = {
         let weather_repo = WeatherRepo::new(official_db_pool.clone());
         let race_config_repo = RaceConfigRepo::new(official_db_pool.clone());
@@ -134,7 +134,7 @@ pub async fn serve_grpc(
                 token_validator.clone(),
                 sandbox_engine,
             ),
-            FrontendMenuServiceImpl::with_repo(sandbox_config_repo, frontend_menu_engine),
+            PublicMenuServiceImpl::with_repo(sandbox_config_repo, public_menu_engine),
         )
     };
 
@@ -195,7 +195,7 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let server = server.add_service(SandboxRuntimeAdminServiceServer::new(sandbox_admin_impl));
     #[cfg(feature = "official")]
-    let server = server.add_service(PublicMenuServiceServer::new(frontend_menu_impl));
+    let server = server.add_service(PublicMenuServiceServer::new(public_menu_impl));
 
     server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))
