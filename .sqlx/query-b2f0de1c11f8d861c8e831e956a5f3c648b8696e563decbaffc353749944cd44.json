@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE race_config_state SET revision = $1 WHERE singleton_key = TRUE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b2f0de1c11f8d861c8e831e956a5f3c648b8696e563decbaffc353749944cd44"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT race_id, race_name, starts_at_ms, ends_at_ms, map_id, start_placement_mode AS \"start_placement_mode: DbStartPlacementMode\", points_multiplier_fixed, time_of_day_preset AS \"time_of_day_preset: DbTimeOfDayPreset\" FROM race_config_schedule ORDER BY starts_at_ms ASC",
+  "query": "\n        SELECT\n            race_id,\n            race_name,\n            starts_at_ms,\n            race_duration_sec,\n            map_id,\n            start_placement_mode AS \"start_placement_mode: DbStartPlacementMode\",\n            points_multiplier_fixed,\n            time_of_day_preset AS \"time_of_day_preset: DbTimeOfDayPreset\"\n        FROM race_config_schedule\n        ORDER BY starts_at_ms ASC, race_id ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -20,8 +20,8 @@
       },
       {
         "ordinal": 3,
-        "name": "ends_at_ms",
-        "type_info": "Int8"
+        "name": "race_duration_sec",
+        "type_info": "Int4"
       },
       {
         "ordinal": 4,
@@ -81,5 +81,5 @@
       false
     ]
   },
-  "hash": "573b77ca5faf251208768da7ce626ed11b0567d8902b618c597ae8182919fc1b"
+  "hash": "b89dc51d24f2e42325a377f31ca20fff24d82ce31a1f063f23c632327b677087"
 }

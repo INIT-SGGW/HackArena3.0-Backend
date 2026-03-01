@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO race_config_schedule (race_id, race_name, starts_at_ms, ends_at_ms, map_id, start_placement_mode, points_multiplier_fixed, time_of_day_preset) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+  "query": "\n        UPDATE race_config_schedule\n        SET race_name = $2,\n            starts_at_ms = $3,\n            ends_at_ms = $4,\n            race_duration_sec = $5,\n            map_id = $6,\n            start_placement_mode = $7,\n            points_multiplier_fixed = $8,\n            time_of_day_preset = $9\n        WHERE race_id = $1\n        ",
   "describe": {
     "columns": [],
     "parameters": {
@@ -9,6 +9,7 @@
         "Text",
         "Int8",
         "Int8",
+        "Int4",
         "Text",
         {
           "Custom": {
@@ -40,5 +41,5 @@
     },
     "nullable": []
   },
-  "hash": "7483cdf69647a298c91298efe9450612a8a50aef0a8b4d71dba2851499cf1ca3"
+  "hash": "3b5960a5e3f25ae12ce75eb93972a8c0a1acbccac9d289a29a80a5b6d181a2e2"
 }
