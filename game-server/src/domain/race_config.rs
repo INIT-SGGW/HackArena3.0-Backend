@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use proto::race::v1::{StartPlacementMode, TimeOfDayPreset};
+use proto::race::v1::{RaceTimeOfDayPreset, StartPlacementMode};
 use thiserror::Error;
 
 /// Race configuration payload interpreted by domain logic.
@@ -14,7 +14,7 @@ pub struct RaceConfigInput {
     pub map_id: String,
     pub start_placement_mode: StartPlacementMode,
     pub points_multiplier_fixed: f32,
-    pub time_of_day_preset: TimeOfDayPreset,
+    pub time_of_day_preset: RaceTimeOfDayPreset,
 }
 
 /// Persisted race configuration entry.
@@ -131,7 +131,7 @@ fn validate_input(index: usize, entry: &RaceConfigInput) -> Result<(), RaceConfi
     if matches!(entry.start_placement_mode, StartPlacementMode::Unspecified) {
         return Err(RaceConfigDomainError::UnspecifiedStartPlacementMode { index });
     }
-    if matches!(entry.time_of_day_preset, TimeOfDayPreset::Unspecified) {
+    if matches!(entry.time_of_day_preset, RaceTimeOfDayPreset::Unspecified) {
         return Err(RaceConfigDomainError::UnspecifiedTimeOfDayPreset { index });
     }
     if !(entry.points_multiplier_fixed.is_finite() && entry.points_multiplier_fixed > 0.0) {

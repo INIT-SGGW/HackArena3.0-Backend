@@ -7,18 +7,15 @@ use boink::model::{
 use prost_types::Timestamp;
 use proto::race::v1::{
     AdminPendingSandboxOperation, AdminSandboxRuntimeInfo, GhostModeConditionLogic,
-    GhostModeSettings as ProtoGhostModeSettings, PublicSandboxRuntimeInfo, RuntimeActivityKind,
-    RuntimeTimeOfDayPreset, SandboxConfig as ProtoSandboxConfig,
-    SandboxConfigInput as ProtoSandboxConfigInput,
+    GhostModeSettings as ProtoGhostModeSettings, PublicSandboxRuntimeInfo, RuntimeTimeOfDayPreset,
+    SandboxConfig as ProtoSandboxConfig, SandboxConfigInput as ProtoSandboxConfigInput,
 };
 use tonic::Status;
 
 use crate::db::repos::sandbox_config::{
     GhostModeSettingsRecord, SandboxConfigInputRecord, SandboxConfigRecord,
 };
-use crate::runtime::engine_worker::{
-    EngineActivityKind, EnginePendingSandboxActivation, EngineRuntimeTimeOfDayPreset,
-};
+use crate::runtime::engine_worker::{EnginePendingSandboxActivation, EngineRuntimeTimeOfDayPreset};
 
 /// Maps protobuf input payload into repository input shape.
 pub fn sandbox_input_from_proto(
@@ -118,15 +115,6 @@ fn ghost_mode_to_proto(record: GhostModeSettingsRecord) -> ProtoGhostModeSetting
         min_completed_laps: record.min_completed_laps,
         condition_logic: record.condition_logic as i32,
         overlap_exit_delay_ms: record.overlap_exit_delay_ms,
-    }
-}
-
-/// Maps runtime activity kind from engine worker to protobuf.
-pub fn runtime_activity_kind_to_proto(kind: EngineActivityKind) -> RuntimeActivityKind {
-    match kind {
-        EngineActivityKind::None => RuntimeActivityKind::None,
-        EngineActivityKind::OfficialRace => RuntimeActivityKind::OfficialRace,
-        EngineActivityKind::Sandbox => RuntimeActivityKind::Sandbox,
     }
 }
 

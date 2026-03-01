@@ -1,9 +1,10 @@
 //! Race config service mapping helpers.
+#![allow(dead_code)]
 
 use prost_types::Timestamp;
 use proto::race::v1::{
-    RaceConfig as ProtoRaceConfig, RaceConfigInput as ProtoRaceConfigInput, StartPlacementMode,
-    TimeOfDayPreset,
+    RaceConfig as ProtoRaceConfig, RaceConfigInput as ProtoRaceConfigInput, RaceTimeOfDayPreset,
+    StartPlacementMode,
 };
 use tonic::Status;
 
@@ -23,10 +24,17 @@ pub fn schedule_entry_to_proto(entry: DomainScheduleEntry) -> ProtoRaceConfig {
 
 /// Maps domain draft input to protobuf draft payload.
 pub fn draft_input_to_proto(input: DomainRaceConfigInput) -> ProtoRaceConfigInput {
+    let race_duration_sec = if input.ends_at_ms > input.starts_at_ms {
+        let duration_ms = input.ends_at_ms - input.starts_at_ms;
+        (duration_ms / 1000).min(u32::MAX as i64) as u32
+    } else {
+        0
+    };
+
     ProtoRaceConfigInput {
         race_name: input.race_name,
         start_time_utc: Some(ms_to_timestamp(input.starts_at_ms)),
-        end_time_utc: Some(ms_to_timestamp(input.ends_at_ms)),
+        race_duration_sec,
         map_id: input.map_id,
         start_placement_mode: input.start_placement_mode as i32,
         points_multiplier_fixed: input.points_multiplier_fixed,
@@ -42,19 +50,25 @@ pub fn draft_input_from_proto(
         .start_time_utc
         .as_ref()
         .ok_or_else(|| Status::invalid_argument("input.start_time_utc is required"))?;
-    let end_time = input
-        .end_time_utc
-        .as_ref()
-        .ok_or_else(|| Status::invalid_argument("input.end_time_utc is required"))?;
     let start_placement_mode = StartPlacementMode::try_from(input.start_placement_mode)
         .map_err(|_| Status::invalid_argument("invalid start_placement_mode"))?;
-    let time_of_day_preset = TimeOfDayPreset::try_from(input.time_of_day_preset)
+    let time_of_day_preset = RaceTimeOfDayPreset::try_from(input.time_of_day_preset)
         .map_err(|_| Status::invalid_argument("invalid time_of_day_preset"))?;
+    if input.race_duration_sec == 0 {
+        return Err(Status::invalid_argument(
+            "input.race_duration_sec must be greater than 0",
+        ));
+    }
+    let starts_at_ms = timestamp_to_ms(start_time)?;
+    let duration_ms = i64::from(input.race_duration_sec) * 1000;
+    let ends_at_ms = starts_at_ms
+        .checked_add(duration_ms)
+        .ok_or_else(|| Status::out_of_range("race duration overflow"))?;
 
     Ok(DomainRaceConfigInput {
         race_name: input.race_name.clone(),
-        starts_at_ms: timestamp_to_ms(start_time)?,
-        ends_at_ms: timestamp_to_ms(end_time)?,
+        starts_at_ms,
+        ends_at_ms,
         map_id: input.map_id.clone(),
         start_placement_mode,
         points_multiplier_fixed: input.points_multiplier_fixed,

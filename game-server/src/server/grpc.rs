@@ -10,9 +10,9 @@ use proto::race::v1::public_menu_service_server::PublicMenuServiceServer;
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
 #[cfg(feature = "official")]
-use proto::race::v1::sandbox_config_admin_service_server::SandboxConfigAdminServiceServer;
+use proto::race::v1::runtime_admin_service_server::RuntimeAdminServiceServer;
 #[cfg(feature = "official")]
-use proto::race::v1::sandbox_runtime_admin_service_server::SandboxRuntimeAdminServiceServer;
+use proto::race::v1::sandbox_config_admin_service_server::SandboxConfigAdminServiceServer;
 use proto::race::v1::track_service_server::TrackServiceServer;
 #[cfg(feature = "official")]
 use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
@@ -90,7 +90,7 @@ pub async fn serve_grpc(
         .await;
     #[cfg(feature = "official")]
     health_reporter
-        .set_serving::<SandboxRuntimeAdminServiceServer<SandboxAdminServiceImpl>>()
+        .set_serving::<RuntimeAdminServiceServer<SandboxAdminServiceImpl>>()
         .await;
     #[cfg(feature = "official")]
     health_reporter
@@ -193,7 +193,7 @@ pub async fn serve_grpc(
         sandbox_admin_impl.clone(),
     ));
     #[cfg(feature = "official")]
-    let server = server.add_service(SandboxRuntimeAdminServiceServer::new(sandbox_admin_impl));
+    let server = server.add_service(RuntimeAdminServiceServer::new(sandbox_admin_impl));
     #[cfg(feature = "official")]
     let server = server.add_service(PublicMenuServiceServer::new(public_menu_impl));
 

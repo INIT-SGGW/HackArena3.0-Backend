@@ -1,6 +1,6 @@
 //! Race config repository for persisted schedule entries.
 
-use proto::race::v1::{StartPlacementMode, TimeOfDayPreset};
+use proto::race::v1::{RaceTimeOfDayPreset, StartPlacementMode};
 use sqlx::PgPool;
 
 /// Persisted race configuration schedule entry.
@@ -13,7 +13,7 @@ pub struct ScheduleEntry {
     pub map_id: String,
     pub start_placement_mode: StartPlacementMode,
     pub points_multiplier_fixed: f32,
-    pub time_of_day_preset: TimeOfDayPreset,
+    pub time_of_day_preset: RaceTimeOfDayPreset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
@@ -56,27 +56,27 @@ enum DbTimeOfDayPreset {
     Night,
 }
 
-impl From<DbTimeOfDayPreset> for TimeOfDayPreset {
+impl From<DbTimeOfDayPreset> for RaceTimeOfDayPreset {
     fn from(value: DbTimeOfDayPreset) -> Self {
         match value {
-            DbTimeOfDayPreset::Morning => TimeOfDayPreset::Morning,
-            DbTimeOfDayPreset::Noon => TimeOfDayPreset::Noon,
-            DbTimeOfDayPreset::Evening => TimeOfDayPreset::Evening,
-            DbTimeOfDayPreset::Night => TimeOfDayPreset::Night,
+            DbTimeOfDayPreset::Morning => RaceTimeOfDayPreset::Morning,
+            DbTimeOfDayPreset::Noon => RaceTimeOfDayPreset::Noon,
+            DbTimeOfDayPreset::Evening => RaceTimeOfDayPreset::Evening,
+            DbTimeOfDayPreset::Night => RaceTimeOfDayPreset::Night,
         }
     }
 }
 
-impl TryFrom<TimeOfDayPreset> for DbTimeOfDayPreset {
+impl TryFrom<RaceTimeOfDayPreset> for DbTimeOfDayPreset {
     type Error = &'static str;
 
-    fn try_from(value: TimeOfDayPreset) -> Result<Self, Self::Error> {
+    fn try_from(value: RaceTimeOfDayPreset) -> Result<Self, Self::Error> {
         match value {
-            TimeOfDayPreset::Morning => Ok(DbTimeOfDayPreset::Morning),
-            TimeOfDayPreset::Noon => Ok(DbTimeOfDayPreset::Noon),
-            TimeOfDayPreset::Evening => Ok(DbTimeOfDayPreset::Evening),
-            TimeOfDayPreset::Night => Ok(DbTimeOfDayPreset::Night),
-            TimeOfDayPreset::Unspecified => Err("time of day preset must be specified"),
+            RaceTimeOfDayPreset::Morning => Ok(DbTimeOfDayPreset::Morning),
+            RaceTimeOfDayPreset::Noon => Ok(DbTimeOfDayPreset::Noon),
+            RaceTimeOfDayPreset::Evening => Ok(DbTimeOfDayPreset::Evening),
+            RaceTimeOfDayPreset::Night => Ok(DbTimeOfDayPreset::Night),
+            RaceTimeOfDayPreset::Unspecified => Err("time of day preset must be specified"),
         }
     }
 }

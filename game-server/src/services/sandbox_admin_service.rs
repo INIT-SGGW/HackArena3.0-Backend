@@ -2,16 +2,19 @@
 
 use std::sync::Arc;
 
+use proto::race::v1::runtime_admin_service_server::RuntimeAdminService;
 use proto::race::v1::sandbox_config_admin_service_server::SandboxConfigAdminService;
-use proto::race::v1::sandbox_runtime_admin_service_server::SandboxRuntimeAdminService;
 use proto::race::v1::{
-    AdminRuntimeState, CancelSandboxActivationScheduleRequest,
-    CancelSandboxActivationScheduleResponse, CreateSandboxConfigRequest,
-    CreateSandboxConfigResponse, DeleteSandboxConfigRequest, DeleteSandboxConfigResponse,
-    GetAdminRuntimeStateRequest, GetAdminRuntimeStateResponse, GetSandboxConfigsRequest,
-    GetSandboxConfigsResponse, RuntimeTimeOfDayPreset, ScheduleSandboxActivationRequest,
-    ScheduleSandboxActivationResponse, UpdateSandboxConfigRequest, UpdateSandboxConfigResponse,
-    UpdateSandboxTimeOfDayRequest, UpdateSandboxTimeOfDayResponse,
+    AbortOfficialRaceRequest, AbortOfficialRaceResponse, AdminRuntimeState,
+    AdminSandboxRuntimeMode, CancelSandboxActivationScheduleRequest,
+    CancelSandboxActivationScheduleResponse, CloseOfficialRaceSessionRequest,
+    CloseOfficialRaceSessionResponse, CreateSandboxConfigRequest, CreateSandboxConfigResponse,
+    DeleteSandboxConfigRequest, DeleteSandboxConfigResponse, GetAdminRuntimeStateRequest,
+    GetAdminRuntimeStateResponse, GetSandboxConfigsRequest, GetSandboxConfigsResponse,
+    RuntimeTimeOfDayPreset, ScheduleSandboxActivationRequest, ScheduleSandboxActivationResponse,
+    StartOfficialRaceCountdownRequest, StartOfficialRaceCountdownResponse,
+    UpdateSandboxConfigRequest, UpdateSandboxConfigResponse, UpdateSandboxTimeOfDayRequest,
+    UpdateSandboxTimeOfDayResponse, admin_runtime_state,
 };
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
@@ -27,10 +30,9 @@ use crate::runtime::engine_worker::{
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
     admin_sandbox_runtime_info_from_record, engine_ghost_mode_settings_from_record,
-    find_sandbox_by_id, pending_sandbox_operation_to_proto, runtime_activity_kind_to_proto,
-    runtime_time_of_day_preset_from_proto, runtime_time_of_day_preset_to_proto,
-    sandbox_input_from_proto, sandbox_to_proto, timestamp_to_unix_ms, unix_ms_to_timestamp,
-    utc_now_timestamp,
+    find_sandbox_by_id, pending_sandbox_operation_to_proto, runtime_time_of_day_preset_from_proto,
+    runtime_time_of_day_preset_to_proto, sandbox_input_from_proto, sandbox_to_proto,
+    timestamp_to_unix_ms, unix_ms_to_timestamp, utc_now_timestamp,
 };
 
 /// Sandbox admin services backed by persisted sandbox config snapshot.
@@ -250,7 +252,7 @@ impl SandboxConfigAdminService for SandboxAdminServiceImpl {
 }
 
 #[tonic::async_trait]
-impl SandboxRuntimeAdminService for SandboxAdminServiceImpl {
+impl RuntimeAdminService for SandboxAdminServiceImpl {
     async fn schedule_sandbox_activation(
         &self,
         request: Request<ScheduleSandboxActivationRequest>,
@@ -426,30 +428,70 @@ impl SandboxRuntimeAdminService for SandboxAdminServiceImpl {
 
         let state = AdminRuntimeState {
             revision: runtime.revision,
-            activity_kind: runtime_activity_kind_to_proto(runtime.activity_kind) as i32,
-            sandboxes: runtime
-                .active_sandboxes
-                .iter()
-                .filter_map(|active| {
-                    find_sandbox_by_id(&snapshot.sandboxes, &active.sandbox_id).map(|record| {
-                        admin_sandbox_runtime_info_from_record(
-                            record,
-                            runtime_time_of_day_preset_to_proto(active.time_of_day_preset),
-                        )
-                    })
-                })
-                .collect(),
-            pending_sandbox_operations: runtime
-                .pending_sandbox_activations
-                .iter()
-                .cloned()
-                .map(pending_sandbox_operation_to_proto)
-                .collect(),
             server_time_utc: Some(utc_now_timestamp()),
+            active_mode: match runtime.activity_kind {
+                EngineActivityKind::Sandbox => Some(admin_runtime_state::ActiveMode::SandboxMode(
+                    AdminSandboxRuntimeMode {
+                        sandboxes: runtime
+                            .active_sandboxes
+                            .iter()
+                            .filter_map(|active| {
+                                find_sandbox_by_id(&snapshot.sandboxes, &active.sandbox_id).map(
+                                    |record| {
+                                        admin_sandbox_runtime_info_from_record(
+                                            record,
+                                            runtime_time_of_day_preset_to_proto(
+                                                active.time_of_day_preset,
+                                            ),
+                                        )
+                                    },
+                                )
+                            })
+                            .collect(),
+                        pending_sandbox_operations: runtime
+                            .pending_sandbox_activations
+                            .iter()
+                            .cloned()
+                            .map(pending_sandbox_operation_to_proto)
+                            .collect(),
+                    },
+                )),
+                EngineActivityKind::None | EngineActivityKind::OfficialRace => None,
+            },
         };
         Ok(Response::new(GetAdminRuntimeStateResponse {
             state: Some(state),
         }))
+    }
+
+    async fn start_official_race_countdown(
+        &self,
+        request: Request<StartOfficialRaceCountdownRequest>,
+    ) -> Result<Response<StartOfficialRaceCountdownResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
+        Err(Status::unimplemented(
+            "official race countdown controls are not implemented yet",
+        ))
+    }
+
+    async fn abort_official_race(
+        &self,
+        request: Request<AbortOfficialRaceRequest>,
+    ) -> Result<Response<AbortOfficialRaceResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
+        Err(Status::unimplemented(
+            "official race abort controls are not implemented yet",
+        ))
+    }
+
+    async fn close_official_race_session(
+        &self,
+        request: Request<CloseOfficialRaceSessionRequest>,
+    ) -> Result<Response<CloseOfficialRaceSessionResponse>, Status> {
+        self.require_admin(request.metadata()).await?;
+        Err(Status::unimplemented(
+            "official race close controls are not implemented yet",
+        ))
     }
 }
 
