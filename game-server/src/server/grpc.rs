@@ -128,13 +128,20 @@ pub async fn serve_grpc(
         (
             WeatherQueryServiceImpl::with_repo(weather_repo.clone()),
             WeatherAdminServiceImpl::with_repo(weather_repo, cfg.env, token_validator.clone()),
-            RaceConfigAdminServiceImpl::with_repo(race_config_repo, token_validator.clone()),
+            RaceConfigAdminServiceImpl::with_repo(
+                race_config_repo.clone(),
+                token_validator.clone(),
+            ),
             SandboxAdminServiceImpl::with_repo(
                 sandbox_config_repo.clone(),
                 token_validator.clone(),
                 sandbox_engine,
             ),
-            PublicMenuServiceImpl::with_repo(sandbox_config_repo, public_menu_engine),
+            PublicMenuServiceImpl::with_repo(
+                sandbox_config_repo,
+                race_config_repo,
+                public_menu_engine,
+            ),
         )
     };
 
