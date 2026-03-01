@@ -40,7 +40,7 @@ use crate::db::repos::weather::WeatherRepo;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
 #[cfg(feature = "official")]
-use crate::services::public_menu_service::PublicMenuServiceImpl;
+use crate::services::public_menu_service::{PublicMenuServiceImpl, UpcomingRacesCacheInvalidation};
 #[cfg(feature = "official")]
 use crate::services::race_config_admin_service::RaceConfigAdminServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
@@ -122,6 +122,7 @@ pub async fn serve_grpc(
         sandbox_admin_impl,
         public_menu_impl,
     ) = {
+        let upcoming_races_invalidation = UpcomingRacesCacheInvalidation::new();
         let weather_repo = WeatherRepo::new(official_db_pool.clone());
         let race_config_repo = RaceConfigRepo::new(official_db_pool.clone());
         let sandbox_config_repo = SandboxConfigRepo::new(official_db_pool.clone());
@@ -131,6 +132,7 @@ pub async fn serve_grpc(
             RaceConfigAdminServiceImpl::with_repo(
                 race_config_repo.clone(),
                 token_validator.clone(),
+                upcoming_races_invalidation.clone(),
             ),
             SandboxAdminServiceImpl::with_repo(
                 sandbox_config_repo.clone(),
@@ -141,6 +143,7 @@ pub async fn serve_grpc(
                 sandbox_config_repo,
                 race_config_repo,
                 public_menu_engine,
+                upcoming_races_invalidation,
             ),
         )
     };

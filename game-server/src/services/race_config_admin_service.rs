@@ -17,6 +17,7 @@ use crate::db::repos::race_config::{
     RaceConfigInputRecord, RaceConfigRecord, RaceConfigRepo, RaceConfigRepoError,
 };
 use crate::domain::race_config::{RaceConfigDomainError, validate_schedule};
+use crate::services::public_menu_service::UpcomingRacesCacheInvalidation;
 use crate::services::race_config_mappers::{
     race_input_from_proto, race_to_proto, repo_schedule_to_domain,
 };
@@ -26,13 +27,19 @@ use crate::services::race_config_mappers::{
 pub struct RaceConfigAdminServiceImpl {
     repo: RaceConfigRepo,
     token_validator: Arc<TokenValidator>,
+    upcoming_invalidation: UpcomingRacesCacheInvalidation,
 }
 
 impl RaceConfigAdminServiceImpl {
-    pub fn with_repo(repo: RaceConfigRepo, token_validator: Arc<TokenValidator>) -> Self {
+    pub(crate) fn with_repo(
+        repo: RaceConfigRepo,
+        token_validator: Arc<TokenValidator>,
+        upcoming_invalidation: UpcomingRacesCacheInvalidation,
+    ) -> Self {
         Self {
             repo,
             token_validator,
+            upcoming_invalidation,
         }
     }
 
@@ -95,6 +102,8 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
             .create_config(request.expected_revision, &race)
             .await
             .map_err(map_repo_error_to_status)?;
+        self.upcoming_invalidation
+            .invalidate_for_change(None, Some(race.config.starts_at_ms));
 
         Ok(Response::new(CreateRaceConfigResponse {
             revision,
@@ -135,6 +144,7 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
                 request.race_id
             )));
         };
+        let previous_starts_at_ms = Some(entry.config.starts_at_ms);
         entry.config = config.clone();
         sort_by_start_time(&mut candidate);
         validate_candidate_schedule(&candidate)?;
@@ -148,6 +158,8 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
             .update_config(request.expected_revision, &race)
             .await
             .map_err(map_repo_error_to_status)?;
+        self.upcoming_invalidation
+            .invalidate_for_change(previous_starts_at_ms, Some(race.config.starts_at_ms));
 
         Ok(Response::new(UpdateRaceConfigResponse {
             revision,
@@ -171,11 +183,12 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
             .await
             .map_err(map_repo_error_to_status)?;
         ensure_expected_revision(request.expected_revision, snapshot.revision)?;
-        if !snapshot
+        let deleted_starts_at_ms = snapshot
             .races
             .iter()
-            .any(|entry| entry.race_id == request.race_id)
-        {
+            .find(|entry| entry.race_id == request.race_id)
+            .map(|entry| entry.config.starts_at_ms);
+        if deleted_starts_at_ms.is_none() {
             return Err(Status::not_found(format!(
                 "race config not found: {}",
                 request.race_id
@@ -187,6 +200,8 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
             .delete_config(request.expected_revision, &request.race_id)
             .await
             .map_err(map_repo_error_to_status)?;
+        self.upcoming_invalidation
+            .invalidate_for_change(deleted_starts_at_ms, None);
 
         Ok(Response::new(DeleteRaceConfigResponse {
             revision,

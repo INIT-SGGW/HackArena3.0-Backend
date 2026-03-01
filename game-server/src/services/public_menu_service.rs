@@ -1,11 +1,15 @@
 //! gRPC PublicMenuService implementation.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use proto::race::v1::public_menu_service_server::PublicMenuService;
 use proto::race::v1::{
     GetPublicMenuStateRequest, GetPublicMenuStateResponse, PublicMenuState, PublicRuntimeState,
     PublicSandboxRuntimeMode, PublicUpcomingRaceSummary, StreamPublicMenuStateRequest,
     public_runtime_state,
 };
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -22,6 +26,7 @@ use crate::services::sandbox_mappers::{
 const STREAM_CHANNEL_CAPACITY: usize = 16;
 const STREAM_POLL_INTERVAL_MS: u64 = 1000;
 const UPCOMING_RACE_WINDOW_MS: i64 = 60 * 60 * 1000;
+const UPCOMING_CACHE_TTL_MS: i64 = 60 * 1000;
 
 fn comparable_menu_state(state: &PublicMenuState) -> PublicMenuState {
     let mut comparable = state.clone();
@@ -31,24 +36,75 @@ fn comparable_menu_state(state: &PublicMenuState) -> PublicMenuState {
     comparable
 }
 
+/// Shared invalidation signal for upcoming-races cache.
+#[derive(Clone, Default)]
+pub(crate) struct UpcomingRacesCacheInvalidation {
+    generation: Arc<AtomicU64>,
+}
+
+impl UpcomingRacesCacheInvalidation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    pub fn invalidate_for_change(&self, old_start_ms: Option<i64>, new_start_ms: Option<i64>) {
+        let now_ms = current_unix_ms();
+        if old_start_ms
+            .map(|start_ms| is_within_upcoming_window(start_ms, now_ms))
+            .unwrap_or(false)
+            || new_start_ms
+                .map(|start_ms| is_within_upcoming_window(start_ms, now_ms))
+                .unwrap_or(false)
+        {
+            let _ = self.generation.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UpcomingRacesCacheState {
+    generation: u64,
+    cached_at_ms: i64,
+    races: Vec<PublicUpcomingRaceSummary>,
+}
+
+impl Default for UpcomingRacesCacheState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            cached_at_ms: 0,
+            races: Vec::new(),
+        }
+    }
+}
+
 /// PublicMenu service backed by sandbox config repository and runtime worker state.
 #[derive(Clone)]
 pub struct PublicMenuServiceImpl {
     sandbox_repo: SandboxConfigRepo,
     race_repo: RaceConfigRepo,
     engine: EngineClient,
+    upcoming_invalidation: UpcomingRacesCacheInvalidation,
+    upcoming_cache: Arc<RwLock<UpcomingRacesCacheState>>,
 }
 
 impl PublicMenuServiceImpl {
-    pub fn with_repo(
+    pub(crate) fn with_repo(
         sandbox_repo: SandboxConfigRepo,
         race_repo: RaceConfigRepo,
         engine: EngineClient,
+        upcoming_invalidation: UpcomingRacesCacheInvalidation,
     ) -> Self {
         Self {
             sandbox_repo,
             race_repo,
             engine,
+            upcoming_invalidation,
+            upcoming_cache: Arc::new(RwLock::new(UpcomingRacesCacheState::default())),
         }
     }
 
@@ -58,12 +114,6 @@ impl PublicMenuServiceImpl {
             self.sandbox_repo.get_snapshot().await.map_err(|err| {
                 Status::internal(format!("failed to load sandbox configs: {err}"))
             })?;
-        let race_snapshot = self
-            .race_repo
-            .get_snapshot()
-            .await
-            .map_err(|err| Status::internal(format!("failed to load race configs: {err}")))?;
-
         let runtime_state = PublicRuntimeState {
             server_time_utc: Some(utc_now_timestamp()),
             active_mode: match runtime.activity_kind {
@@ -93,26 +143,57 @@ impl PublicMenuServiceImpl {
 
         Ok(PublicMenuState {
             runtime: Some(runtime_state),
-            upcoming_races: build_upcoming_races(race_snapshot.races),
+            upcoming_races: self.get_upcoming_races().await?,
         })
+    }
+
+    async fn get_upcoming_races(&self) -> Result<Vec<PublicUpcomingRaceSummary>, Status> {
+        let now_ms = current_unix_ms();
+        let generation = self.upcoming_invalidation.generation();
+
+        {
+            let cache = self.upcoming_cache.read().await;
+            if cache.generation == generation
+                && now_ms.saturating_sub(cache.cached_at_ms) <= UPCOMING_CACHE_TTL_MS
+            {
+                return Ok(cache.races.clone());
+            }
+        }
+
+        let race_snapshot = self
+            .race_repo
+            .get_snapshot()
+            .await
+            .map_err(|err| Status::internal(format!("failed to load race configs: {err}")))?;
+        let races = build_upcoming_races(race_snapshot.races, now_ms);
+
+        let mut cache = self.upcoming_cache.write().await;
+        cache.generation = generation;
+        cache.cached_at_ms = now_ms;
+        cache.races = races.clone();
+
+        Ok(races)
     }
 }
 
-fn build_upcoming_races(races: Vec<RaceConfigRecord>) -> Vec<PublicUpcomingRaceSummary> {
-    let now_ms = current_unix_ms();
-    let window_end_ms = now_ms.saturating_add(UPCOMING_RACE_WINDOW_MS);
-
+fn build_upcoming_races(
+    races: Vec<RaceConfigRecord>,
+    now_ms: i64,
+) -> Vec<PublicUpcomingRaceSummary> {
     races
         .into_iter()
-        .filter(|race| {
-            race.config.starts_at_ms >= now_ms && race.config.starts_at_ms <= window_end_ms
-        })
+        .filter(|race| is_within_upcoming_window(race.config.starts_at_ms, now_ms))
         .map(|race| PublicUpcomingRaceSummary {
             race_name: race.config.race_name,
             start_time_utc: Some(unix_ms_to_timestamp(race.config.starts_at_ms)),
             race_duration_sec: race.config.race_duration_sec,
         })
         .collect()
+}
+
+fn is_within_upcoming_window(start_ms: i64, now_ms: i64) -> bool {
+    let window_end_ms = now_ms.saturating_add(UPCOMING_RACE_WINDOW_MS);
+    start_ms >= now_ms && start_ms <= window_end_ms
 }
 
 fn current_unix_ms() -> i64 {
