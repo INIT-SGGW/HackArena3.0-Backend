@@ -5,7 +5,9 @@ mod error_map;
 mod mappers;
 #[cfg(feature = "official")]
 pub mod public_menu_service;
+#[cfg(feature = "official")]
 pub mod race_config_admin_service;
+#[cfg(feature = "official")]
 mod race_config_mappers;
 pub mod race_service;
 #[cfg(feature = "official")]

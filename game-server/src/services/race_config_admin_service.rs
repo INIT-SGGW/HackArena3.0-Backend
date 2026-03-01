@@ -1,6 +1,5 @@
 //! gRPC RaceConfigAdminService implementation.
 
-#[cfg(feature = "official")]
 use std::sync::Arc;
 
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminService;
@@ -11,39 +10,38 @@ use proto::race::v1::{
 };
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
-#[cfg(feature = "official")]
 use crate::auth::auth_claims::TokenValidator;
-#[cfg(feature = "official")]
-use crate::db::repos::race_config::RaceConfigRepo;
+use crate::db::repos::race_config::{
+    RaceConfigInputRecord, RaceConfigRecord, RaceConfigRepo, RaceConfigRepoError,
+};
+use crate::domain::race_config::{RaceConfigDomainError, validate_schedule};
+use crate::services::race_config_mappers::{
+    race_input_from_proto, race_to_proto, repo_schedule_to_domain,
+};
 
 /// RaceConfigAdmin service.
 #[derive(Clone)]
 pub struct RaceConfigAdminServiceImpl {
-    #[cfg(feature = "official")]
-    repo: Option<RaceConfigRepo>,
-    #[cfg(feature = "official")]
-    token_validator: Option<Arc<TokenValidator>>,
+    repo: RaceConfigRepo,
+    token_validator: Arc<TokenValidator>,
 }
 
 impl RaceConfigAdminServiceImpl {
-    #[cfg(feature = "official")]
     pub fn with_repo(repo: RaceConfigRepo, token_validator: Arc<TokenValidator>) -> Self {
         Self {
-            repo: Some(repo),
-            token_validator: Some(token_validator),
+            repo,
+            token_validator,
         }
     }
-}
 
-impl Default for RaceConfigAdminServiceImpl {
-    fn default() -> Self {
-        Self {
-            #[cfg(feature = "official")]
-            repo: None,
-            #[cfg(feature = "official")]
-            token_validator: None,
+    async fn require_admin(&self, metadata: &MetadataMap) -> Result<(), Status> {
+        let is_admin = self.token_validator.is_admin(metadata).await?;
+        if !is_admin {
+            return Err(Status::permission_denied("admin role required"));
         }
+        Ok(())
     }
 }
 
@@ -54,9 +52,16 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
         request: Request<GetRaceConfigsRequest>,
     ) -> Result<Response<GetRaceConfigsResponse>, Status> {
         self.require_admin(request.metadata()).await?;
-        Err(Status::unimplemented(
-            "race config CRUD migration is not implemented yet",
-        ))
+        let snapshot = self
+            .repo
+            .get_snapshot()
+            .await
+            .map_err(map_repo_error_to_status)?;
+
+        Ok(Response::new(GetRaceConfigsResponse {
+            revision: snapshot.revision,
+            races: snapshot.races.into_iter().map(race_to_proto).collect(),
+        }))
     }
 
     async fn create_race_config(
@@ -64,9 +69,37 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
         request: Request<CreateRaceConfigRequest>,
     ) -> Result<Response<CreateRaceConfigResponse>, Status> {
         self.require_admin(request.metadata()).await?;
-        Err(Status::unimplemented(
-            "race config CRUD migration is not implemented yet",
-        ))
+        let request = request.into_inner();
+        let config = request
+            .config
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("config is required"))
+            .and_then(race_input_from_proto)?;
+        let race_id = race_id_v5(&config, request.expected_revision);
+        let race = RaceConfigRecord { race_id, config };
+
+        let snapshot = self
+            .repo
+            .get_snapshot()
+            .await
+            .map_err(map_repo_error_to_status)?;
+        ensure_expected_revision(request.expected_revision, snapshot.revision)?;
+
+        let mut candidate = snapshot.races;
+        candidate.push(race.clone());
+        sort_by_start_time(&mut candidate);
+        validate_candidate_schedule(&candidate)?;
+
+        let revision = self
+            .repo
+            .create_config(request.expected_revision, &race)
+            .await
+            .map_err(map_repo_error_to_status)?;
+
+        Ok(Response::new(CreateRaceConfigResponse {
+            revision,
+            race: Some(race_to_proto(race)),
+        }))
     }
 
     async fn update_race_config(
@@ -74,9 +107,52 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
         request: Request<UpdateRaceConfigRequest>,
     ) -> Result<Response<UpdateRaceConfigResponse>, Status> {
         self.require_admin(request.metadata()).await?;
-        Err(Status::unimplemented(
-            "race config CRUD migration is not implemented yet",
-        ))
+        let request = request.into_inner();
+        if request.race_id.trim().is_empty() {
+            return Err(Status::invalid_argument("race_id must be non-empty"));
+        }
+
+        let config = request
+            .config
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("config is required"))
+            .and_then(race_input_from_proto)?;
+
+        let snapshot = self
+            .repo
+            .get_snapshot()
+            .await
+            .map_err(map_repo_error_to_status)?;
+        ensure_expected_revision(request.expected_revision, snapshot.revision)?;
+
+        let mut candidate = snapshot.races;
+        let Some(entry) = candidate
+            .iter_mut()
+            .find(|entry| entry.race_id == request.race_id)
+        else {
+            return Err(Status::not_found(format!(
+                "race config not found: {}",
+                request.race_id
+            )));
+        };
+        entry.config = config.clone();
+        sort_by_start_time(&mut candidate);
+        validate_candidate_schedule(&candidate)?;
+
+        let race = RaceConfigRecord {
+            race_id: request.race_id,
+            config,
+        };
+        let revision = self
+            .repo
+            .update_config(request.expected_revision, &race)
+            .await
+            .map_err(map_repo_error_to_status)?;
+
+        Ok(Response::new(UpdateRaceConfigResponse {
+            revision,
+            race: Some(race_to_proto(race)),
+        }))
     }
 
     async fn delete_race_config(
@@ -84,35 +160,99 @@ impl RaceConfigAdminService for RaceConfigAdminServiceImpl {
         request: Request<DeleteRaceConfigRequest>,
     ) -> Result<Response<DeleteRaceConfigResponse>, Status> {
         self.require_admin(request.metadata()).await?;
-        Err(Status::unimplemented(
-            "race config CRUD migration is not implemented yet",
-        ))
+        let request = request.into_inner();
+        if request.race_id.trim().is_empty() {
+            return Err(Status::invalid_argument("race_id must be non-empty"));
+        }
+
+        let snapshot = self
+            .repo
+            .get_snapshot()
+            .await
+            .map_err(map_repo_error_to_status)?;
+        ensure_expected_revision(request.expected_revision, snapshot.revision)?;
+        if !snapshot
+            .races
+            .iter()
+            .any(|entry| entry.race_id == request.race_id)
+        {
+            return Err(Status::not_found(format!(
+                "race config not found: {}",
+                request.race_id
+            )));
+        }
+
+        let revision = self
+            .repo
+            .delete_config(request.expected_revision, &request.race_id)
+            .await
+            .map_err(map_repo_error_to_status)?;
+
+        Ok(Response::new(DeleteRaceConfigResponse {
+            revision,
+            race_id: request.race_id,
+        }))
     }
 }
 
-impl RaceConfigAdminServiceImpl {
-    async fn require_admin(&self, metadata: &MetadataMap) -> Result<(), Status> {
-        #[cfg(feature = "official")]
-        {
-            let _ = self.repo.as_ref().ok_or_else(|| {
-                Status::failed_precondition("race config admin service is not configured")
-            })?;
-            let validator = self.token_validator.as_ref().ok_or_else(|| {
-                Status::failed_precondition("race config admin service auth is not configured")
-            })?;
-            let is_admin = validator.is_admin(metadata).await?;
-            if !is_admin {
-                return Err(Status::permission_denied("admin role required"));
-            }
-            return Ok(());
-        }
-
-        #[cfg(not(feature = "official"))]
-        {
-            let _ = metadata;
-            Err(Status::unimplemented(
-                "race config admin service is available only in official backend",
-            ))
-        }
+fn ensure_expected_revision(expected_revision: u64, current_revision: u64) -> Result<(), Status> {
+    if expected_revision == current_revision {
+        return Ok(());
     }
+
+    Err(Status::failed_precondition(format!(
+        "race config revision mismatch: expected {expected_revision}, actual {current_revision}"
+    )))
+}
+
+fn sort_by_start_time(entries: &mut [RaceConfigRecord]) {
+    entries.sort_by(|a, b| {
+        a.config
+            .starts_at_ms
+            .cmp(&b.config.starts_at_ms)
+            .then_with(|| a.race_id.cmp(&b.race_id))
+    });
+}
+
+fn validate_candidate_schedule(entries: &[RaceConfigRecord]) -> Result<(), Status> {
+    let domain_entries = repo_schedule_to_domain(entries)?;
+    validate_schedule(&domain_entries).map_err(map_domain_error_to_status)
+}
+
+fn map_domain_error_to_status(err: RaceConfigDomainError) -> Status {
+    Status::invalid_argument(err.to_string())
+}
+
+fn map_repo_error_to_status(err: RaceConfigRepoError) -> Status {
+    match err {
+        RaceConfigRepoError::RevisionMismatch { .. } => {
+            Status::failed_precondition(err.to_string())
+        }
+        RaceConfigRepoError::AlreadyExists { .. } => Status::already_exists(err.to_string()),
+        RaceConfigRepoError::NotFound { .. } => Status::not_found(err.to_string()),
+        RaceConfigRepoError::InvalidStartPlacementMode
+        | RaceConfigRepoError::InvalidTimeOfDayPreset => Status::invalid_argument(err.to_string()),
+        RaceConfigRepoError::Sqlx(_)
+        | RaceConfigRepoError::StateMissing
+        | RaceConfigRepoError::NumericOutOfRange { .. }
+        | RaceConfigRepoError::RevisionOverflow => Status::internal(err.to_string()),
+    }
+}
+
+fn race_id_v5(config: &RaceConfigInputRecord, expected_revision: u64) -> String {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+    let payload = format!(
+        "expected_revision={};race_name={};starts_at_ms={};race_duration_sec={};map_id={};start_placement_mode={};time_of_day_preset={};ts_ns={}",
+        expected_revision,
+        config.race_name,
+        config.starts_at_ms,
+        config.race_duration_sec,
+        config.map_id,
+        config.start_placement_mode as i32,
+        config.time_of_day_preset as i32,
+        duration.as_nanos(),
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, payload.as_bytes()).to_string()
 }
