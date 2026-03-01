@@ -15,7 +15,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
-use crate::db::repos::sandbox_config::SandboxConfigRepo;
+use crate::db::repos::sandbox_config::{SandboxConfigRecord, SandboxConfigRepo};
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
 use crate::services::sandbox_mappers::{
@@ -27,6 +27,7 @@ const STREAM_CHANNEL_CAPACITY: usize = 16;
 const STREAM_POLL_INTERVAL_MS: u64 = 1000;
 const UPCOMING_RACE_WINDOW_MS: i64 = 60 * 60 * 1000;
 const UPCOMING_CACHE_TTL_MS: i64 = 60 * 1000;
+const SANDBOX_CONFIG_CACHE_TTL_MS: i64 = 60 * 1000;
 
 fn comparable_menu_state(state: &PublicMenuState) -> PublicMenuState {
     let mut comparable = state.clone();
@@ -65,6 +66,26 @@ impl UpcomingRacesCacheInvalidation {
     }
 }
 
+/// Shared invalidation signal for sandbox-config cache.
+#[derive(Clone, Default)]
+pub(crate) struct SandboxConfigCacheInvalidation {
+    generation: Arc<AtomicU64>,
+}
+
+impl SandboxConfigCacheInvalidation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    pub fn invalidate(&self) {
+        let _ = self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct UpcomingRacesCacheState {
     generation: u64,
@@ -82,6 +103,23 @@ impl Default for UpcomingRacesCacheState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SandboxConfigCacheState {
+    generation: u64,
+    cached_at_ms: i64,
+    sandboxes: Vec<SandboxConfigRecord>,
+}
+
+impl Default for SandboxConfigCacheState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            cached_at_ms: 0,
+            sandboxes: Vec::new(),
+        }
+    }
+}
+
 /// PublicMenu service backed by sandbox config repository and runtime worker state.
 #[derive(Clone)]
 pub struct PublicMenuServiceImpl {
@@ -89,7 +127,9 @@ pub struct PublicMenuServiceImpl {
     race_repo: RaceConfigRepo,
     engine: EngineClient,
     upcoming_invalidation: UpcomingRacesCacheInvalidation,
+    sandbox_invalidation: SandboxConfigCacheInvalidation,
     upcoming_cache: Arc<RwLock<UpcomingRacesCacheState>>,
+    sandbox_cache: Arc<RwLock<SandboxConfigCacheState>>,
 }
 
 impl PublicMenuServiceImpl {
@@ -98,22 +138,22 @@ impl PublicMenuServiceImpl {
         race_repo: RaceConfigRepo,
         engine: EngineClient,
         upcoming_invalidation: UpcomingRacesCacheInvalidation,
+        sandbox_invalidation: SandboxConfigCacheInvalidation,
     ) -> Self {
         Self {
             sandbox_repo,
             race_repo,
             engine,
             upcoming_invalidation,
+            sandbox_invalidation,
             upcoming_cache: Arc::new(RwLock::new(UpcomingRacesCacheState::default())),
+            sandbox_cache: Arc::new(RwLock::new(SandboxConfigCacheState::default())),
         }
     }
 
     async fn build_menu_state(&self) -> Result<PublicMenuState, Status> {
         let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
-        let sandbox_snapshot =
-            self.sandbox_repo.get_snapshot().await.map_err(|err| {
-                Status::internal(format!("failed to load sandbox configs: {err}"))
-            })?;
+        let sandbox_configs = self.get_sandbox_configs().await?;
         let runtime_state = PublicRuntimeState {
             server_time_utc: Some(utc_now_timestamp()),
             active_mode: match runtime.activity_kind {
@@ -123,8 +163,8 @@ impl PublicMenuServiceImpl {
                             .active_sandboxes
                             .iter()
                             .filter_map(|active| {
-                                find_sandbox_by_id(&sandbox_snapshot.sandboxes, &active.sandbox_id)
-                                    .map(|record| {
+                                find_sandbox_by_id(&sandbox_configs, &active.sandbox_id).map(
+                                    |record| {
                                         public_sandbox_runtime_info_from_record(
                                             record,
                                             runtime_time_of_day_preset_to_proto(
@@ -132,7 +172,8 @@ impl PublicMenuServiceImpl {
                                             ),
                                             0,
                                         )
-                                    })
+                                    },
+                                )
                             })
                             .collect(),
                     },
@@ -145,6 +186,32 @@ impl PublicMenuServiceImpl {
             runtime: Some(runtime_state),
             upcoming_races: self.get_upcoming_races().await?,
         })
+    }
+
+    async fn get_sandbox_configs(&self) -> Result<Vec<SandboxConfigRecord>, Status> {
+        let now_ms = current_unix_ms();
+        let generation = self.sandbox_invalidation.generation();
+
+        {
+            let cache = self.sandbox_cache.read().await;
+            if cache.generation == generation
+                && now_ms.saturating_sub(cache.cached_at_ms) <= SANDBOX_CONFIG_CACHE_TTL_MS
+            {
+                return Ok(cache.sandboxes.clone());
+            }
+        }
+
+        let sandbox_snapshot =
+            self.sandbox_repo.get_snapshot().await.map_err(|err| {
+                Status::internal(format!("failed to load sandbox configs: {err}"))
+            })?;
+
+        let mut cache = self.sandbox_cache.write().await;
+        cache.generation = generation;
+        cache.cached_at_ms = now_ms;
+        cache.sandboxes = sandbox_snapshot.sandboxes.clone();
+
+        Ok(sandbox_snapshot.sandboxes)
     }
 
     async fn get_upcoming_races(&self) -> Result<Vec<PublicUpcomingRaceSummary>, Status> {

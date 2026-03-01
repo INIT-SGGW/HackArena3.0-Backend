@@ -28,6 +28,7 @@ use crate::runtime::engine_worker::{
     EngineActivityKind, EngineClient, EnginePendingSandboxActivation,
 };
 use crate::services::error_map::map_worker_err;
+use crate::services::public_menu_service::SandboxConfigCacheInvalidation;
 use crate::services::sandbox_mappers::{
     admin_sandbox_runtime_info_from_record, engine_ghost_mode_settings_from_record,
     find_sandbox_by_id, pending_sandbox_operation_to_proto, runtime_time_of_day_preset_from_proto,
@@ -41,18 +42,21 @@ pub struct SandboxAdminServiceImpl {
     repo: SandboxConfigRepo,
     token_validator: Arc<TokenValidator>,
     engine: EngineClient,
+    sandbox_config_invalidation: SandboxConfigCacheInvalidation,
 }
 
 impl SandboxAdminServiceImpl {
-    pub fn with_repo(
+    pub(crate) fn with_repo(
         repo: SandboxConfigRepo,
         token_validator: Arc<TokenValidator>,
         engine: EngineClient,
+        sandbox_config_invalidation: SandboxConfigCacheInvalidation,
     ) -> Self {
         Self {
             repo,
             token_validator,
             engine,
+            sandbox_config_invalidation,
         }
     }
 }
@@ -100,6 +104,7 @@ impl SandboxConfigAdminService for SandboxAdminServiceImpl {
             .create_config(request.expected_revision, &sandbox)
             .await
             .map_err(map_repo_error_to_status)?;
+        self.sandbox_config_invalidation.invalidate();
 
         Ok(Response::new(CreateSandboxConfigResponse {
             revision,
@@ -132,6 +137,7 @@ impl SandboxConfigAdminService for SandboxAdminServiceImpl {
             .update_config(request.expected_revision, &sandbox)
             .await
             .map_err(map_repo_error_to_status)?;
+        self.sandbox_config_invalidation.invalidate();
 
         Ok(Response::new(UpdateSandboxConfigResponse {
             revision,
@@ -155,6 +161,7 @@ impl SandboxConfigAdminService for SandboxAdminServiceImpl {
             .delete_config(request.expected_revision, &request.sandbox_id)
             .await
             .map_err(map_repo_error_to_status)?;
+        self.sandbox_config_invalidation.invalidate();
 
         Ok(Response::new(DeleteSandboxConfigResponse {
             revision,
@@ -200,6 +207,7 @@ impl SandboxConfigAdminService for SandboxAdminServiceImpl {
             .update_config(request.expected_revision, &updated)
             .await
             .map_err(map_repo_error_to_status)?;
+        self.sandbox_config_invalidation.invalidate();
 
         let mut applied_to_active_runtime = false;
         match self.engine.runtime_state().await {
