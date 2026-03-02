@@ -7,7 +7,7 @@ use boink::model::Controls;
 use dashmap::DashMap;
 use proto::race::v1::{
     FrontendSpectatorEvent, FrontendSpectatorSnapshot, GetFrontendSpectatorRequest,
-    GetParticipantRaceRequest, ParticipantRaceEvent, QuickJoinRequest, QuickJoinResponse,
+    GetParticipantRaceRequest, ParticipantRaceEvent, QuickJoinDevRequest, QuickJoinDevResponse,
     SetControlsDevRequest, SetControlsRequest, SetControlsResponse, SpectatorView,
     StreamClampReason, StreamSettings, ViewDowngradeReason,
     frontend_spectator_event::Payload as FrontendSpectatorPayload,
@@ -19,7 +19,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, server::NamedService};
 
 use crate::auth::game_token::{GameTokenValidator, parse_game_token};
-use crate::runtime::engine_worker::EngineClient;
+use crate::config::AppEnv;
+use crate::runtime::engine_worker::{
+    EngineActiveSandboxState, EngineActivityKind, EngineClient, EngineCommandTarget,
+    EngineRuntimeState,
+};
 
 use super::error_map::map_worker_err;
 use super::mappers::{frontend_full_state, proto_to_controls};
@@ -33,10 +37,14 @@ const MAX_STREAM_HZ: u32 = 120;
 pub struct RaceServiceImpl {
     engine: EngineClient,
     simulation_hz: u32,
+    app_env: AppEnv,
+    next_public_car_id: Arc<AtomicU64>,
     active_streams: Arc<DashMap<u64, ()>>,
     known_cars: Arc<DashMap<u64, ()>>,
     last_client_seq: Arc<DashMap<u64, u64>>,
     instance_cars: Arc<DashMap<String, u64>>,
+    car_engine_ids: Arc<DashMap<u64, u64>>,
+    car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
     token_validator: Arc<GameTokenValidator>,
     // Optional shared state for future extensions.
     _state: Arc<Mutex<()>>,
@@ -47,6 +55,7 @@ impl RaceServiceImpl {
     pub fn new(
         engine: EngineClient,
         simulation_hz: u32,
+        app_env: AppEnv,
         jwks_url: &str,
         jwt_audience: Vec<String>,
         jwt_issuers: Vec<String>,
@@ -54,10 +63,14 @@ impl RaceServiceImpl {
         Self {
             engine,
             simulation_hz,
+            app_env,
+            next_public_car_id: Arc::new(AtomicU64::new(1)),
             active_streams: Arc::new(DashMap::new()),
             known_cars: Arc::new(DashMap::new()),
             last_client_seq: Arc::new(DashMap::new()),
             instance_cars: Arc::new(DashMap::new()),
+            car_engine_ids: Arc::new(DashMap::new()),
+            car_targets: Arc::new(DashMap::new()),
             token_validator: Arc::new(GameTokenValidator::new_with_config(
                 jwks_url,
                 jwt_audience,
@@ -77,29 +90,48 @@ impl RaceService for RaceServiceImpl {
     type StreamFrontendSpectatorStream = ReceiverStream<Result<FrontendSpectatorEvent, Status>>;
     type StreamParticipantRaceStream = ReceiverStream<Result<ParticipantRaceEvent, Status>>;
 
-    async fn quick_join(
+    async fn quick_join_dev(
         &self,
-        request: Request<QuickJoinRequest>,
-    ) -> Result<Response<QuickJoinResponse>, Status> {
+        request: Request<QuickJoinDevRequest>,
+    ) -> Result<Response<QuickJoinDevResponse>, Status> {
+        if self.app_env.is_production() {
+            return Err(Status::failed_precondition(
+                "quick join is available only in development/preprod",
+            ));
+        }
+
+        let auth = parse_game_token(request.metadata())?;
+        let req = request.into_inner();
         let engine = self.engine.clone();
         let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
-        let car_id = engine.spawn_car().await.map_err(map_worker_err)?;
-        if let Some(token) = parse_game_token(request.metadata())? {
+        let active_sandbox = select_quick_join_sandbox(&runtime_state, &req.sandbox_id)?;
+
+        let sandbox_id = active_sandbox.sandbox_id.clone();
+        let map_id = active_sandbox.map_id.clone();
+        let engine_car_id = engine
+            .spawn_sandbox_car(sandbox_id.clone())
+            .await
+            .map_err(map_worker_err)?;
+        let public_car_id = self.next_public_car_id.fetch_add(1, Ordering::Relaxed);
+        if let Some(token) = auth {
             if let Some(instance_uuid) = self
                 .token_validator
                 .instance_uuid_from_token(&token)
                 .await?
             {
-                self.instance_cars.insert(instance_uuid, car_id);
+                self.instance_cars.insert(instance_uuid, public_car_id);
             }
         }
 
-        let resp = QuickJoinResponse {
-            car_id,
-            map_id: runtime_state.map_id,
+        let resp = QuickJoinDevResponse {
+            car_id: public_car_id,
+            map_id,
         };
-        self.known_cars.insert(car_id, ());
-        self.last_client_seq.insert(car_id, 0);
+        self.known_cars.insert(public_car_id, ());
+        self.last_client_seq.insert(public_car_id, 0);
+        self.car_engine_ids.insert(public_car_id, engine_car_id);
+        self.car_targets
+            .insert(public_car_id, EngineCommandTarget::Sandbox { sandbox_id });
 
         Ok(Response::new(resp))
     }
@@ -128,9 +160,11 @@ impl RaceService for RaceServiceImpl {
             None => self.resolve_single_car_id()?,
         };
         let controls = proto_to_controls(&req);
+        let target = self.target_for_car(car_id)?;
+        let engine_car_id = self.engine_car_id_for(car_id)?;
 
         self.engine
-            .set_controls(car_id, controls)
+            .set_controls_in(target, engine_car_id, controls)
             .await
             .map_err(map_worker_err)?;
 
@@ -156,9 +190,11 @@ impl RaceService for RaceServiceImpl {
             brake: req.brake,
             steer: req.steering,
         };
+        let target = self.target_for_car(req.target_car_id)?;
+        let engine_car_id = self.engine_car_id_for(req.target_car_id)?;
 
         self.engine
-            .set_controls(req.target_car_id, controls)
+            .set_controls_in(target, engine_car_id, controls)
             .await
             .map_err(map_worker_err)?;
 
@@ -191,12 +227,13 @@ impl RaceService for RaceServiceImpl {
 
         let engine = self.engine.clone();
         let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
-        let runtime_map_id = runtime_state.map_id;
         let simulation_hz = self.simulation_hz;
         let active_streams = self.active_streams.clone();
         let known_cars = self.known_cars.clone();
         let last_client_seq = self.last_client_seq.clone();
         let instance_cars = self.instance_cars.clone();
+        let car_engine_ids = self.car_engine_ids.clone();
+        let car_targets = self.car_targets.clone();
         let (tx, rx) = mpsc::channel(16);
 
         tokio::spawn(run_frontend_spectator_stream(
@@ -206,11 +243,13 @@ impl RaceService for RaceServiceImpl {
             known_cars,
             last_client_seq,
             instance_cars,
+            car_engine_ids,
+            car_targets,
             req,
             requested_view,
             resolved_view,
             view_downgrade_reason,
-            runtime_map_id,
+            resolve_runtime_map_id(&runtime_state),
             tx,
         ));
 
@@ -240,6 +279,20 @@ impl RaceServiceImpl {
         }
         Ok(*first.key())
     }
+
+    fn target_for_car(&self, car_id: u64) -> Result<EngineCommandTarget, Status> {
+        self.car_targets
+            .get(&car_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| Status::not_found("unknown car target"))
+    }
+
+    fn engine_car_id_for(&self, car_id: u64) -> Result<u64, Status> {
+        self.car_engine_ids
+            .get(&car_id)
+            .map(|entry| *entry.value())
+            .ok_or_else(|| Status::not_found("unknown car target"))
+    }
 }
 
 fn resolve_view(
@@ -265,6 +318,45 @@ fn normalize_requested_view(raw: i32) -> SpectatorView {
         SpectatorView::Unspecified => SpectatorView::Public,
         view => view,
     }
+}
+
+fn resolve_runtime_map_id(runtime_state: &EngineRuntimeState) -> String {
+    if matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
+        if let Some(active) = runtime_state.active_sandboxes.first() {
+            return active.map_id.clone();
+        }
+    }
+    runtime_state.map_id.clone()
+}
+
+fn select_quick_join_sandbox<'a>(
+    runtime_state: &'a EngineRuntimeState,
+    requested_sandbox_id: &str,
+) -> Result<&'a EngineActiveSandboxState, Status> {
+    if runtime_state.active_sandboxes.is_empty() {
+        return Err(Status::failed_precondition("sandbox runtime is not active"));
+    }
+
+    let requested_sandbox_id = requested_sandbox_id.trim();
+    if !requested_sandbox_id.is_empty() {
+        return runtime_state
+            .active_sandboxes
+            .iter()
+            .find(|entry| entry.sandbox_id == requested_sandbox_id)
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "sandbox runtime is not active for sandbox_id={requested_sandbox_id}"
+                ))
+            });
+    }
+
+    if runtime_state.active_sandboxes.len() == 1 {
+        return Ok(&runtime_state.active_sandboxes[0]);
+    }
+
+    Err(Status::failed_precondition(
+        "sandbox_id is required when multiple sandbox sessions are active",
+    ))
 }
 
 fn resolve_stream_rate(
@@ -315,6 +407,8 @@ async fn run_frontend_spectator_stream(
     known_cars: Arc<DashMap<u64, ()>>,
     last_client_seq: Arc<DashMap<u64, u64>>,
     instance_cars: Arc<DashMap<String, u64>>,
+    car_engine_ids: Arc<DashMap<u64, u64>>,
+    car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
     req: GetFrontendSpectatorRequest,
     requested_view: SpectatorView,
     resolved_view: SpectatorView,
@@ -361,18 +455,64 @@ async fn run_frontend_spectator_stream(
         let car_ids: Vec<u64> = known_cars.iter().map(|entry| *entry.key()).collect();
         let mut cars = Vec::with_capacity(car_ids.len());
 
-        for car_id in car_ids {
-            let seq = last_client_seq.get(&car_id).map(|v| *v).unwrap_or(0);
-            match engine.read_car_state(car_id).await {
-                Ok(state) => cars.push(frontend_full_state(car_id, state, seq)),
+        for public_car_id in car_ids {
+            let seq = last_client_seq.get(&public_car_id).map(|v| *v).unwrap_or(0);
+            let Some(target) = car_targets
+                .get(&public_car_id)
+                .map(|entry| entry.value().clone())
+            else {
+                known_cars.remove(&public_car_id);
+                last_client_seq.remove(&public_car_id);
+                car_engine_ids.remove(&public_car_id);
+                let instance_keys: Vec<String> = instance_cars
+                    .iter()
+                    .filter(|entry| *entry.value() == public_car_id)
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                for instance_uuid in instance_keys {
+                    instance_cars.remove(&instance_uuid);
+                }
+                continue;
+            };
+            let Some(engine_car_id) = car_engine_ids
+                .get(&public_car_id)
+                .map(|entry| *entry.value())
+            else {
+                known_cars.remove(&public_car_id);
+                last_client_seq.remove(&public_car_id);
+                car_targets.remove(&public_car_id);
+                let instance_keys: Vec<String> = instance_cars
+                    .iter()
+                    .filter(|entry| *entry.value() == public_car_id)
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                for instance_uuid in instance_keys {
+                    instance_cars.remove(&instance_uuid);
+                }
+                continue;
+            };
+
+            match engine.read_car_state_in(target, engine_car_id).await {
+                Ok(state) => cars.push(frontend_full_state(public_car_id, state, seq)),
                 Err(err) => {
                     tracing::warn!(
-                        car_id,
+                        public_car_id,
+                        engine_car_id,
                         error = %err,
                         "failed to read car state for spectator snapshot"
                     );
-                    known_cars.remove(&car_id);
-                    last_client_seq.remove(&car_id);
+                    known_cars.remove(&public_car_id);
+                    last_client_seq.remove(&public_car_id);
+                    car_engine_ids.remove(&public_car_id);
+                    car_targets.remove(&public_car_id);
+                    let instance_keys: Vec<String> = instance_cars
+                        .iter()
+                        .filter(|entry| *entry.value() == public_car_id)
+                        .map(|entry| entry.key().clone())
+                        .collect();
+                    for instance_uuid in instance_keys {
+                        instance_cars.remove(&instance_uuid);
+                    }
                 }
             }
         }
@@ -395,6 +535,8 @@ async fn run_frontend_spectator_stream(
                     &known_cars,
                     &last_client_seq,
                     &instance_cars,
+                    &car_engine_ids,
+                    &car_targets,
                 )
                 .await;
                 break;
@@ -407,6 +549,8 @@ async fn run_frontend_spectator_stream(
                     &known_cars,
                     &last_client_seq,
                     &instance_cars,
+                    &car_engine_ids,
+                    &car_targets,
                 )
                 .await;
                 break;
@@ -432,31 +576,76 @@ async fn cleanup_frontend_cars(
     known_cars: &DashMap<u64, ()>,
     last_client_seq: &DashMap<u64, u64>,
     instance_cars: &DashMap<String, u64>,
+    car_engine_ids: &DashMap<u64, u64>,
+    car_targets: &DashMap<u64, EngineCommandTarget>,
 ) {
-    let car_ids: Vec<u64> = known_cars.iter().map(|entry| *entry.key()).collect();
+    let public_car_ids: Vec<u64> = known_cars.iter().map(|entry| *entry.key()).collect();
     tracing::info!(
         reason,
-        car_count = car_ids.len(),
+        car_count = public_car_ids.len(),
         "frontend cleanup: despawning cars"
     );
-    for car_id in car_ids {
-        if let Err(err) = engine.despawn_car(car_id).await {
+    for public_car_id in public_car_ids {
+        let Some(target) = car_targets
+            .get(&public_car_id)
+            .map(|entry| entry.value().clone())
+        else {
+            known_cars.remove(&public_car_id);
+            last_client_seq.remove(&public_car_id);
+            car_engine_ids.remove(&public_car_id);
+            let instance_keys: Vec<String> = instance_cars
+                .iter()
+                .filter(|entry| *entry.value() == public_car_id)
+                .map(|entry| entry.key().clone())
+                .collect();
+            for instance_uuid in instance_keys {
+                instance_cars.remove(&instance_uuid);
+            }
+            continue;
+        };
+        let Some(engine_car_id) = car_engine_ids
+            .get(&public_car_id)
+            .map(|entry| *entry.value())
+        else {
+            known_cars.remove(&public_car_id);
+            last_client_seq.remove(&public_car_id);
+            car_targets.remove(&public_car_id);
+            let instance_keys: Vec<String> = instance_cars
+                .iter()
+                .filter(|entry| *entry.value() == public_car_id)
+                .map(|entry| entry.key().clone())
+                .collect();
+            for instance_uuid in instance_keys {
+                instance_cars.remove(&instance_uuid);
+            }
+            continue;
+        };
+
+        if let Err(err) = engine.despawn_car_in(target, engine_car_id).await {
             tracing::warn!(
-                car_id,
+                public_car_id,
+                engine_car_id,
                 error = %err,
                 "failed to despawn car during frontend cleanup"
             );
         }
-        known_cars.remove(&car_id);
-        last_client_seq.remove(&car_id);
+        known_cars.remove(&public_car_id);
+        last_client_seq.remove(&public_car_id);
+        car_engine_ids.remove(&public_car_id);
+        car_targets.remove(&public_car_id);
         let instance_keys: Vec<String> = instance_cars
             .iter()
-            .filter(|entry| *entry.value() == car_id)
+            .filter(|entry| *entry.value() == public_car_id)
             .map(|entry| entry.key().clone())
             .collect();
         for instance_uuid in instance_keys {
             instance_cars.remove(&instance_uuid);
         }
-        tracing::info!(car_id, reason, "frontend cleanup: car removed");
+        tracing::info!(
+            public_car_id,
+            engine_car_id,
+            reason,
+            "frontend cleanup: car removed"
+        );
     }
 }

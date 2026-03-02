@@ -106,6 +106,7 @@ pub async fn serve_grpc(
     let race_impl = RaceServiceImpl::new(
         engine.clone(),
         cfg.simulation_hz,
+        cfg.env,
         &cfg.jwks_url,
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
