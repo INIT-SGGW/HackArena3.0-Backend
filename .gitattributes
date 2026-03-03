@@ -1,0 +1,21 @@
+# Keep repository text files normalized to LF to avoid checksum drift
+# (notably for sqlx metadata and SQL migrations).
+* text=auto eol=lf
+
+# Windows script ergonomics.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Critical files that should never flip line endings.
+*.sql text eol=lf
+*.json text eol=lf
+/.sqlx/*.json text eol=lf
+
+# Common binary assets.
+*.glb binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
