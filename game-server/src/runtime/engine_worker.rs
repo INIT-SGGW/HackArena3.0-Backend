@@ -20,7 +20,7 @@ use boink::model::ghost::{GhostModeConditionLogic, GhostModeSettings};
 use boink::model::math::Vec3;
 use boink::model::state::VehicleState;
 use boink::model::track::TrackData;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
@@ -92,6 +92,11 @@ pub struct EngineActiveSandboxState {
 struct EngineWorldSlot {
     engine: Engine,
     ghost_mode_settings: GhostModeSettings,
+}
+
+struct SandboxEngineHandle {
+    slot: Arc<Mutex<EngineWorldSlot>>,
+    step_task: JoinHandle<()>,
 }
 
 /// Minimal runtime state owned by the engine worker.
@@ -512,7 +517,7 @@ pub async fn spawn(
         time_of_day_preset: EngineRuntimeTimeOfDayPreset::Unspecified,
         pending_sandbox_activations: Vec::new(),
     };
-    let sandbox_engines: HashMap<String, EngineWorldSlot> = HashMap::new();
+    let sandbox_engines: HashMap<String, SandboxEngineHandle> = HashMap::new();
     let mut engine = build_engine(&cfg, &runtime_state.map_id)?;
     let ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
     engine
@@ -550,7 +555,7 @@ async fn run_worker(
     cfg: Arc<Config>,
     mut runtime_state: EngineRuntimeState,
     official_ghost_mode_settings: GhostModeSettings,
-    mut sandbox_engines: HashMap<String, EngineWorldSlot>,
+    mut sandbox_engines: HashMap<String, SandboxEngineHandle>,
 ) {
     let mut official_engine = EngineWorldSlot {
         engine: official_engine,
@@ -602,25 +607,7 @@ async fn run_worker(
                             should_stop = true;
                         }
                     }
-                    EngineActivityKind::Sandbox => {
-                        for (sandbox_id, sandbox_slot) in sandbox_engines.iter_mut() {
-                            if let Err(err) = sandbox_slot.engine.step(simulation_dt_seconds) {
-                                tracing::warn!(
-                                    sandbox_id = %sandbox_id,
-                                    error = ?err,
-                                    "engine worker: sandbox tick failed"
-                                );
-                            }
-                            if sandbox_slot.engine.should_close_debug() {
-                                tracing::info!(
-                                    sandbox_id = %sandbox_id,
-                                    "engine worker: sandbox debug drawer requested close"
-                                );
-                                should_stop = true;
-                                break;
-                            }
-                        }
-                    }
+                    EngineActivityKind::Sandbox => {}
                     EngineActivityKind::None => {}
                 }
 
@@ -645,6 +632,8 @@ async fn run_worker(
                     &cfg,
                     &mut runtime_state,
                     &mut sandbox_engines,
+                    simulation_dt_seconds,
+                    &weather_sync,
                 ) {
                     tracing::warn!("engine worker: pending sandbox activation failed: {err}");
                 }
@@ -657,19 +646,7 @@ async fn run_worker(
                             tracing::warn!(error = %err, "engine worker: official scheduled weather apply failed");
                         }
                     }
-                    EngineActivityKind::Sandbox => {
-                        for (sandbox_id, sandbox_slot) in sandbox_engines.iter_mut() {
-                            if let Err(err) =
-                                apply_weather_from_schedule(&mut sandbox_slot.engine, &weather_sync).await
-                            {
-                                tracing::warn!(
-                                    sandbox_id = %sandbox_id,
-                                    error = %err,
-                                    "engine worker: sandbox scheduled weather apply failed"
-                                );
-                            }
-                        }
-                    }
+                    EngineActivityKind::Sandbox => {}
                     EngineActivityKind::None => {}
                 }
             }
@@ -685,8 +662,12 @@ async fn run_worker(
                     &cfg,
                     &mut runtime_state,
                     &mut sandbox_engines,
+                    simulation_dt_seconds,
+                    &weather_sync,
                     cmd,
-                ) {
+                )
+                .await
+                {
                     tracing::warn!("engine worker: command failed: {err}");
                 }
                 if let Err(err) = maybe_execute_due_pending_sandbox_activation(
@@ -694,6 +675,8 @@ async fn run_worker(
                     &cfg,
                     &mut runtime_state,
                     &mut sandbox_engines,
+                    simulation_dt_seconds,
+                    &weather_sync,
                 ) {
                     tracing::warn!("engine worker: pending sandbox activation failed: {err}");
                 }
@@ -701,15 +684,92 @@ async fn run_worker(
         }
     }
 
+    for (_, handle) in sandbox_engines.drain() {
+        handle.step_task.abort();
+    }
     tracing::info!("engine worker: stopped");
 }
 
-fn target_slot_mut<'a>(
+async fn run_sandbox_loop(
+    sandbox_id: String,
+    slot: Arc<Mutex<EngineWorldSlot>>,
+    simulation_dt_seconds: f32,
+    weather_sync: WeatherSyncState,
+) {
+    let mut ticker =
+        tokio::time::interval(tokio::time::Duration::from_secs_f32(simulation_dt_seconds));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    let mut weather_tick = tokio::time::interval_at(
+        next_boundary_instant(WEATHER_TICK_MS),
+        tokio::time::Duration::from_millis(WEATHER_TICK_MS as u64),
+    );
+    weather_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    {
+        let mut slot_guard = slot.lock().await;
+        if let Err(err) = apply_weather_from_schedule(&mut slot_guard.engine, &weather_sync).await {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %err,
+                "engine worker: initial sandbox weather apply failed"
+            );
+        }
+    }
+
+    tracing::info!(sandbox_id = %sandbox_id, "engine worker: sandbox loop started");
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let tick_start = Instant::now();
+                {
+                    let mut slot_guard = slot.lock().await;
+                    if let Err(err) = slot_guard.engine.step(simulation_dt_seconds) {
+                        tracing::warn!(
+                            sandbox_id = %sandbox_id,
+                            error = ?err,
+                            "engine worker: sandbox tick failed"
+                        );
+                    }
+                }
+                let elapsed = tick_start.elapsed();
+                let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+                tracing::debug!(
+                    sandbox_id = %sandbox_id,
+                    elapsed_ms = format!("{:.3}", elapsed_ms),
+                    "engine worker: sandbox tick duration"
+                );
+                if elapsed.as_secs_f32() > simulation_dt_seconds {
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        elapsed_ms = format!("{:.3}", elapsed_ms),
+                        budget_ms = format!("{:.3}", simulation_dt_seconds as f64 * 1000.0),
+                        "engine worker: sandbox tick exceeded budget"
+                    );
+                }
+            }
+            _ = weather_tick.tick() => {
+                let mut slot_guard = slot.lock().await;
+                if let Err(err) = apply_weather_from_schedule(&mut slot_guard.engine, &weather_sync).await {
+                    tracing::warn!(
+                        sandbox_id = %sandbox_id,
+                        error = %err,
+                        "engine worker: sandbox scheduled weather apply failed"
+                    );
+                }
+            }
+        }
+    }
+}
+
+async fn with_target_slot_mut<R>(
     target: &EngineCommandTarget,
     runtime_state: &EngineRuntimeState,
-    official_engine: &'a mut EngineWorldSlot,
-    sandbox_engines: &'a mut HashMap<String, EngineWorldSlot>,
-) -> Result<&'a mut EngineWorldSlot, EngineWorkerError> {
+    official_engine: &mut EngineWorldSlot,
+    sandbox_engines: &HashMap<String, SandboxEngineHandle>,
+    op: impl FnOnce(&mut EngineWorldSlot) -> Result<R, EngineWorkerError>,
+) -> Result<R, EngineWorkerError> {
     match target {
         EngineCommandTarget::OfficialRace => {
             if !matches!(
@@ -720,7 +780,7 @@ fn target_slot_mut<'a>(
                     "official race runtime is not active".to_string(),
                 ));
             }
-            Ok(official_engine)
+            op(official_engine)
         }
         EngineCommandTarget::Sandbox { sandbox_id } => {
             if sandbox_id.trim().is_empty() {
@@ -733,30 +793,43 @@ fn target_slot_mut<'a>(
                     "sandbox runtime is not active".to_string(),
                 ));
             }
-            sandbox_engines.get_mut(sandbox_id).ok_or_else(|| {
-                EngineWorkerError::InvalidArgument(
-                    "sandbox_id does not match active sandbox session".to_string(),
-                )
-            })
+            let slot = sandbox_engines
+                .get(sandbox_id)
+                .map(|handle| Arc::clone(&handle.slot))
+                .ok_or_else(|| {
+                    EngineWorkerError::InvalidArgument(
+                        "sandbox_id does not match active sandbox session".to_string(),
+                    )
+                })?;
+            let mut slot = slot.lock().await;
+            op(&mut slot)
         }
     }
 }
 
-fn handle_command(
+async fn handle_command(
     official_engine: &mut EngineWorldSlot,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
-    sandbox_engines: &mut HashMap<String, EngineWorldSlot>,
+    sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
+    simulation_dt_seconds: f32,
+    weather_sync: &WeatherSyncState,
     cmd: EngineCommand,
 ) -> Result<(), EngineWorkerError> {
     match cmd {
         EngineCommand::SpawnCar { target, reply_tx } => {
-            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
-                .and_then(|slot| {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
                     slot.engine
                         .spawn_vehicle()
                         .map_err(EngineWorkerError::Engine)
-                });
+                },
+            )
+            .await;
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -767,12 +840,18 @@ fn handle_command(
             controls,
             reply_tx,
         } => {
-            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
-                .and_then(|slot| {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
                     slot.engine
                         .set_controls(car_id, controls)
                         .map_err(EngineWorkerError::Engine)
-                });
+                },
+            )
+            .await;
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -782,18 +861,30 @@ fn handle_command(
             car_id,
             reply_tx,
         } => {
-            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
-                .and_then(|slot| {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
                     slot.engine
                         .read_vehicle_state(car_id)
                         .map_err(EngineWorkerError::Engine)
-                });
+                },
+            )
+            .await;
             let _ = reply_tx.send(result);
             Ok(())
         }
         EngineCommand::GetTrackData { target, reply_tx } => {
-            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
-                .and_then(|slot| slot.engine.track_data().map_err(EngineWorkerError::Engine));
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| slot.engine.track_data().map_err(EngineWorkerError::Engine),
+            )
+            .await;
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -823,6 +914,8 @@ fn handle_command(
                 sandbox_id,
                 target_time_of_day_preset,
                 next_ghost_mode_settings,
+                simulation_dt_seconds,
+                weather_sync,
             );
             let _ = reply_tx.send(result);
             Ok(())
@@ -876,14 +969,20 @@ fn handle_command(
             settings,
             reply_tx,
         } => {
-            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
-                .and_then(|slot| {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
                     slot.engine
                         .set_ghost_mode_settings(settings)
                         .map_err(EngineWorkerError::Engine)?;
                     slot.ghost_mode_settings = settings;
                     Ok(())
-                });
+                },
+            )
+            .await;
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -892,12 +991,18 @@ fn handle_command(
             car_id,
             reply_tx,
         } => {
-            let result = target_slot_mut(&target, runtime_state, official_engine, sandbox_engines)
-                .and_then(|slot| {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
                     slot.engine
                         .despawn_vehicle(car_id)
                         .map_err(EngineWorkerError::Engine)
-                });
+                },
+            )
+            .await;
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -908,13 +1013,15 @@ fn switch_runtime(
     official_engine: &mut EngineWorldSlot,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
-    sandbox_engines: &mut HashMap<String, EngineWorldSlot>,
+    sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
     expected_revision: u64,
     activity_kind: EngineActivityKind,
     map_id: String,
     sandbox_id: Option<String>,
     time_of_day_preset: EngineRuntimeTimeOfDayPreset,
     ghost_mode_settings: Option<GhostModeSettings>,
+    simulation_dt_seconds: f32,
+    weather_sync: &WeatherSyncState,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
     if runtime_state.revision != expected_revision {
         return Err(EngineWorkerError::RevisionMismatch {
@@ -936,7 +1043,9 @@ fn switch_runtime(
                 .map_err(EngineWorkerError::Engine)?;
             official_engine.engine = new_engine;
             official_engine.ghost_mode_settings = target_ghost_mode_settings;
-            sandbox_engines.clear();
+            for (_, handle) in sandbox_engines.drain() {
+                handle.step_task.abort();
+            }
 
             runtime_state.activity_kind = activity_kind;
             runtime_state.map_id = map_id;
@@ -969,24 +1078,28 @@ fn switch_runtime(
                 ));
             }
 
-            let fallback_ghost_mode_settings = sandbox_engines
-                .get(&sandbox_id)
-                .map(|slot| slot.ghost_mode_settings)
-                .unwrap_or(DEFAULT_GHOST_MODE_SETTINGS);
             let target_ghost_mode_settings =
-                ghost_mode_settings.unwrap_or(fallback_ghost_mode_settings);
+                ghost_mode_settings.unwrap_or(DEFAULT_GHOST_MODE_SETTINGS);
 
             let mut sandbox_engine = build_engine(cfg, &map_id)?;
             sandbox_engine
                 .set_ghost_mode_settings(target_ghost_mode_settings)
                 .map_err(EngineWorkerError::Engine)?;
-            sandbox_engines.insert(
+            let slot = Arc::new(Mutex::new(EngineWorldSlot {
+                engine: sandbox_engine,
+                ghost_mode_settings: target_ghost_mode_settings,
+            }));
+            let step_task = tokio::task::spawn_local(run_sandbox_loop(
                 sandbox_id.clone(),
-                EngineWorldSlot {
-                    engine: sandbox_engine,
-                    ghost_mode_settings: target_ghost_mode_settings,
-                },
-            );
+                Arc::clone(&slot),
+                simulation_dt_seconds,
+                weather_sync.clone(),
+            ));
+            if let Some(previous) =
+                sandbox_engines.insert(sandbox_id.clone(), SandboxEngineHandle { slot, step_task })
+            {
+                previous.step_task.abort();
+            }
 
             upsert_active_sandbox(
                 &mut runtime_state.active_sandboxes,
@@ -1037,7 +1150,7 @@ fn switch_runtime(
 
 fn deactivate_sandbox(
     runtime_state: &mut EngineRuntimeState,
-    sandbox_engines: &mut HashMap<String, EngineWorldSlot>,
+    sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
     expected_revision: u64,
     sandbox_id: &str,
 ) -> Result<EngineRuntimeState, EngineWorkerError> {
@@ -1062,7 +1175,8 @@ fn deactivate_sandbox(
         runtime_state.active_sandboxes.remove(position);
         removed = true;
     }
-    if sandbox_engines.remove(sandbox_id).is_some() {
+    if let Some(handle) = sandbox_engines.remove(sandbox_id) {
+        handle.step_task.abort();
         removed = true;
     }
     runtime_state
@@ -1304,7 +1418,9 @@ fn maybe_execute_due_pending_sandbox_activation(
     official_engine: &mut EngineWorldSlot,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
-    sandbox_engines: &mut HashMap<String, EngineWorldSlot>,
+    sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
+    simulation_dt_seconds: f32,
+    weather_sync: &WeatherSyncState,
 ) -> Result<(), EngineWorkerError> {
     if runtime_state.pending_sandbox_activations.is_empty() {
         return Ok(());
@@ -1360,6 +1476,8 @@ fn maybe_execute_due_pending_sandbox_activation(
                 Some(pending.sandbox_id.clone()),
                 time_of_day_preset,
                 Some(scheduled_ghost_mode_settings),
+                simulation_dt_seconds,
+                weather_sync,
             )?;
             tracing::info!(sandbox_id = %pending.sandbox_id, "engine worker: scheduled sandbox activation executed");
         } else {
