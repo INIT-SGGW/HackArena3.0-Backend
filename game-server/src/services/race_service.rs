@@ -44,6 +44,7 @@ pub struct RaceServiceImpl {
     known_cars: Arc<DashMap<u64, ()>>,
     last_client_seq: Arc<DashMap<u64, u64>>,
     instance_cars: Arc<DashMap<String, u64>>,
+    car_owners: Arc<DashMap<u64, String>>,
     car_engine_ids: Arc<DashMap<u64, u64>>,
     car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
     token_validator: Arc<GameTokenValidator>,
@@ -70,6 +71,7 @@ impl RaceServiceImpl {
             known_cars: Arc::new(DashMap::new()),
             last_client_seq: Arc::new(DashMap::new()),
             instance_cars: Arc::new(DashMap::new()),
+            car_owners: Arc::new(DashMap::new()),
             car_engine_ids: Arc::new(DashMap::new()),
             car_targets: Arc::new(DashMap::new()),
             token_validator: Arc::new(GameTokenValidator::new_with_config(
@@ -115,12 +117,14 @@ impl RaceService for RaceServiceImpl {
             .map_err(map_worker_err)?;
         let public_car_id = self.next_public_car_id.fetch_add(1, Ordering::Relaxed);
         if let Some(token) = auth {
-            if let Some(instance_uuid) = self
+            let instance_uuid = self
                 .token_validator
                 .instance_uuid_from_token(&token)
-                .await?
-            {
-                self.instance_cars.insert(instance_uuid, public_car_id);
+                .await?;
+            if let Some(instance_uuid) = instance_uuid {
+                self.instance_cars
+                    .insert(instance_uuid.clone(), public_car_id);
+                self.car_owners.insert(public_car_id, instance_uuid);
             }
         }
 
@@ -145,7 +149,6 @@ impl RaceService for RaceServiceImpl {
         let req = request.into_inner();
         let car_id = match auth {
             Some(token) => {
-                // TODO(auth): official team-bot-token does not include instance_uuid.
                 let instance_uuid = self
                     .token_validator
                     .instance_uuid_from_token(&token)
@@ -220,9 +223,16 @@ impl RaceService for RaceServiceImpl {
         let req = request.into_inner();
 
         let requested_view = normalize_requested_view(req.requested_view);
-        let scopes = match auth {
-            Some(token) => self.token_validator.scopes_from_token(&token).await?,
-            None => Vec::new(),
+        let (scopes, cleanup_instance_uuid) = match auth {
+            Some(token) => {
+                let scopes = self.token_validator.scopes_from_token(&token).await?;
+                let cleanup_instance_uuid = self
+                    .token_validator
+                    .instance_uuid_from_token(&token)
+                    .await?;
+                (scopes, cleanup_instance_uuid)
+            }
+            None => (Vec::new(), None),
         };
         let (resolved_view, view_downgrade_reason) = resolve_view(requested_view, &scopes);
 
@@ -234,6 +244,7 @@ impl RaceService for RaceServiceImpl {
         let known_cars = self.known_cars.clone();
         let last_client_seq = self.last_client_seq.clone();
         let instance_cars = self.instance_cars.clone();
+        let car_owners = self.car_owners.clone();
         let car_engine_ids = self.car_engine_ids.clone();
         let car_targets = self.car_targets.clone();
         let (tx, rx) = mpsc::channel(16);
@@ -245,6 +256,7 @@ impl RaceService for RaceServiceImpl {
             known_cars,
             last_client_seq,
             instance_cars,
+            car_owners,
             car_engine_ids,
             car_targets,
             req,
@@ -253,6 +265,7 @@ impl RaceService for RaceServiceImpl {
             view_downgrade_reason,
             resolve_runtime_map_id(&runtime_state, visible_target.as_ref()),
             visible_target,
+            cleanup_instance_uuid,
             tx,
         ));
 
@@ -460,6 +473,7 @@ async fn run_frontend_spectator_stream(
     known_cars: Arc<DashMap<u64, ()>>,
     last_client_seq: Arc<DashMap<u64, u64>>,
     instance_cars: Arc<DashMap<String, u64>>,
+    car_owners: Arc<DashMap<u64, String>>,
     car_engine_ids: Arc<DashMap<u64, u64>>,
     car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
     req: GetFrontendSpectatorRequest,
@@ -468,6 +482,7 @@ async fn run_frontend_spectator_stream(
     view_downgrade_reason: ViewDowngradeReason,
     runtime_map_id: String,
     visible_target: Option<EngineCommandTarget>,
+    cleanup_instance_uuid: Option<String>,
     tx: mpsc::Sender<Result<FrontendSpectatorEvent, Status>>,
 ) {
     static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -515,17 +530,15 @@ async fn run_frontend_spectator_stream(
                 .get(&public_car_id)
                 .map(|entry| entry.value().clone())
             else {
-                known_cars.remove(&public_car_id);
-                last_client_seq.remove(&public_car_id);
-                car_engine_ids.remove(&public_car_id);
-                let instance_keys: Vec<String> = instance_cars
-                    .iter()
-                    .filter(|entry| *entry.value() == public_car_id)
-                    .map(|entry| entry.key().clone())
-                    .collect();
-                for instance_uuid in instance_keys {
-                    instance_cars.remove(&instance_uuid);
-                }
+                remove_car_state(
+                    public_car_id,
+                    &known_cars,
+                    &last_client_seq,
+                    &instance_cars,
+                    &car_owners,
+                    &car_engine_ids,
+                    &car_targets,
+                );
                 continue;
             };
             if let Some(ref visible_target) = visible_target {
@@ -537,17 +550,15 @@ async fn run_frontend_spectator_stream(
                 .get(&public_car_id)
                 .map(|entry| *entry.value())
             else {
-                known_cars.remove(&public_car_id);
-                last_client_seq.remove(&public_car_id);
-                car_targets.remove(&public_car_id);
-                let instance_keys: Vec<String> = instance_cars
-                    .iter()
-                    .filter(|entry| *entry.value() == public_car_id)
-                    .map(|entry| entry.key().clone())
-                    .collect();
-                for instance_uuid in instance_keys {
-                    instance_cars.remove(&instance_uuid);
-                }
+                remove_car_state(
+                    public_car_id,
+                    &known_cars,
+                    &last_client_seq,
+                    &instance_cars,
+                    &car_owners,
+                    &car_engine_ids,
+                    &car_targets,
+                );
                 continue;
             };
 
@@ -560,18 +571,15 @@ async fn run_frontend_spectator_stream(
                         error = %err,
                         "failed to read car state for spectator snapshot"
                     );
-                    known_cars.remove(&public_car_id);
-                    last_client_seq.remove(&public_car_id);
-                    car_engine_ids.remove(&public_car_id);
-                    car_targets.remove(&public_car_id);
-                    let instance_keys: Vec<String> = instance_cars
-                        .iter()
-                        .filter(|entry| *entry.value() == public_car_id)
-                        .map(|entry| entry.key().clone())
-                        .collect();
-                    for instance_uuid in instance_keys {
-                        instance_cars.remove(&instance_uuid);
-                    }
+                    remove_car_state(
+                        public_car_id,
+                        &known_cars,
+                        &last_client_seq,
+                        &instance_cars,
+                        &car_owners,
+                        &car_engine_ids,
+                        &car_targets,
+                    );
                 }
             }
         }
@@ -594,8 +602,11 @@ async fn run_frontend_spectator_stream(
                     &known_cars,
                     &last_client_seq,
                     &instance_cars,
+                    &car_owners,
                     &car_engine_ids,
                     &car_targets,
+                    visible_target.as_ref(),
+                    cleanup_instance_uuid.as_deref(),
                 )
                 .await;
                 break;
@@ -608,8 +619,11 @@ async fn run_frontend_spectator_stream(
                     &known_cars,
                     &last_client_seq,
                     &instance_cars,
+                    &car_owners,
                     &car_engine_ids,
                     &car_targets,
+                    visible_target.as_ref(),
+                    cleanup_instance_uuid.as_deref(),
                 )
                 .await;
                 break;
@@ -629,82 +643,149 @@ fn current_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn remove_instance_mapping_for_car(
+    public_car_id: u64,
+    instance_cars: &DashMap<String, u64>,
+    car_owners: &DashMap<u64, String>,
+) {
+    let Some((_, owner_instance_uuid)) = car_owners.remove(&public_car_id) else {
+        return;
+    };
+
+    let should_remove_instance = instance_cars
+        .get(&owner_instance_uuid)
+        .map(|entry| *entry.value() == public_car_id)
+        .unwrap_or(false);
+    if should_remove_instance {
+        instance_cars.remove(&owner_instance_uuid);
+    }
+}
+
+fn remove_car_state(
+    public_car_id: u64,
+    known_cars: &DashMap<u64, ()>,
+    last_client_seq: &DashMap<u64, u64>,
+    instance_cars: &DashMap<String, u64>,
+    car_owners: &DashMap<u64, String>,
+    car_engine_ids: &DashMap<u64, u64>,
+    car_targets: &DashMap<u64, EngineCommandTarget>,
+) {
+    known_cars.remove(&public_car_id);
+    last_client_seq.remove(&public_car_id);
+    car_engine_ids.remove(&public_car_id);
+    car_targets.remove(&public_car_id);
+    remove_instance_mapping_for_car(public_car_id, instance_cars, car_owners);
+}
+
 async fn cleanup_frontend_cars(
     reason: &'static str,
     engine: &EngineClient,
     known_cars: &DashMap<u64, ()>,
     last_client_seq: &DashMap<u64, u64>,
     instance_cars: &DashMap<String, u64>,
+    car_owners: &DashMap<u64, String>,
     car_engine_ids: &DashMap<u64, u64>,
     car_targets: &DashMap<u64, EngineCommandTarget>,
+    cleanup_target: Option<&EngineCommandTarget>,
+    owner_instance_uuid: Option<&str>,
 ) {
-    let public_car_ids: Vec<u64> = known_cars.iter().map(|entry| *entry.key()).collect();
+    let public_car_id = resolve_owned_cleanup_car(
+        owner_instance_uuid,
+        cleanup_target,
+        instance_cars,
+        car_owners,
+        car_targets,
+    );
     tracing::info!(
         reason,
-        car_count = public_car_ids.len(),
-        "frontend cleanup: despawning cars"
+        car_count = usize::from(public_car_id.is_some()),
+        owner_instance_uuid = ?owner_instance_uuid,
+        cleanup_target = ?cleanup_target,
+        "frontend cleanup: despawning owned cars"
     );
-    for public_car_id in public_car_ids {
-        let Some(target) = car_targets
-            .get(&public_car_id)
-            .map(|entry| entry.value().clone())
-        else {
-            known_cars.remove(&public_car_id);
-            last_client_seq.remove(&public_car_id);
-            car_engine_ids.remove(&public_car_id);
-            let instance_keys: Vec<String> = instance_cars
-                .iter()
-                .filter(|entry| *entry.value() == public_car_id)
-                .map(|entry| entry.key().clone())
-                .collect();
-            for instance_uuid in instance_keys {
-                instance_cars.remove(&instance_uuid);
-            }
-            continue;
-        };
-        let Some(engine_car_id) = car_engine_ids
-            .get(&public_car_id)
-            .map(|entry| *entry.value())
-        else {
-            known_cars.remove(&public_car_id);
-            last_client_seq.remove(&public_car_id);
-            car_targets.remove(&public_car_id);
-            let instance_keys: Vec<String> = instance_cars
-                .iter()
-                .filter(|entry| *entry.value() == public_car_id)
-                .map(|entry| entry.key().clone())
-                .collect();
-            for instance_uuid in instance_keys {
-                instance_cars.remove(&instance_uuid);
-            }
-            continue;
-        };
+    let Some(public_car_id) = public_car_id else {
+        return;
+    };
 
-        if let Err(err) = engine.despawn_car_in(target, engine_car_id).await {
-            tracing::warn!(
-                public_car_id,
-                engine_car_id,
-                error = %err,
-                "failed to despawn car during frontend cleanup"
-            );
-        }
-        known_cars.remove(&public_car_id);
-        last_client_seq.remove(&public_car_id);
-        car_engine_ids.remove(&public_car_id);
-        car_targets.remove(&public_car_id);
-        let instance_keys: Vec<String> = instance_cars
-            .iter()
-            .filter(|entry| *entry.value() == public_car_id)
-            .map(|entry| entry.key().clone())
-            .collect();
-        for instance_uuid in instance_keys {
-            instance_cars.remove(&instance_uuid);
-        }
-        tracing::info!(
+    let Some(target) = car_targets
+        .get(&public_car_id)
+        .map(|entry| entry.value().clone())
+    else {
+        remove_car_state(
+            public_car_id,
+            known_cars,
+            last_client_seq,
+            instance_cars,
+            car_owners,
+            car_engine_ids,
+            car_targets,
+        );
+        return;
+    };
+    let Some(engine_car_id) = car_engine_ids
+        .get(&public_car_id)
+        .map(|entry| *entry.value())
+    else {
+        remove_car_state(
+            public_car_id,
+            known_cars,
+            last_client_seq,
+            instance_cars,
+            car_owners,
+            car_engine_ids,
+            car_targets,
+        );
+        return;
+    };
+
+    if let Err(err) = engine.despawn_car_in(target, engine_car_id).await {
+        tracing::warn!(
             public_car_id,
             engine_car_id,
-            reason,
-            "frontend cleanup: car removed"
+            error = %err,
+            "failed to despawn car during frontend cleanup"
         );
     }
+    remove_car_state(
+        public_car_id,
+        known_cars,
+        last_client_seq,
+        instance_cars,
+        car_owners,
+        car_engine_ids,
+        car_targets,
+    );
+    tracing::info!(
+        public_car_id,
+        engine_car_id,
+        reason,
+        "frontend cleanup: car removed"
+    );
+}
+
+fn resolve_owned_cleanup_car(
+    owner_instance_uuid: Option<&str>,
+    cleanup_target: Option<&EngineCommandTarget>,
+    instance_cars: &DashMap<String, u64>,
+    car_owners: &DashMap<u64, String>,
+    car_targets: &DashMap<u64, EngineCommandTarget>,
+) -> Option<u64> {
+    let owner_instance_uuid = owner_instance_uuid?;
+
+    if let Some(target) = cleanup_target {
+        if let Some(public_car_id) = car_owners.iter().find_map(|entry| {
+            if entry.value().as_str() != owner_instance_uuid {
+                return None;
+            }
+            car_targets
+                .get(entry.key())
+                .and_then(|car_target| (car_target.value() == target).then_some(*entry.key()))
+        }) {
+            return Some(public_car_id);
+        }
+    }
+
+    instance_cars
+        .get(owner_instance_uuid)
+        .map(|entry| *entry.value())
 }
