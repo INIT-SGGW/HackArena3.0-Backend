@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE sandbox_configs\n        SET sandbox_name = $2,\n            map_id = $3,\n            time_of_day_preset = $4,\n            ghost_mode_enabled = $5,\n            ghost_enter_speed_max_mps = $6,\n            ghost_exit_speed_min_mps = $7,\n            ghost_enter_delay_ms = $8,\n            ghost_exit_delay_ms = $9,\n            ghost_until_completed_laps = $10,\n            ghost_vehicle_overlap_exit_delay_ms = $11\n        WHERE sandbox_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        {
+          "Custom": {
+            "name": "time_of_day_preset",
+            "kind": {
+              "Enum": [
+                "morning",
+                "noon",
+                "evening",
+                "night"
+              ]
+            }
+          }
+        },
+        "Bool",
+        "Float4",
+        "Float4",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d87080d34cb8bca7e93a29433e521d10bc68000bd27aeba7aa27660541bb8368"
+}

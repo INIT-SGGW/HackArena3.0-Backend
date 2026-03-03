@@ -551,8 +551,7 @@ fn map_repo_error_to_status(err: SandboxConfigRepoError) -> Status {
         }
         SandboxConfigRepoError::AlreadyExists { .. } => Status::already_exists(err.to_string()),
         SandboxConfigRepoError::NotFound { .. } => Status::not_found(err.to_string()),
-        SandboxConfigRepoError::InvalidTimeOfDayPreset
-        | SandboxConfigRepoError::InvalidGhostConditionLogic => {
+        SandboxConfigRepoError::InvalidTimeOfDayPreset => {
             Status::invalid_argument(err.to_string())
         }
         SandboxConfigRepoError::Sqlx(_)

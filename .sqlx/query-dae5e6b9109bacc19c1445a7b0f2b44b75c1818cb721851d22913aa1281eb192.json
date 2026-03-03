@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            sandbox_id,\n            sandbox_name,\n            map_id,\n            time_of_day_preset AS \"time_of_day_preset: DbTimeOfDayPreset\",\n            ghost_mode_enabled,\n            ghost_max_speed_enter_mps,\n            ghost_max_speed_exit_mps,\n            ghost_enter_delay_ms,\n            ghost_exit_delay_ms,\n            ghost_min_completed_laps,\n            ghost_condition_logic AS \"ghost_condition_logic: DbGhostModeConditionLogic\",\n            ghost_overlap_exit_delay_ms\n        FROM sandbox_configs\n        ORDER BY sandbox_id ASC\n        ",
+  "query": "\n        SELECT\n            sandbox_id,\n            sandbox_name,\n            map_id,\n            time_of_day_preset AS \"time_of_day_preset: DbTimeOfDayPreset\",\n            ghost_mode_enabled,\n            ghost_enter_speed_max_mps,\n            ghost_exit_speed_min_mps,\n            ghost_enter_delay_ms,\n            ghost_exit_delay_ms,\n            ghost_until_completed_laps,\n            ghost_vehicle_overlap_exit_delay_ms\n        FROM sandbox_configs\n        ORDER BY sandbox_id ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -42,12 +42,12 @@
       },
       {
         "ordinal": 5,
-        "name": "ghost_max_speed_enter_mps",
+        "name": "ghost_enter_speed_max_mps",
         "type_info": "Float4"
       },
       {
         "ordinal": 6,
-        "name": "ghost_max_speed_exit_mps",
+        "name": "ghost_exit_speed_min_mps",
         "type_info": "Float4"
       },
       {
@@ -62,27 +62,12 @@
       },
       {
         "ordinal": 9,
-        "name": "ghost_min_completed_laps",
+        "name": "ghost_until_completed_laps",
         "type_info": "Int8"
       },
       {
         "ordinal": 10,
-        "name": "ghost_condition_logic: DbGhostModeConditionLogic",
-        "type_info": {
-          "Custom": {
-            "name": "ghost_mode_condition_logic",
-            "kind": {
-              "Enum": [
-                "and",
-                "or"
-              ]
-            }
-          }
-        }
-      },
-      {
-        "ordinal": 11,
-        "name": "ghost_overlap_exit_delay_ms",
+        "name": "ghost_vehicle_overlap_exit_delay_ms",
         "type_info": "Int8"
       }
     ],
@@ -100,9 +85,8 @@
       true,
       true,
       true,
-      true,
       true
     ]
   },
-  "hash": "a44613ce5916704b5b3e9acd45683cf95b43df48b2d216f0c5f8c22a860524d6"
+  "hash": "dae5e6b9109bacc19c1445a7b0f2b44b75c1818cb721851d22913aa1281eb192"
 }

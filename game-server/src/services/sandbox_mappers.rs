@@ -6,7 +6,7 @@ use boink::model::{
 };
 use prost_types::Timestamp;
 use proto::race::v1::{
-    AdminPendingSandboxOperation, AdminSandboxRuntimeInfo, GhostModeConditionLogic,
+    AdminPendingSandboxOperation, AdminSandboxRuntimeInfo,
     GhostModeSettings as ProtoGhostModeSettings, PublicSandboxRuntimeInfo, RuntimeTimeOfDayPreset,
     SandboxConfig as ProtoSandboxConfig, SandboxConfigInput as ProtoSandboxConfigInput,
 };
@@ -70,51 +70,41 @@ pub fn sandbox_input_to_proto(input: SandboxConfigInputRecord) -> ProtoSandboxCo
 fn ghost_mode_from_proto(
     proto: &ProtoGhostModeSettings,
 ) -> Result<GhostModeSettingsRecord, Status> {
-    let condition_logic = GhostModeConditionLogic::try_from(proto.condition_logic)
-        .map_err(|_| Status::invalid_argument("invalid ghost_mode.condition_logic"))?;
-    if matches!(condition_logic, GhostModeConditionLogic::Unspecified) {
+    if !proto.enter_speed_max_mps.is_finite() || proto.enter_speed_max_mps < 0.0 {
         return Err(Status::invalid_argument(
-            "ghost_mode.condition_logic must be specified",
+            "ghost_mode.enter_speed_max_mps must be finite and >= 0",
         ));
     }
-
-    if !proto.max_speed_enter_mps.is_finite() || proto.max_speed_enter_mps < 0.0 {
+    if !proto.exit_speed_min_mps.is_finite() || proto.exit_speed_min_mps < 0.0 {
         return Err(Status::invalid_argument(
-            "ghost_mode.max_speed_enter_mps must be finite and >= 0",
+            "ghost_mode.exit_speed_min_mps must be finite and >= 0",
         ));
     }
-    if !proto.min_speed_exit_mps.is_finite() || proto.min_speed_exit_mps < 0.0 {
+    if proto.enter_speed_max_mps > proto.exit_speed_min_mps {
         return Err(Status::invalid_argument(
-            "ghost_mode.min_speed_exit_mps must be finite and >= 0",
-        ));
-    }
-    if proto.max_speed_enter_mps > proto.min_speed_exit_mps {
-        return Err(Status::invalid_argument(
-            "ghost_mode.max_speed_enter_mps must be <= ghost_mode.min_speed_exit_mps",
+            "ghost_mode.enter_speed_max_mps must be <= ghost_mode.exit_speed_min_mps",
         ));
     }
     Ok(GhostModeSettingsRecord {
         enabled: proto.enabled,
-        max_speed_enter_mps: proto.max_speed_enter_mps,
-        max_speed_exit_mps: proto.min_speed_exit_mps,
+        enter_speed_max_mps: proto.enter_speed_max_mps,
+        exit_speed_min_mps: proto.exit_speed_min_mps,
         enter_delay_ms: proto.enter_delay_ms,
         exit_delay_ms: proto.exit_delay_ms,
-        min_completed_laps: proto.min_completed_laps,
-        condition_logic,
-        overlap_exit_delay_ms: proto.overlap_exit_delay_ms,
+        until_completed_laps: proto.until_completed_laps,
+        vehicle_overlap_exit_delay_ms: proto.vehicle_overlap_exit_delay_ms,
     })
 }
 
 fn ghost_mode_to_proto(record: GhostModeSettingsRecord) -> ProtoGhostModeSettings {
     ProtoGhostModeSettings {
         enabled: record.enabled,
-        max_speed_enter_mps: record.max_speed_enter_mps,
-        min_speed_exit_mps: record.max_speed_exit_mps,
+        enter_speed_max_mps: record.enter_speed_max_mps,
+        exit_speed_min_mps: record.exit_speed_min_mps,
         enter_delay_ms: record.enter_delay_ms,
         exit_delay_ms: record.exit_delay_ms,
-        min_completed_laps: record.min_completed_laps,
-        condition_logic: record.condition_logic as i32,
-        overlap_exit_delay_ms: record.overlap_exit_delay_ms,
+        until_completed_laps: record.until_completed_laps,
+        vehicle_overlap_exit_delay_ms: record.vehicle_overlap_exit_delay_ms,
     }
 }
 
@@ -196,7 +186,7 @@ pub fn default_engine_ghost_mode_settings() -> EngineGhostModeSettings {
         enter_delay_ms: 0,
         exit_delay_ms: 0,
         min_completed_laps: 0,
-        condition_logic: EngineGhostModeConditionLogic::Unspecified,
+        condition_logic: EngineGhostModeConditionLogic::Or,
         overlap_exit_delay_ms: 0,
     }
 }
@@ -211,23 +201,13 @@ pub fn engine_ghost_mode_settings_from_record(
 
     EngineGhostModeSettings {
         enabled: record.enabled,
-        min_speed_enter_mps: record.max_speed_enter_mps,
-        min_speed_exit_mps: record.max_speed_exit_mps,
+        min_speed_enter_mps: record.enter_speed_max_mps,
+        min_speed_exit_mps: record.exit_speed_min_mps,
         enter_delay_ms: record.enter_delay_ms,
         exit_delay_ms: record.exit_delay_ms,
-        min_completed_laps: record.min_completed_laps,
-        condition_logic: proto_condition_logic_to_engine(record.condition_logic),
-        overlap_exit_delay_ms: record.overlap_exit_delay_ms,
-    }
-}
-
-fn proto_condition_logic_to_engine(
-    value: GhostModeConditionLogic,
-) -> EngineGhostModeConditionLogic {
-    match value {
-        GhostModeConditionLogic::And => EngineGhostModeConditionLogic::And,
-        GhostModeConditionLogic::Or => EngineGhostModeConditionLogic::Or,
-        GhostModeConditionLogic::Unspecified => EngineGhostModeConditionLogic::Unspecified,
+        min_completed_laps: record.until_completed_laps,
+        condition_logic: EngineGhostModeConditionLogic::Or,
+        overlap_exit_delay_ms: record.vehicle_overlap_exit_delay_ms,
     }
 }
 

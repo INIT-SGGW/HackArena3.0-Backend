@@ -1,6 +1,6 @@
 //! Sandbox config repository for persisted admin configuration.
 
-use proto::race::v1::{GhostModeConditionLogic, RuntimeTimeOfDayPreset};
+use proto::race::v1::RuntimeTimeOfDayPreset;
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
 
@@ -8,13 +8,12 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq)]
 pub struct GhostModeSettingsRecord {
     pub enabled: bool,
-    pub max_speed_enter_mps: f32,
-    pub max_speed_exit_mps: f32,
+    pub enter_speed_max_mps: f32,
+    pub exit_speed_min_mps: f32,
     pub enter_delay_ms: u32,
     pub exit_delay_ms: u32,
-    pub min_completed_laps: u32,
-    pub condition_logic: GhostModeConditionLogic,
-    pub overlap_exit_delay_ms: u32,
+    pub until_completed_laps: u32,
+    pub vehicle_overlap_exit_delay_ms: u32,
 }
 
 /// Persisted sandbox config input fields.
@@ -55,8 +54,6 @@ pub enum SandboxConfigRepoError {
     NotFound { sandbox_id: String },
     #[error("time_of_day_preset must be specified")]
     InvalidTimeOfDayPreset,
-    #[error("ghost_mode.condition_logic must be specified")]
-    InvalidGhostConditionLogic,
     #[error("persisted ghost mode data is partial for sandbox: {sandbox_id}")]
     PartialGhostData { sandbox_id: String },
     #[error("persisted numeric value is out of range for sandbox: {sandbox_id}")]
@@ -96,36 +93,6 @@ impl TryFrom<RuntimeTimeOfDayPreset> for DbTimeOfDayPreset {
             RuntimeTimeOfDayPreset::Night => Ok(DbTimeOfDayPreset::Night),
             RuntimeTimeOfDayPreset::Unspecified => {
                 Err(SandboxConfigRepoError::InvalidTimeOfDayPreset)
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
-#[sqlx(type_name = "ghost_mode_condition_logic", rename_all = "snake_case")]
-enum DbGhostModeConditionLogic {
-    And,
-    Or,
-}
-
-impl From<DbGhostModeConditionLogic> for GhostModeConditionLogic {
-    fn from(value: DbGhostModeConditionLogic) -> Self {
-        match value {
-            DbGhostModeConditionLogic::And => GhostModeConditionLogic::And,
-            DbGhostModeConditionLogic::Or => GhostModeConditionLogic::Or,
-        }
-    }
-}
-
-impl TryFrom<GhostModeConditionLogic> for DbGhostModeConditionLogic {
-    type Error = SandboxConfigRepoError;
-
-    fn try_from(value: GhostModeConditionLogic) -> Result<Self, Self::Error> {
-        match value {
-            GhostModeConditionLogic::And => Ok(DbGhostModeConditionLogic::And),
-            GhostModeConditionLogic::Or => Ok(DbGhostModeConditionLogic::Or),
-            GhostModeConditionLogic::Unspecified => {
-                Err(SandboxConfigRepoError::InvalidGhostConditionLogic)
             }
         }
     }
@@ -319,15 +286,14 @@ async fn insert_config(
             map_id,
             time_of_day_preset,
             ghost_mode_enabled,
-            ghost_max_speed_enter_mps,
-            ghost_max_speed_exit_mps,
+            ghost_enter_speed_max_mps,
+            ghost_exit_speed_min_mps,
             ghost_enter_delay_ms,
             ghost_exit_delay_ms,
-            ghost_min_completed_laps,
-            ghost_condition_logic,
-            ghost_overlap_exit_delay_ms
+            ghost_until_completed_laps,
+            ghost_vehicle_overlap_exit_delay_ms
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
         )
         "#,
         sandbox.sandbox_id,
@@ -335,13 +301,12 @@ async fn insert_config(
         sandbox.config.map_id,
         time_of_day_preset as _,
         ghost.enabled,
-        ghost.max_speed_enter_mps,
-        ghost.max_speed_exit_mps,
+        ghost.enter_speed_max_mps,
+        ghost.exit_speed_min_mps,
         ghost.enter_delay_ms,
         ghost.exit_delay_ms,
-        ghost.min_completed_laps,
-        ghost.condition_logic as _,
-        ghost.overlap_exit_delay_ms,
+        ghost.until_completed_laps,
+        ghost.vehicle_overlap_exit_delay_ms,
     )
     .execute(&mut **tx)
     .await?;
@@ -363,13 +328,12 @@ async fn replace_config(
             map_id = $3,
             time_of_day_preset = $4,
             ghost_mode_enabled = $5,
-            ghost_max_speed_enter_mps = $6,
-            ghost_max_speed_exit_mps = $7,
+            ghost_enter_speed_max_mps = $6,
+            ghost_exit_speed_min_mps = $7,
             ghost_enter_delay_ms = $8,
             ghost_exit_delay_ms = $9,
-            ghost_min_completed_laps = $10,
-            ghost_condition_logic = $11,
-            ghost_overlap_exit_delay_ms = $12
+            ghost_until_completed_laps = $10,
+            ghost_vehicle_overlap_exit_delay_ms = $11
         WHERE sandbox_id = $1
         "#,
         sandbox.sandbox_id,
@@ -377,13 +341,12 @@ async fn replace_config(
         sandbox.config.map_id,
         time_of_day_preset as _,
         ghost.enabled,
-        ghost.max_speed_enter_mps,
-        ghost.max_speed_exit_mps,
+        ghost.enter_speed_max_mps,
+        ghost.exit_speed_min_mps,
         ghost.enter_delay_ms,
         ghost.exit_delay_ms,
-        ghost.min_completed_laps,
-        ghost.condition_logic as _,
-        ghost.overlap_exit_delay_ms,
+        ghost.until_completed_laps,
+        ghost.vehicle_overlap_exit_delay_ms,
     )
     .execute(&mut **tx)
     .await?;
@@ -402,13 +365,12 @@ async fn read_configs(
             map_id,
             time_of_day_preset AS "time_of_day_preset: DbTimeOfDayPreset",
             ghost_mode_enabled,
-            ghost_max_speed_enter_mps,
-            ghost_max_speed_exit_mps,
+            ghost_enter_speed_max_mps,
+            ghost_exit_speed_min_mps,
             ghost_enter_delay_ms,
             ghost_exit_delay_ms,
-            ghost_min_completed_laps,
-            ghost_condition_logic AS "ghost_condition_logic: DbGhostModeConditionLogic",
-            ghost_overlap_exit_delay_ms
+            ghost_until_completed_laps,
+            ghost_vehicle_overlap_exit_delay_ms
         FROM sandbox_configs
         ORDER BY sandbox_id ASC
         "#,
@@ -422,13 +384,12 @@ async fn read_configs(
         let ghost_mode = decode_ghost_mode(
             &sandbox_id,
             row.ghost_mode_enabled,
-            row.ghost_max_speed_enter_mps,
-            row.ghost_max_speed_exit_mps,
+            row.ghost_enter_speed_max_mps,
+            row.ghost_exit_speed_min_mps,
             row.ghost_enter_delay_ms,
             row.ghost_exit_delay_ms,
-            row.ghost_min_completed_laps,
-            row.ghost_condition_logic,
-            row.ghost_overlap_exit_delay_ms,
+            row.ghost_until_completed_laps,
+            row.ghost_vehicle_overlap_exit_delay_ms,
         )?;
 
         sandboxes.push(SandboxConfigRecord {
@@ -449,22 +410,20 @@ async fn read_configs(
 fn decode_ghost_mode(
     sandbox_id: &str,
     enabled: Option<bool>,
-    max_speed_enter_mps: Option<f32>,
-    max_speed_exit_mps: Option<f32>,
+    enter_speed_max_mps: Option<f32>,
+    exit_speed_min_mps: Option<f32>,
     enter_delay_ms_raw: Option<i64>,
     exit_delay_ms_raw: Option<i64>,
-    min_completed_laps_raw: Option<i64>,
-    condition_logic: Option<DbGhostModeConditionLogic>,
-    overlap_exit_delay_ms_raw: Option<i64>,
+    until_completed_laps_raw: Option<i64>,
+    vehicle_overlap_exit_delay_ms_raw: Option<i64>,
 ) -> Result<Option<GhostModeSettingsRecord>, SandboxConfigRepoError> {
     let all_none = enabled.is_none()
-        && max_speed_enter_mps.is_none()
-        && max_speed_exit_mps.is_none()
+        && enter_speed_max_mps.is_none()
+        && exit_speed_min_mps.is_none()
         && enter_delay_ms_raw.is_none()
         && exit_delay_ms_raw.is_none()
-        && min_completed_laps_raw.is_none()
-        && condition_logic.is_none()
-        && overlap_exit_delay_ms_raw.is_none();
+        && until_completed_laps_raw.is_none()
+        && vehicle_overlap_exit_delay_ms_raw.is_none();
     if all_none {
         return Ok(None);
     }
@@ -474,12 +433,12 @@ fn decode_ghost_mode(
             sandbox_id: sandbox_id.to_string(),
         });
     };
-    let Some(max_speed_enter_mps) = max_speed_enter_mps else {
+    let Some(enter_speed_max_mps) = enter_speed_max_mps else {
         return Err(SandboxConfigRepoError::PartialGhostData {
             sandbox_id: sandbox_id.to_string(),
         });
     };
-    let Some(max_speed_exit_mps) = max_speed_exit_mps else {
+    let Some(exit_speed_min_mps) = exit_speed_min_mps else {
         return Err(SandboxConfigRepoError::PartialGhostData {
             sandbox_id: sandbox_id.to_string(),
         });
@@ -494,17 +453,12 @@ fn decode_ghost_mode(
             sandbox_id: sandbox_id.to_string(),
         });
     };
-    let Some(min_completed_laps_raw) = min_completed_laps_raw else {
+    let Some(until_completed_laps_raw) = until_completed_laps_raw else {
         return Err(SandboxConfigRepoError::PartialGhostData {
             sandbox_id: sandbox_id.to_string(),
         });
     };
-    let Some(condition_logic) = condition_logic else {
-        return Err(SandboxConfigRepoError::PartialGhostData {
-            sandbox_id: sandbox_id.to_string(),
-        });
-    };
-    let Some(overlap_exit_delay_ms_raw) = overlap_exit_delay_ms_raw else {
+    let Some(vehicle_overlap_exit_delay_ms_raw) = vehicle_overlap_exit_delay_ms_raw else {
         return Err(SandboxConfigRepoError::PartialGhostData {
             sandbox_id: sandbox_id.to_string(),
         });
@@ -520,39 +474,37 @@ fn decode_ghost_mode(
             sandbox_id: sandbox_id.to_string(),
         }
     })?;
-    let min_completed_laps = u32::try_from(min_completed_laps_raw).map_err(|_| {
+    let until_completed_laps = u32::try_from(until_completed_laps_raw).map_err(|_| {
         SandboxConfigRepoError::NumericOutOfRange {
             sandbox_id: sandbox_id.to_string(),
         }
     })?;
-    let overlap_exit_delay_ms = u32::try_from(overlap_exit_delay_ms_raw).map_err(|_| {
-        SandboxConfigRepoError::NumericOutOfRange {
+    let vehicle_overlap_exit_delay_ms = u32::try_from(vehicle_overlap_exit_delay_ms_raw).map_err(
+        |_| SandboxConfigRepoError::NumericOutOfRange {
             sandbox_id: sandbox_id.to_string(),
-        }
-    })?;
+        },
+    )?;
 
     Ok(Some(GhostModeSettingsRecord {
         enabled,
-        max_speed_enter_mps,
-        max_speed_exit_mps,
+        enter_speed_max_mps,
+        exit_speed_min_mps,
         enter_delay_ms,
         exit_delay_ms,
-        min_completed_laps,
-        condition_logic: condition_logic.into(),
-        overlap_exit_delay_ms,
+        until_completed_laps,
+        vehicle_overlap_exit_delay_ms,
     }))
 }
 
 #[derive(Debug, Clone)]
 struct DbGhostModeFields {
     enabled: Option<bool>,
-    max_speed_enter_mps: Option<f32>,
-    max_speed_exit_mps: Option<f32>,
+    enter_speed_max_mps: Option<f32>,
+    exit_speed_min_mps: Option<f32>,
     enter_delay_ms: Option<i64>,
     exit_delay_ms: Option<i64>,
-    min_completed_laps: Option<i64>,
-    condition_logic: Option<DbGhostModeConditionLogic>,
-    overlap_exit_delay_ms: Option<i64>,
+    until_completed_laps: Option<i64>,
+    vehicle_overlap_exit_delay_ms: Option<i64>,
 }
 
 impl DbGhostModeFields {
@@ -562,27 +514,23 @@ impl DbGhostModeFields {
         let Some(record) = record else {
             return Ok(Self {
                 enabled: None,
-                max_speed_enter_mps: None,
-                max_speed_exit_mps: None,
+                enter_speed_max_mps: None,
+                exit_speed_min_mps: None,
                 enter_delay_ms: None,
                 exit_delay_ms: None,
-                min_completed_laps: None,
-                condition_logic: None,
-                overlap_exit_delay_ms: None,
+                until_completed_laps: None,
+                vehicle_overlap_exit_delay_ms: None,
             });
         };
 
-        let condition_logic = DbGhostModeConditionLogic::try_from(record.condition_logic)?;
-
         Ok(Self {
             enabled: Some(record.enabled),
-            max_speed_enter_mps: Some(record.max_speed_enter_mps),
-            max_speed_exit_mps: Some(record.max_speed_exit_mps),
+            enter_speed_max_mps: Some(record.enter_speed_max_mps),
+            exit_speed_min_mps: Some(record.exit_speed_min_mps),
             enter_delay_ms: Some(i64::from(record.enter_delay_ms)),
             exit_delay_ms: Some(i64::from(record.exit_delay_ms)),
-            min_completed_laps: Some(i64::from(record.min_completed_laps)),
-            condition_logic: Some(condition_logic),
-            overlap_exit_delay_ms: Some(i64::from(record.overlap_exit_delay_ms)),
+            until_completed_laps: Some(i64::from(record.until_completed_laps)),
+            vehicle_overlap_exit_delay_ms: Some(i64::from(record.vehicle_overlap_exit_delay_ms)),
         })
     }
 }
