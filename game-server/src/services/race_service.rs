@@ -11,6 +11,7 @@ use proto::race::v1::{
     SetControlsDevRequest, SetControlsRequest, SetControlsResponse, SpectatorView,
     StreamClampReason, StreamSettings, ViewDowngradeReason,
     frontend_spectator_event::Payload as FrontendSpectatorPayload,
+    get_frontend_spectator_request::Target as FrontendSpectatorTarget,
     race_service_server::RaceService,
 };
 use tokio::sync::{Mutex, mpsc};
@@ -227,6 +228,7 @@ impl RaceService for RaceServiceImpl {
 
         let engine = self.engine.clone();
         let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
+        let visible_target = self.resolve_stream_target(&req, &runtime_state)?;
         let simulation_hz = self.simulation_hz;
         let active_streams = self.active_streams.clone();
         let known_cars = self.known_cars.clone();
@@ -249,7 +251,8 @@ impl RaceService for RaceServiceImpl {
             requested_view,
             resolved_view,
             view_downgrade_reason,
-            resolve_runtime_map_id(&runtime_state),
+            resolve_runtime_map_id(&runtime_state, visible_target.as_ref()),
+            visible_target,
             tx,
         ));
 
@@ -293,6 +296,41 @@ impl RaceServiceImpl {
             .map(|entry| *entry.value())
             .ok_or_else(|| Status::not_found("unknown car target"))
     }
+
+    fn resolve_stream_target(
+        &self,
+        req: &GetFrontendSpectatorRequest,
+        runtime_state: &EngineRuntimeState,
+    ) -> Result<Option<EngineCommandTarget>, Status> {
+        if let Some(target) = req.target.as_ref() {
+            return match target {
+                FrontendSpectatorTarget::Sandbox(value) => {
+                    if value.sandbox_id.trim().is_empty() {
+                        return Err(Status::invalid_argument(
+                            "sandbox_id is required for sandbox spectator target",
+                        ));
+                    }
+                    let active = select_quick_join_sandbox(runtime_state, &value.sandbox_id)?;
+                    Ok(Some(EngineCommandTarget::Sandbox {
+                        sandbox_id: active.sandbox_id.clone(),
+                    }))
+                }
+                FrontendSpectatorTarget::OfficialRace(_) => {
+                    if !matches!(
+                        runtime_state.activity_kind,
+                        EngineActivityKind::OfficialRace
+                    ) {
+                        return Err(Status::failed_precondition(
+                            "official race runtime is not active",
+                        ));
+                    }
+                    Ok(Some(EngineCommandTarget::OfficialRace))
+                }
+            };
+        }
+
+        Err(Status::invalid_argument("spectator target must be set"))
+    }
 }
 
 fn resolve_view(
@@ -320,8 +358,23 @@ fn normalize_requested_view(raw: i32) -> SpectatorView {
     }
 }
 
-fn resolve_runtime_map_id(runtime_state: &EngineRuntimeState) -> String {
-    if matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
+fn resolve_runtime_map_id(
+    runtime_state: &EngineRuntimeState,
+    visible_target: Option<&EngineCommandTarget>,
+) -> String {
+    if let Some(EngineCommandTarget::Sandbox { sandbox_id }) = visible_target {
+        if let Some(active) = runtime_state
+            .active_sandboxes
+            .iter()
+            .find(|entry| entry.sandbox_id == *sandbox_id)
+        {
+            return active.map_id.clone();
+        }
+    }
+
+    if matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox)
+        && runtime_state.active_sandboxes.len() == 1
+    {
         if let Some(active) = runtime_state.active_sandboxes.first() {
             return active.map_id.clone();
         }
@@ -414,6 +467,7 @@ async fn run_frontend_spectator_stream(
     resolved_view: SpectatorView,
     view_downgrade_reason: ViewDowngradeReason,
     runtime_map_id: String,
+    visible_target: Option<EngineCommandTarget>,
     tx: mpsc::Sender<Result<FrontendSpectatorEvent, Status>>,
 ) {
     static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -474,6 +528,11 @@ async fn run_frontend_spectator_stream(
                 }
                 continue;
             };
+            if let Some(ref visible_target) = visible_target {
+                if &target != visible_target {
+                    continue;
+                }
+            }
             let Some(engine_car_id) = car_engine_ids
                 .get(&public_car_id)
                 .map(|entry| *entry.value())
