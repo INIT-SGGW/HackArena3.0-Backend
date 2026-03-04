@@ -3,7 +3,8 @@
 use boink::model::{Controls, Gear, TrackData as EngineTrackData, VehicleState};
 use proto::race::v1::{
     CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, FrontendCarFullState,
-    Quaternion, SetControlsRequest, TrackData as ProtoTrackData, Vector3, WheelAngles, WheelSpeeds,
+    ParticipantOpponentState, ParticipantSelfState, Quaternion, SetControlsRequest,
+    TrackData as ProtoTrackData, Vector3, WheelAngles, WheelSpeeds,
 };
 
 /// Convert engine `Vec3` into proto `Vector3`.
@@ -40,7 +41,7 @@ fn wheel_angles_from_state(_state: &VehicleState) -> WheelAngles {
     }
 }
 
-fn kinematics_from_state(state: &VehicleState) -> CarKinematics {
+pub(crate) fn participant_kinematics_from_state(state: &VehicleState) -> CarKinematics {
     CarKinematics {
         position: Some(vec3_to_proto(state.chassis_position)),
         orientation: Some(Quaternion {
@@ -52,7 +53,7 @@ fn kinematics_from_state(state: &VehicleState) -> CarKinematics {
     }
 }
 
-fn participant_state_from_state(
+pub(crate) fn participant_telemetry_from_state(
     state: &VehicleState,
     last_applied_client_seq: u64,
 ) -> CarParticipantState {
@@ -85,12 +86,39 @@ pub(crate) fn frontend_full_state(
 ) -> FrontendCarFullState {
     FrontendCarFullState {
         car_id,
-        kinematics: Some(kinematics_from_state(&state)),
-        telemetry: Some(participant_state_from_state(
+        kinematics: Some(participant_kinematics_from_state(&state)),
+        telemetry: Some(participant_telemetry_from_state(
             &state,
             last_applied_client_seq,
         )),
         render: Some(render_state_from_state(&state)),
+    }
+}
+
+/// Convert engine `VehicleState` into participant self state.
+pub(crate) fn participant_self_state(
+    car_id: u64,
+    state: VehicleState,
+    last_applied_client_seq: u64,
+) -> ParticipantSelfState {
+    ParticipantSelfState {
+        car_id,
+        kinematics: Some(participant_kinematics_from_state(&state)),
+        telemetry: Some(participant_telemetry_from_state(
+            &state,
+            last_applied_client_seq,
+        )),
+    }
+}
+
+/// Convert engine `VehicleState` into participant opponent state.
+pub(crate) fn participant_opponent_state(
+    car_id: u64,
+    state: VehicleState,
+) -> ParticipantOpponentState {
+    ParticipantOpponentState {
+        car_id,
+        kinematics: Some(participant_kinematics_from_state(&state)),
     }
 }
 
