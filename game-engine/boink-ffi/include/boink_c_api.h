@@ -32,7 +32,7 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 7
+#define BOINK_C_API_VERSION_MINOR 8
 
 #define BOINK_C_API_VERSION_PATCH 0
 
@@ -350,17 +350,13 @@ typedef struct BoinkWeather {
  */
 typedef struct BoinkGhostModeSettings {
   /**
-   * Enables or disables ghost mode logic.
+   * Maximum speed threshold to enter ghost mode in meters per second.
    */
-  bool enabled;
+  Real enter_speed_max_mps;
   /**
-   * Minimum speed to enter ghost mode in meters per second.
+   * Minimum speed threshold to exit ghost mode in meters per second.
    */
-  Real min_speed_enter_mps;
-  /**
-   * Minimum speed to stay in ghost mode in meters per second.
-   */
-  Real min_speed_exit_mps;
+  Real exit_speed_min_mps;
   /**
    * Required time above enter threshold before ghost mode is enabled.
    */
@@ -370,17 +366,13 @@ typedef struct BoinkGhostModeSettings {
    */
   unsigned int exit_delay_ms;
   /**
-   * Minimum completed laps required for ghost mode logic.
+   * Ghost mode remains enabled until this many laps are completed.
    */
-  unsigned int min_completed_laps;
-  /**
-   * Entry-condition combine rule for speed and completed-laps checks.
-   */
-  int condition_logic;
+  unsigned int until_completed_laps;
   /**
    * Required time after overlap ends before ghost mode may be disabled.
    */
-  unsigned int overlap_exit_delay_ms;
+  unsigned int vehicle_overlap_exit_delay_ms;
 } BoinkGhostModeSettings;
 
 #ifdef __cplusplus
@@ -745,6 +737,18 @@ BOINK_API int boink_set_weather(BoinkHandle h, const struct BoinkWeather *weathe
  */
 BOINK_API int boink_set_ghost_mode_settings(BoinkHandle h,
                                          const struct BoinkGhostModeSettings *settings);
+
+/**
+ * Disables ghost mode for the race.
+ *
+ * Parameters:
+ * - `h` - handle to a valid race.
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - Another error code for other failures.
+ */
+BOINK_API int boink_disable_ghost_mode(BoinkHandle h);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -10,8 +10,8 @@ use tracing::trace;
 
 use crate::native::error::NativeLoadError;
 use crate::native::loader::{
-    LegacyGetTrackDataFn, LegacySetGhostModeSettingsFn, LegacySetWeatherFn, LegacyStringFn,
-    LegacyVersionFn, load_native_library, resolve_optional,
+    LegacyDisableGhostModeFn, LegacyGetTrackDataFn, LegacySetGhostModeSettingsFn,
+    LegacySetWeatherFn, LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
 };
 
 /// Lazily resolved optional symbols exposed by a potentially old native library.
@@ -22,6 +22,7 @@ pub struct NativeApi {
     get_last_error: Option<LegacyStringFn>,
     set_weather: Option<LegacySetWeatherFn>,
     set_ghost_mode_settings: Option<LegacySetGhostModeSettingsFn>,
+    disable_ghost_mode: Option<LegacyDisableGhostModeFn>,
     get_track_data: Option<LegacyGetTrackDataFn>,
 }
 
@@ -71,6 +72,12 @@ impl NativeApi {
         self.set_ghost_mode_settings
     }
 
+    /// Returns the function pointer for `boink_disable_ghost_mode`, when exported.
+    #[must_use]
+    pub fn boink_disable_ghost_mode(&self) -> Option<LegacyDisableGhostModeFn> {
+        self.disable_ghost_mode
+    }
+
     /// Returns the function pointer for `boink_get_track_data`, when exported.
     #[must_use]
     pub fn boink_get_track_data(&self) -> Option<LegacyGetTrackDataFn> {
@@ -86,16 +93,18 @@ impl NativeApi {
         let get_last_error = resolve_optional(lib, b"boink_get_last_error\0");
         let set_weather = resolve_optional(lib, b"boink_set_weather\0");
         let set_ghost_mode_settings = resolve_optional(lib, b"boink_set_ghost_mode_settings\0");
+        let disable_ghost_mode = resolve_optional(lib, b"boink_disable_ghost_mode\0");
         let get_track_data = resolve_optional(lib, b"boink_get_track_data\0");
 
         trace!(
-            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, track_data={}",
+            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}",
             get_c_api_version.is_some(),
             get_engine_version.is_some(),
             get_engine_profile.is_some(),
             get_last_error.is_some(),
             set_weather.is_some(),
             set_ghost_mode_settings.is_some(),
+            disable_ghost_mode.is_some(),
             get_track_data.is_some()
         );
 
@@ -106,6 +115,7 @@ impl NativeApi {
             get_last_error,
             set_weather,
             set_ghost_mode_settings,
+            disable_ghost_mode,
             get_track_data,
         })
     }

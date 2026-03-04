@@ -1,9 +1,6 @@
 //! Sandbox admin service mapping helpers.
 
-use boink::model::{
-    GhostModeConditionLogic as EngineGhostModeConditionLogic,
-    GhostModeSettings as EngineGhostModeSettings,
-};
+use boink::model::GhostModeSettings as EngineGhostModeSettings;
 use prost_types::Timestamp;
 use proto::race::v1::{
     AdminPendingSandboxOperation, AdminSandboxRuntimeInfo,
@@ -181,13 +178,12 @@ pub fn find_sandbox_by_id(
 pub fn default_engine_ghost_mode_settings() -> EngineGhostModeSettings {
     EngineGhostModeSettings {
         enabled: false,
-        min_speed_enter_mps: 0.0,
-        min_speed_exit_mps: 0.0,
+        enter_speed_max_mps: 0.0,
+        exit_speed_min_mps: 0.0,
         enter_delay_ms: 0,
         exit_delay_ms: 0,
-        min_completed_laps: 0,
-        condition_logic: EngineGhostModeConditionLogic::Or,
-        overlap_exit_delay_ms: 0,
+        until_completed_laps: 0,
+        vehicle_overlap_exit_delay_ms: 0,
     }
 }
 
@@ -201,13 +197,12 @@ pub fn engine_ghost_mode_settings_from_record(
 
     EngineGhostModeSettings {
         enabled: record.enabled,
-        min_speed_enter_mps: record.enter_speed_max_mps,
-        min_speed_exit_mps: record.exit_speed_min_mps,
+        enter_speed_max_mps: record.enter_speed_max_mps,
+        exit_speed_min_mps: record.exit_speed_min_mps,
         enter_delay_ms: record.enter_delay_ms,
         exit_delay_ms: record.exit_delay_ms,
-        min_completed_laps: record.until_completed_laps,
-        condition_logic: EngineGhostModeConditionLogic::Or,
-        overlap_exit_delay_ms: record.vehicle_overlap_exit_delay_ms,
+        until_completed_laps: record.until_completed_laps,
+        vehicle_overlap_exit_delay_ms: record.vehicle_overlap_exit_delay_ms,
     }
 }
 

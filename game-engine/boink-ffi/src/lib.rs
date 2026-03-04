@@ -13,7 +13,7 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 7;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 8;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -115,22 +115,18 @@ pub struct BoinkWeather {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BoinkGhostModeSettings {
-    /// Enables or disables ghost mode logic.
-    pub enabled: bool,
-    /// Minimum speed to enter ghost mode in meters per second.
-    pub min_speed_enter_mps: Real,
-    /// Minimum speed to stay in ghost mode in meters per second.
-    pub min_speed_exit_mps: Real,
+    /// Maximum speed threshold to enter ghost mode in meters per second.
+    pub enter_speed_max_mps: Real,
+    /// Minimum speed threshold to exit ghost mode in meters per second.
+    pub exit_speed_min_mps: Real,
     /// Required time above enter threshold before ghost mode is enabled.
     pub enter_delay_ms: c_uint,
     /// Required time below exit threshold before ghost mode is disabled.
     pub exit_delay_ms: c_uint,
-    /// Minimum completed laps required for ghost mode logic.
-    pub min_completed_laps: c_uint,
-    /// Entry-condition combine rule for speed and completed-laps checks.
-    pub condition_logic: c_int,
+    /// Ghost mode remains enabled until this many laps are completed.
+    pub until_completed_laps: c_uint,
     /// Required time after overlap ends before ghost mode may be disabled.
-    pub overlap_exit_delay_ms: c_uint,
+    pub vehicle_overlap_exit_delay_ms: c_uint,
 }
 
 /// Represents one static centerline sample of a race track.
@@ -566,4 +562,14 @@ unsafe extern "C" {
         h: BoinkHandle,
         settings: *const BoinkGhostModeSettings,
     ) -> c_int;
+
+    /// Disables ghost mode for the race.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - Another error code for other failures.
+    pub fn boink_disable_ghost_mode(h: BoinkHandle) -> c_int;
 }

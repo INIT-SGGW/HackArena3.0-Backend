@@ -376,75 +376,108 @@ impl Engine {
 
     /// Updates global ghost mode settings used by simulation.
     pub fn set_ghost_mode_settings(&mut self, settings: GhostModeSettings) -> Result<()> {
-        let ffi_settings = sys::BoinkGhostModeSettings {
-            enabled: settings.enabled,
-            min_speed_enter_mps: settings.min_speed_enter_mps,
-            min_speed_exit_mps: settings.min_speed_exit_mps,
-            enter_delay_ms: settings.enter_delay_ms,
-            exit_delay_ms: settings.exit_delay_ms,
-            min_completed_laps: settings.min_completed_laps,
-            condition_logic: settings.condition_logic.as_i32(),
-            overlap_exit_delay_ms: settings.overlap_exit_delay_ms,
-        };
-
         #[cfg(feature = "legacy-native-lib")]
         {
             let api = NativeApi::instance()
                 .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_ghost_mode_settings) = api.boink_set_ghost_mode_settings() else {
-                static WARNED_MISSING_SET_GHOST_MODE_SETTINGS: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_SET_GHOST_MODE_SETTINGS.set(()).is_ok() {
+            if settings.enabled {
+                let ffi_settings = sys::BoinkGhostModeSettings {
+                    enter_speed_max_mps: settings.enter_speed_max_mps,
+                    exit_speed_min_mps: settings.exit_speed_min_mps,
+                    enter_delay_ms: settings.enter_delay_ms,
+                    exit_delay_ms: settings.exit_delay_ms,
+                    until_completed_laps: settings.until_completed_laps,
+                    vehicle_overlap_exit_delay_ms: settings.vehicle_overlap_exit_delay_ms,
+                };
+
+                let Some(set_ghost_mode_settings) = api.boink_set_ghost_mode_settings() else {
+                    static WARNED_MISSING_SET_GHOST_MODE_SETTINGS: OnceLock<()> = OnceLock::new();
+                    if WARNED_MISSING_SET_GHOST_MODE_SETTINGS.set(()).is_ok() {
+                        tracing::warn!(
+                            "boink_set_ghost_mode_settings symbol not found in native library; ghost mode settings updates are ignored"
+                        );
+                    }
+                    return Ok(());
+                };
+
+                tracing::debug!(
+                    enter_speed_max_mps = settings.enter_speed_max_mps,
+                    exit_speed_min_mps = settings.exit_speed_min_mps,
+                    enter_delay_ms = settings.enter_delay_ms,
+                    exit_delay_ms = settings.exit_delay_ms,
+                    until_completed_laps = settings.until_completed_laps,
+                    vehicle_overlap_exit_delay_ms = settings.vehicle_overlap_exit_delay_ms,
+                    "boink_set_ghost_mode_settings (legacy dynamic symbol)"
+                );
+                let code =
+                    unsafe { set_ghost_mode_settings(self.handle, &ffi_settings as *const _) };
+                if code == sys::BOINK_OK {
+                    return Ok(());
+                }
+                return Err(Error::from_ffi_status(
+                    code,
+                    "boink_set_ghost_mode_settings",
+                ));
+            }
+
+            let Some(disable_ghost_mode) = api.boink_disable_ghost_mode() else {
+                static WARNED_MISSING_DISABLE_GHOST_MODE: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_DISABLE_GHOST_MODE.set(()).is_ok() {
                     tracing::warn!(
-                        "boink_set_ghost_mode_settings symbol not found in native library; ghost mode settings updates are ignored"
+                        "boink_disable_ghost_mode symbol not found in native library; ghost mode disable request is ignored"
                     );
                 }
                 return Ok(());
             };
 
-            tracing::debug!(
-                enabled = settings.enabled,
-                min_speed_enter_mps = settings.min_speed_enter_mps,
-                min_speed_exit_mps = settings.min_speed_exit_mps,
-                enter_delay_ms = settings.enter_delay_ms,
-                exit_delay_ms = settings.exit_delay_ms,
-                min_completed_laps = settings.min_completed_laps,
-                condition_logic = settings.condition_logic.as_i32(),
-                overlap_exit_delay_ms = settings.overlap_exit_delay_ms,
-                "boink_set_ghost_mode_settings (legacy dynamic symbol)"
-            );
-            let code = unsafe { set_ghost_mode_settings(self.handle, &ffi_settings as *const _) };
+            tracing::debug!("boink_disable_ghost_mode (legacy dynamic symbol)");
+            let code = unsafe { disable_ghost_mode(self.handle) };
             if code == sys::BOINK_OK {
                 return Ok(());
             }
-            return Err(Error::from_ffi_status(
-                code,
-                "boink_set_ghost_mode_settings",
-            ));
+            return Err(Error::from_ffi_status(code, "boink_disable_ghost_mode"));
         }
 
         #[cfg(not(feature = "legacy-native-lib"))]
         {
-            tracing::debug!(
-                enabled = settings.enabled,
-                min_speed_enter_mps = settings.min_speed_enter_mps,
-                min_speed_exit_mps = settings.min_speed_exit_mps,
-                enter_delay_ms = settings.enter_delay_ms,
-                exit_delay_ms = settings.exit_delay_ms,
-                min_completed_laps = settings.min_completed_laps,
-                condition_logic = settings.condition_logic.as_i32(),
-                overlap_exit_delay_ms = settings.overlap_exit_delay_ms,
-                "boink_set_ghost_mode_settings"
-            );
-            let code = unsafe {
-                sys::boink_set_ghost_mode_settings(self.handle, &ffi_settings as *const _)
-            };
-            if code == sys::BOINK_OK {
-                Ok(())
+            if settings.enabled {
+                let ffi_settings = sys::BoinkGhostModeSettings {
+                    enter_speed_max_mps: settings.enter_speed_max_mps,
+                    exit_speed_min_mps: settings.exit_speed_min_mps,
+                    enter_delay_ms: settings.enter_delay_ms,
+                    exit_delay_ms: settings.exit_delay_ms,
+                    until_completed_laps: settings.until_completed_laps,
+                    vehicle_overlap_exit_delay_ms: settings.vehicle_overlap_exit_delay_ms,
+                };
+
+                tracing::debug!(
+                    enter_speed_max_mps = settings.enter_speed_max_mps,
+                    exit_speed_min_mps = settings.exit_speed_min_mps,
+                    enter_delay_ms = settings.enter_delay_ms,
+                    exit_delay_ms = settings.exit_delay_ms,
+                    until_completed_laps = settings.until_completed_laps,
+                    vehicle_overlap_exit_delay_ms = settings.vehicle_overlap_exit_delay_ms,
+                    "boink_set_ghost_mode_settings"
+                );
+                let code = unsafe {
+                    sys::boink_set_ghost_mode_settings(self.handle, &ffi_settings as *const _)
+                };
+                if code == sys::BOINK_OK {
+                    Ok(())
+                } else {
+                    Err(Error::from_ffi_status(
+                        code,
+                        "boink_set_ghost_mode_settings",
+                    ))
+                }
             } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_set_ghost_mode_settings",
-                ))
+                tracing::debug!("boink_disable_ghost_mode");
+                let code = unsafe { sys::boink_disable_ghost_mode(self.handle) };
+                if code == sys::BOINK_OK {
+                    Ok(())
+                } else {
+                    Err(Error::from_ffi_status(code, "boink_disable_ghost_mode"))
+                }
             }
         }
     }

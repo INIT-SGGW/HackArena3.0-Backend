@@ -20,6 +20,8 @@ pub type LegacySetWeatherFn =
 /// Legacy counterpart of ghost-mode-setting function.
 pub type LegacySetGhostModeSettingsFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, *const boink_sys::BoinkGhostModeSettings) -> i32;
+/// Legacy counterpart of ghost-mode-disable function.
+pub type LegacyDisableGhostModeFn = unsafe extern "C" fn(boink_sys::BoinkHandle) -> i32;
 /// Legacy counterpart of track-data query function.
 pub type LegacyGetTrackDataFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, *mut boink_sys::BoinkTrackData) -> i32;

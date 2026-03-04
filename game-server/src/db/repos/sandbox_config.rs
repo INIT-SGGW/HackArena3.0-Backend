@@ -479,11 +479,12 @@ fn decode_ghost_mode(
             sandbox_id: sandbox_id.to_string(),
         }
     })?;
-    let vehicle_overlap_exit_delay_ms = u32::try_from(vehicle_overlap_exit_delay_ms_raw).map_err(
-        |_| SandboxConfigRepoError::NumericOutOfRange {
-            sandbox_id: sandbox_id.to_string(),
-        },
-    )?;
+    let vehicle_overlap_exit_delay_ms =
+        u32::try_from(vehicle_overlap_exit_delay_ms_raw).map_err(|_| {
+            SandboxConfigRepoError::NumericOutOfRange {
+                sandbox_id: sandbox_id.to_string(),
+            }
+        })?;
 
     Ok(Some(GhostModeSettingsRecord {
         enabled,

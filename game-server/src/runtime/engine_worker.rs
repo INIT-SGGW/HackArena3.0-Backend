@@ -16,7 +16,7 @@ use std::time::Instant;
 use boink::engine::{Engine, EngineBuilder, VehicleMesh, VehicleModelConfig};
 use boink::error::Error as BoinkError;
 use boink::model::control::Controls;
-use boink::model::ghost::{GhostModeConditionLogic, GhostModeSettings};
+use boink::model::ghost::GhostModeSettings;
 use boink::model::math::Vec3;
 use boink::model::state::VehicleState;
 use boink::model::track::TrackData;
@@ -36,13 +36,12 @@ const COMMAND_QUEUE_CAPACITY: usize = 256;
 const DEFAULT_MAP_ID: &str = "test";
 const DEFAULT_GHOST_MODE_SETTINGS: GhostModeSettings = GhostModeSettings {
     enabled: false,
-    min_speed_enter_mps: 0.0,
-    min_speed_exit_mps: 0.0,
+    enter_speed_max_mps: 0.0,
+    exit_speed_min_mps: 0.0,
     enter_delay_ms: 0,
     exit_delay_ms: 0,
-    min_completed_laps: 0,
-    condition_logic: GhostModeConditionLogic::Unspecified,
-    overlap_exit_delay_ms: 0,
+    until_completed_laps: 0,
+    vehicle_overlap_exit_delay_ms: 0,
 };
 
 /// Backend runtime activity kind reflected by engine worker state.

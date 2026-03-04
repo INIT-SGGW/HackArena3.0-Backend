@@ -10,7 +10,7 @@ pub mod track;
 pub mod weather;
 
 pub use control::Controls;
-pub use ghost::{GhostModeConditionLogic, GhostModeSettings};
+pub use ghost::GhostModeSettings;
 pub use math::{Quaternion, Vec3};
 pub use state::{Gear, VehicleState};
 pub use track::{CenterlineSample, TrackData};
