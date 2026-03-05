@@ -79,10 +79,19 @@ impl TrackData {
             ));
         }
 
-        let map_id = unsafe { CStr::from_ptr(raw.map_id) }
-            .to_str()
-            .map_err(|err| Error::Internal(format!("boink_get_track_data invalid map_id: {err}")))?
-            .to_string();
+        let map_id_cstr = unsafe { CStr::from_ptr(raw.map_id) };
+        let map_id_bytes = map_id_cstr.to_bytes();
+        let map_id = match std::str::from_utf8(map_id_bytes) {
+            Ok(value) => value.to_string(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    byte_len = map_id_bytes.len(),
+                    "boink_get_track_data returned non-UTF8 map_id; using lossy decode"
+                );
+                String::from_utf8_lossy(map_id_bytes).into_owned()
+            }
+        };
 
         let centerline_samples = if count == 0 {
             Vec::new()
