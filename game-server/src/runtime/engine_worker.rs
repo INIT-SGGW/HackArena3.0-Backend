@@ -517,11 +517,7 @@ pub async fn spawn(
         pending_sandbox_activations: Vec::new(),
     };
     let sandbox_engines: HashMap<String, SandboxEngineHandle> = HashMap::new();
-    let mut engine = build_engine(&cfg, &runtime_state.map_id)?;
-    let ghost_mode_settings = DEFAULT_GHOST_MODE_SETTINGS;
-    engine
-        .set_ghost_mode_settings(ghost_mode_settings)
-        .map_err(EngineWorkerError::Engine)?;
+    let official_engine: Option<EngineWorldSlot> = None;
 
     tracing::info!("engine worker: startup runtime is idle");
 
@@ -529,14 +525,13 @@ pub async fn spawn(
     let run_cfg = Arc::clone(&cfg);
     let handle = tokio::task::spawn_local(async move {
         run_worker(
-            engine,
+            official_engine,
             &mut rx,
             &mut shutdown_rx,
             simulation_dt_seconds,
             weather_sync,
             run_cfg,
             runtime_state,
-            ghost_mode_settings,
             sandbox_engines,
         )
         .await;
@@ -546,20 +541,15 @@ pub async fn spawn(
 }
 
 async fn run_worker(
-    official_engine: Engine,
+    mut official_engine: Option<EngineWorldSlot>,
     rx: &mut mpsc::Receiver<EngineCommand>,
     shutdown_rx: &mut broadcast::Receiver<()>,
     simulation_dt_seconds: f32,
     weather_sync: WeatherSyncState,
     cfg: Arc<Config>,
     mut runtime_state: EngineRuntimeState,
-    official_ghost_mode_settings: GhostModeSettings,
     mut sandbox_engines: HashMap<String, SandboxEngineHandle>,
 ) {
-    let mut official_engine = EngineWorldSlot {
-        engine: official_engine,
-        ghost_mode_settings: official_ghost_mode_settings,
-    };
     let mut ticker =
         tokio::time::interval(tokio::time::Duration::from_secs_f32(simulation_dt_seconds));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -576,10 +566,12 @@ async fn run_worker(
             runtime_state.activity_kind,
             EngineActivityKind::OfficialRace
         ) {
-            if let Err(err) =
-                apply_weather_from_schedule(&mut official_engine.engine, &weather_sync).await
-            {
-                tracing::warn!(error = %err, "initial weather apply failed");
+            if let Some(official_slot) = official_engine.as_mut() {
+                if let Err(err) =
+                    apply_weather_from_schedule(&mut official_slot.engine, &weather_sync).await
+                {
+                    tracing::warn!(error = %err, "initial weather apply failed");
+                }
             }
         }
         weather_tick
@@ -598,12 +590,16 @@ async fn run_worker(
 
                 match runtime_state.activity_kind {
                     EngineActivityKind::OfficialRace => {
-                        if let Err(err) = official_engine.engine.step(simulation_dt_seconds) {
-                            tracing::warn!(error = ?err, "engine worker: official tick failed");
-                        }
-                        if official_engine.engine.should_close_debug() {
-                            tracing::info!("engine worker: official debug drawer requested close");
-                            should_stop = true;
+                        if let Some(official_slot) = official_engine.as_mut() {
+                            if let Err(err) = official_slot.engine.step(simulation_dt_seconds) {
+                                tracing::warn!(error = ?err, "engine worker: official tick failed");
+                            }
+                            if official_slot.engine.should_close_debug() {
+                                tracing::info!("engine worker: official debug drawer requested close");
+                                should_stop = true;
+                            }
+                        } else {
+                            tracing::warn!("engine worker: official runtime active without initialized engine");
                         }
                     }
                     EngineActivityKind::Sandbox => {}
@@ -641,8 +637,12 @@ async fn run_worker(
             _ = weather_tick.tick() => {
                 match runtime_state.activity_kind {
                     EngineActivityKind::OfficialRace => {
-                        if let Err(err) = apply_weather_from_schedule(&mut official_engine.engine, &weather_sync).await {
-                            tracing::warn!(error = %err, "engine worker: official scheduled weather apply failed");
+                        if let Some(official_slot) = official_engine.as_mut() {
+                            if let Err(err) = apply_weather_from_schedule(&mut official_slot.engine, &weather_sync).await {
+                                tracing::warn!(error = %err, "engine worker: official scheduled weather apply failed");
+                            }
+                        } else {
+                            tracing::warn!("engine worker: official runtime active without initialized engine");
                         }
                     }
                     EngineActivityKind::Sandbox => {}
@@ -765,7 +765,7 @@ async fn run_sandbox_loop(
 async fn with_target_slot_mut<R>(
     target: &EngineCommandTarget,
     runtime_state: &EngineRuntimeState,
-    official_engine: &mut EngineWorldSlot,
+    official_engine: &mut Option<EngineWorldSlot>,
     sandbox_engines: &HashMap<String, SandboxEngineHandle>,
     op: impl FnOnce(&mut EngineWorldSlot) -> Result<R, EngineWorkerError>,
 ) -> Result<R, EngineWorkerError> {
@@ -779,7 +779,12 @@ async fn with_target_slot_mut<R>(
                     "official race runtime is not active".to_string(),
                 ));
             }
-            op(official_engine)
+            let official_slot = official_engine.as_mut().ok_or_else(|| {
+                EngineWorkerError::InvalidArgument(
+                    "official race runtime is not active".to_string(),
+                )
+            })?;
+            op(official_slot)
         }
         EngineCommandTarget::Sandbox { sandbox_id } => {
             if sandbox_id.trim().is_empty() {
@@ -807,7 +812,7 @@ async fn with_target_slot_mut<R>(
 }
 
 async fn handle_command(
-    official_engine: &mut EngineWorldSlot,
+    official_engine: &mut Option<EngineWorldSlot>,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
     sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
@@ -955,6 +960,7 @@ async fn handle_command(
             reply_tx,
         } => {
             let result = deactivate_sandbox(
+                official_engine,
                 runtime_state,
                 sandbox_engines,
                 expected_revision,
@@ -1009,7 +1015,7 @@ async fn handle_command(
 }
 
 fn switch_runtime(
-    official_engine: &mut EngineWorldSlot,
+    official_engine: &mut Option<EngineWorldSlot>,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
     sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
@@ -1032,21 +1038,39 @@ fn switch_runtime(
     let mut upserted_sandbox_id: Option<String> = None;
 
     match activity_kind {
-        EngineActivityKind::None | EngineActivityKind::OfficialRace => {
+        EngineActivityKind::None => {
             validate_map_id(&map_id)?;
-            let target_ghost_mode_settings =
-                ghost_mode_settings.unwrap_or(official_engine.ghost_mode_settings);
-            let mut new_engine = build_engine(cfg, &map_id)?;
-            new_engine
-                .set_ghost_mode_settings(target_ghost_mode_settings)
-                .map_err(EngineWorkerError::Engine)?;
-            official_engine.engine = new_engine;
-            official_engine.ghost_mode_settings = target_ghost_mode_settings;
+            *official_engine = None;
             for (_, handle) in sandbox_engines.drain() {
                 handle.step_task.abort();
             }
 
-            runtime_state.activity_kind = activity_kind;
+            runtime_state.activity_kind = EngineActivityKind::None;
+            runtime_state.map_id = map_id;
+            runtime_state.active_sandboxes.clear();
+            runtime_state.time_of_day_preset = time_of_day_preset;
+        }
+        EngineActivityKind::OfficialRace => {
+            validate_map_id(&map_id)?;
+            let current_ghost_mode_settings = official_engine
+                .as_ref()
+                .map(|slot| slot.ghost_mode_settings)
+                .unwrap_or(DEFAULT_GHOST_MODE_SETTINGS);
+            let target_ghost_mode_settings =
+                ghost_mode_settings.unwrap_or(current_ghost_mode_settings);
+            let mut new_engine = build_engine(cfg, &map_id)?;
+            new_engine
+                .set_ghost_mode_settings(target_ghost_mode_settings)
+                .map_err(EngineWorkerError::Engine)?;
+            *official_engine = Some(EngineWorldSlot {
+                engine: new_engine,
+                ghost_mode_settings: target_ghost_mode_settings,
+            });
+            for (_, handle) in sandbox_engines.drain() {
+                handle.step_task.abort();
+            }
+
+            runtime_state.activity_kind = EngineActivityKind::OfficialRace;
             runtime_state.map_id = map_id;
             runtime_state.active_sandboxes.clear();
             runtime_state.time_of_day_preset = time_of_day_preset;
@@ -1148,6 +1172,7 @@ fn switch_runtime(
 }
 
 fn deactivate_sandbox(
+    official_engine: &mut Option<EngineWorldSlot>,
     runtime_state: &mut EngineRuntimeState,
     sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
     expected_revision: u64,
@@ -1187,6 +1212,7 @@ fn deactivate_sandbox(
     {
         runtime_state.activity_kind = EngineActivityKind::None;
         runtime_state.time_of_day_preset = EngineRuntimeTimeOfDayPreset::Unspecified;
+        *official_engine = None;
     }
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);
@@ -1414,7 +1440,7 @@ fn cancel_pending_sandbox_activation(
 }
 
 fn maybe_execute_due_pending_sandbox_activation(
-    official_engine: &mut EngineWorldSlot,
+    official_engine: &mut Option<EngineWorldSlot>,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
     sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
@@ -1481,6 +1507,7 @@ fn maybe_execute_due_pending_sandbox_activation(
             tracing::info!(sandbox_id = %pending.sandbox_id, "engine worker: scheduled sandbox activation executed");
         } else {
             let _ = deactivate_sandbox(
+                official_engine,
                 runtime_state,
                 sandbox_engines,
                 runtime_state.revision,
