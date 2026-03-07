@@ -1,6 +1,6 @@
 //! Command types sent to the engine worker.
 
-use boink::model::{Controls, GhostModeSettings, TrackData, VehicleState};
+use boink::model::{AcceptedControls, Controls, GhostModeSettings, TrackData, VehicleState};
 use tokio::sync::oneshot;
 
 use super::engine_worker::{
@@ -21,7 +21,7 @@ pub enum EngineCommand {
         target: EngineCommandTarget,
         car_id: u64,
         controls: Controls,
-        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+        reply_tx: oneshot::Sender<Result<AcceptedControls, EngineWorkerError>>,
     },
     ReadCarState {
         target: EngineCommandTarget,

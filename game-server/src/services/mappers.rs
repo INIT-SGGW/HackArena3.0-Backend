@@ -1,11 +1,15 @@
 //! Transport-layer mapping helpers.
 
-use boink::model::{Controls, Gear, TrackData as EngineTrackData, VehicleState};
+use boink::model::{
+    Controls, Gear, GearShift as EngineGearShift, TrackData as EngineTrackData, VehicleState,
+};
 use proto::race::v1::{
     CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, FrontendCarFullState,
-    ParticipantOpponentState, ParticipantSelfState, Quaternion, SetControlsRequest,
-    TrackData as ProtoTrackData, Vector3, WheelAngles, WheelSpeeds,
+    GearShift as ProtoGearShift, ParticipantOpponentState, ParticipantSelfState, Quaternion,
+    SetControlsDevRequest, SetControlsRequest, TrackData as ProtoTrackData, Vector3, WheelAngles,
+    WheelSpeeds,
 };
+use tonic::Status;
 
 /// Convert engine `Vec3` into proto `Vector3`.
 pub(crate) fn vec3_to_proto(v: boink::model::Vec3) -> Vector3 {
@@ -17,12 +21,47 @@ pub(crate) fn vec3_to_proto(v: boink::model::Vec3) -> Vector3 {
 }
 
 /// Convert gRPC controls request into engine controls.
-pub(crate) fn proto_to_controls(req: &SetControlsRequest) -> Controls {
-    Controls {
-        throttle: req.throttle,
-        brake: req.brake,
-        steer: req.steering,
+pub(crate) fn proto_to_controls(req: &SetControlsRequest) -> Result<Controls, Status> {
+    controls_from_proto(req.throttle, req.brake, req.steering, req.gear_shift)
+}
+
+/// Convert gRPC dev-controls request into engine controls.
+pub(crate) fn proto_dev_to_controls(req: &SetControlsDevRequest) -> Result<Controls, Status> {
+    controls_from_proto(req.throttle, req.brake, req.steering, req.gear_shift)
+}
+
+/// Convert engine gear-shift response into protobuf enum value.
+pub(crate) fn engine_gear_shift_to_proto(shift: EngineGearShift) -> i32 {
+    match shift {
+        EngineGearShift::None => ProtoGearShift::None as i32,
+        EngineGearShift::Upshift => ProtoGearShift::Upshift as i32,
+        EngineGearShift::Downshift => ProtoGearShift::Downshift as i32,
     }
+}
+
+fn controls_from_proto(
+    throttle: f32,
+    brake: f32,
+    steering: f32,
+    raw_gear_shift: i32,
+) -> Result<Controls, Status> {
+    Ok(Controls::new(
+        throttle,
+        brake,
+        steering,
+        proto_gear_shift_to_engine(raw_gear_shift)?,
+    ))
+}
+
+fn proto_gear_shift_to_engine(raw_gear_shift: i32) -> Result<EngineGearShift, Status> {
+    let gear_shift = ProtoGearShift::try_from(raw_gear_shift)
+        .map_err(|_| Status::invalid_argument("invalid gear_shift"))?;
+
+    Ok(match gear_shift {
+        ProtoGearShift::Unspecified | ProtoGearShift::None => EngineGearShift::None,
+        ProtoGearShift::Upshift => EngineGearShift::Upshift,
+        ProtoGearShift::Downshift => EngineGearShift::Downshift,
+    })
 }
 
 fn wheel_speeds_from_state(state: &VehicleState) -> WheelSpeeds {

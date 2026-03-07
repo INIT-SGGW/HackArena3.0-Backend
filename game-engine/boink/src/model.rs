@@ -9,7 +9,7 @@ pub mod state;
 pub mod track;
 pub mod weather;
 
-pub use control::Controls;
+pub use control::{AcceptedControls, Controls, GearShift};
 pub use ghost::GhostModeSettings;
 pub use math::{Quaternion, Vec3};
 pub use state::{Gear, VehicleState};

@@ -3,15 +3,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use boink::model::Controls;
 use dashmap::DashMap;
 use proto::race::v1::{
     FrontendSpectatorDebugInfo, FrontendSpectatorEvent, FrontendSpectatorSnapshot,
-    GetFrontendSpectatorRequest,
-    GetParticipantRaceRequest, ParticipantRaceEvent, ParticipantRaceSnapshot, QuickJoinDevRequest,
-    QuickJoinDevResponse, SetControlsDevRequest, SetControlsRequest, SetControlsResponse,
-    SpectatorView, StreamClampReason, StreamSettings, ViewDowngradeReason,
-    frontend_spectator_event::Payload as FrontendSpectatorPayload,
+    GetFrontendSpectatorRequest, GetParticipantRaceRequest, ParticipantRaceEvent,
+    ParticipantRaceSnapshot, QuickJoinDevRequest, QuickJoinDevResponse, SetControlsDevRequest,
+    SetControlsRequest, SetControlsResponse, SpectatorView, StreamClampReason, StreamSettings,
+    ViewDowngradeReason, frontend_spectator_event::Payload as FrontendSpectatorPayload,
     get_frontend_spectator_request::Target as FrontendSpectatorTarget,
     participant_race_event::Payload as ParticipantRacePayload, race_service_server::RaceService,
 };
@@ -29,7 +27,8 @@ use crate::runtime::engine_worker::{
 
 use super::error_map::map_worker_err;
 use super::mappers::{
-    frontend_full_state, participant_opponent_state, participant_self_state, proto_to_controls,
+    engine_gear_shift_to_proto, frontend_full_state, participant_opponent_state,
+    participant_self_state, proto_dev_to_controls, proto_to_controls,
 };
 
 const DEFAULT_STREAM_HZ: u32 = 20;
@@ -166,11 +165,12 @@ impl RaceService for RaceServiceImpl {
             }
             None => self.resolve_single_car_id()?,
         };
-        let controls = proto_to_controls(&req);
+        let controls = proto_to_controls(&req)?;
         let target = self.target_for_car(car_id)?;
         let engine_car_id = self.engine_car_id_for(car_id)?;
 
-        self.engine
+        let accepted_controls = self
+            .engine
             .set_controls_in(target, engine_car_id, controls)
             .await
             .map_err(map_worker_err)?;
@@ -182,6 +182,7 @@ impl RaceService for RaceServiceImpl {
             accepted_brake: req.brake,
             accepted_steering: req.steering,
             applies_from_tick: 0,
+            accepted_shift: engine_gear_shift_to_proto(accepted_controls.accepted_shift),
         };
 
         Ok(Response::new(resp))
@@ -192,15 +193,12 @@ impl RaceService for RaceServiceImpl {
         request: Request<SetControlsDevRequest>,
     ) -> Result<Response<SetControlsResponse>, Status> {
         let req = request.into_inner();
-        let controls = Controls {
-            throttle: req.throttle,
-            brake: req.brake,
-            steer: req.steering,
-        };
+        let controls = proto_dev_to_controls(&req)?;
         let target = self.target_for_car(req.target_car_id)?;
         let engine_car_id = self.engine_car_id_for(req.target_car_id)?;
 
-        self.engine
+        let accepted_controls = self
+            .engine
             .set_controls_in(target, engine_car_id, controls)
             .await
             .map_err(map_worker_err)?;
@@ -213,6 +211,7 @@ impl RaceService for RaceServiceImpl {
             accepted_brake: req.brake,
             accepted_steering: req.steering,
             applies_from_tick: 0,
+            accepted_shift: engine_gear_shift_to_proto(accepted_controls.accepted_shift),
         };
 
         Ok(Response::new(resp))

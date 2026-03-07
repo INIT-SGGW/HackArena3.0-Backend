@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use boink::engine::{Engine, EngineBuilder, VehicleMesh, VehicleModelConfig};
 use boink::error::Error as BoinkError;
-use boink::model::control::Controls;
+use boink::model::control::{AcceptedControls, Controls};
 use boink::model::ghost::GhostModeSettings;
 use boink::model::math::Vec3;
 use boink::model::state::VehicleState;
@@ -181,7 +181,7 @@ impl EngineClient {
         &self,
         car_id: u64,
         controls: Controls,
-    ) -> Result<(), EngineWorkerError> {
+    ) -> Result<AcceptedControls, EngineWorkerError> {
         self.set_controls_in(EngineCommandTarget::OfficialRace, car_id, controls)
             .await
     }
@@ -192,7 +192,7 @@ impl EngineClient {
         sandbox_id: String,
         car_id: u64,
         controls: Controls,
-    ) -> Result<(), EngineWorkerError> {
+    ) -> Result<AcceptedControls, EngineWorkerError> {
         self.set_controls_in(
             EngineCommandTarget::Sandbox { sandbox_id },
             car_id,
@@ -207,7 +207,7 @@ impl EngineClient {
         target: EngineCommandTarget,
         car_id: u64,
         controls: Controls,
-    ) -> Result<(), EngineWorkerError> {
+    ) -> Result<AcceptedControls, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::SetControls {
@@ -293,7 +293,8 @@ impl EngineClient {
 
     /// Reads elapsed race duration (seconds) from the official-race engine world.
     pub async fn race_duration(&self) -> Result<f32, EngineWorkerError> {
-        self.race_duration_in(EngineCommandTarget::OfficialRace).await
+        self.race_duration_in(EngineCommandTarget::OfficialRace)
+            .await
     }
 
     /// Reads elapsed race duration (seconds) from the target sandbox engine world.
@@ -928,7 +929,11 @@ async fn handle_command(
                 runtime_state,
                 official_engine,
                 sandbox_engines,
-                |slot| slot.engine.race_duration().map_err(EngineWorkerError::Engine),
+                |slot| {
+                    slot.engine
+                        .race_duration()
+                        .map_err(EngineWorkerError::Engine)
+                },
             )
             .await;
             let _ = reply_tx.send(result);

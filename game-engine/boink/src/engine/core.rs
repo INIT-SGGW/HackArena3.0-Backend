@@ -13,7 +13,9 @@ use tracing::instrument;
 
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
-use crate::model::{Controls, GhostModeSettings, TrackData, VehicleState, WeatherParams};
+use crate::model::{
+    AcceptedControls, Controls, GhostModeSettings, TrackData, VehicleState, WeatherParams,
+};
 #[cfg(feature = "legacy-native-lib")]
 use crate::native::api::NativeApi;
 use crate::version::ensure_c_api_compatible;
@@ -309,13 +311,26 @@ impl Engine {
 
     /// Applies driver controls to the specified vehicle.
     #[instrument(skip(self, controls))]
-    pub fn set_controls(&mut self, vehicle_id: u64, controls: Controls) -> Result<()> {
+    pub fn set_controls(
+        &mut self,
+        vehicle_id: u64,
+        controls: Controls,
+    ) -> Result<AcceptedControls> {
         let ffi_controls = controls.as_ffi();
-        let code =
-            unsafe { sys::boink_set_controls(self.handle, vehicle_id, &ffi_controls as *const _) };
+        let mut ffi_accepted_controls = sys::BoinkAcceptedControls {
+            accepted_shift: sys::BoinkGearShift::BOINK_GEAR_SHIFT_NONE,
+        };
+        let code = unsafe {
+            sys::boink_set_controls(
+                self.handle,
+                vehicle_id,
+                &ffi_controls,
+                &mut ffi_accepted_controls,
+            )
+        };
         tracing::debug!(code, vehicle_id, "boink_set_controls result");
         if code == sys::BOINK_OK {
-            Ok(())
+            AcceptedControls::try_from(ffi_accepted_controls)
         } else {
             tracing::debug!(code = code, "boink_set_controls failed");
             Err(Error::from_ffi_status(code, "boink_set_controls"))
