@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use boink::model::Controls;
 use dashmap::DashMap;
 use proto::race::v1::{
-    FrontendSpectatorEvent, FrontendSpectatorSnapshot, GetFrontendSpectatorRequest,
+    FrontendSpectatorDebugInfo, FrontendSpectatorEvent, FrontendSpectatorSnapshot,
+    GetFrontendSpectatorRequest,
     GetParticipantRaceRequest, ParticipantRaceEvent, ParticipantRaceSnapshot, QuickJoinDevRequest,
     QuickJoinDevResponse, SetControlsDevRequest, SetControlsRequest, SetControlsResponse,
     SpectatorView, StreamClampReason, StreamSettings, ViewDowngradeReason,
@@ -677,10 +678,32 @@ async fn run_frontend_spectator_stream(
             }
         }
 
+        let debug = if req.include_debug {
+            match visible_target.as_ref() {
+                Some(target) => match engine.race_duration_in(target.clone()).await {
+                    Ok(duration_s) => Some(FrontendSpectatorDebugInfo {
+                        engine_race_elapsed_sec: duration_s,
+                    }),
+                    Err(err) => {
+                        tracing::warn!(
+                            target = ?target,
+                            error = %err,
+                            "failed to read race duration debug info for spectator snapshot"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+
         let snapshot = FrontendSpectatorSnapshot {
             tick,
             server_time_ms: current_time_ms(),
             cars,
+            debug,
         };
         let msg = FrontendSpectatorEvent {
             payload: Some(FrontendSpectatorPayload::Snapshot(snapshot)),

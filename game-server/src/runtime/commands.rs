@@ -32,6 +32,10 @@ pub enum EngineCommand {
         target: EngineCommandTarget,
         reply_tx: oneshot::Sender<Result<TrackData, EngineWorkerError>>,
     },
+    GetRaceDuration {
+        target: EngineCommandTarget,
+        reply_tx: oneshot::Sender<Result<f32, EngineWorkerError>>,
+    },
     GetRuntimeState {
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },

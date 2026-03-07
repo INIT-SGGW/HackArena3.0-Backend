@@ -291,6 +291,36 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Reads elapsed race duration (seconds) from the official-race engine world.
+    pub async fn race_duration(&self) -> Result<f32, EngineWorkerError> {
+        self.race_duration_in(EngineCommandTarget::OfficialRace).await
+    }
+
+    /// Reads elapsed race duration (seconds) from the target sandbox engine world.
+    pub async fn sandbox_race_duration(
+        &self,
+        sandbox_id: String,
+    ) -> Result<f32, EngineWorkerError> {
+        self.race_duration_in(EngineCommandTarget::Sandbox { sandbox_id })
+            .await
+    }
+
+    /// Reads elapsed race duration (seconds) from the target runtime world.
+    pub async fn race_duration_in(
+        &self,
+        target: EngineCommandTarget,
+    ) -> Result<f32, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::GetRaceDuration { target, reply_tx })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Reads current runtime activity and map metadata.
     pub async fn runtime_state(&self) -> Result<EngineRuntimeState, EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -887,6 +917,18 @@ async fn handle_command(
                 official_engine,
                 sandbox_engines,
                 |slot| slot.engine.track_data().map_err(EngineWorkerError::Engine),
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::GetRaceDuration { target, reply_tx } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| slot.engine.race_duration().map_err(EngineWorkerError::Engine),
             )
             .await;
             let _ = reply_tx.send(result);
