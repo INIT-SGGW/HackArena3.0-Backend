@@ -13,7 +13,7 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 8;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 9;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -84,6 +84,19 @@ pub struct BoinkVehicleModel {
     pub max_steer_angle: Real,
 }
 
+/// Requested gear-shift operation for a single controls command.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BoinkGearShift {
+    /// Do not request a gear shift.
+    #[default]
+    BOINK_GEAR_SHIFT_NONE = 0,
+    /// Request shift by +1 gear.
+    BOINK_GEAR_SHIFT_UPSHIFT = 1,
+    /// Request shift by -1 gear.
+    BOINK_GEAR_SHIFT_DOWNSHIFT = 2,
+}
+
 /// Represents normalized control inputs of a driver.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -97,6 +110,18 @@ pub struct BoinkControls {
     /// Negative values correspond to steering left.
     /// Positive values correspond to steering right.
     pub steer: Real,
+    /// Requested gear shift by one step.
+    pub gear_shift: BoinkGearShift,
+}
+
+/// Represents controls accepted by drivetrain logic.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkAcceptedControls {
+    /// Shift operation that was actually executed.
+    ///
+    /// Returns `BOINK_GEAR_SHIFT_NONE` when no shift was executed.
+    pub accepted_shift: BoinkGearShift,
 }
 
 /// Represents weather parameters applied globally to the race simulation.
@@ -472,16 +497,18 @@ unsafe extern "C" {
     /// - `h` - handle to a valid race.
     /// - `vehicle_id` - identifier of the vehicle to control.
     /// - `controls` - non-null pointer to the desired control inputs.
+    /// - `out_accepted_controls` - non-null pointer that receives accepted controls.
     ///
     /// Returns:
     /// - `BOINK_OK` on success.
-    /// - `BOINK_ERR_INVALID_ARG` if `controls` is null.
+    /// - `BOINK_ERR_INVALID_ARG` if `controls` or `out_accepted_controls` is null.
     /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
     /// - Another error code for other failures.
     pub fn boink_set_controls(
         h: BoinkHandle,
         vehicle_id: u64,
         controls: *const BoinkControls,
+        out_accepted_controls: *mut BoinkAcceptedControls,
     ) -> c_int;
 
     /// Sets the world-space position of a vehicle.

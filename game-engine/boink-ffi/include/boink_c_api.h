@@ -32,7 +32,7 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 8
+#define BOINK_C_API_VERSION_MINOR 9
 
 #define BOINK_C_API_VERSION_PATCH 0
 
@@ -70,6 +70,24 @@
  * Indicates an internal engine error.
  */
 #define BOINK_ERR_INTERNAL 100
+
+/**
+ * Requested gear-shift operation for a single controls command.
+ */
+typedef enum BoinkGearShift {
+  /**
+   * Do not request a gear shift.
+   */
+  BOINK_GEAR_SHIFT_NONE = 0,
+  /**
+   * Request shift by +1 gear.
+   */
+  BOINK_GEAR_SHIFT_UPSHIFT = 1,
+  /**
+   * Request shift by -1 gear.
+   */
+  BOINK_GEAR_SHIFT_DOWNSHIFT = 2,
+} BoinkGearShift;
 
 /**
  * Represents an opaque engine handle.
@@ -241,7 +259,23 @@ typedef struct BoinkControls {
    * Positive values correspond to steering right.
    */
   Real steer;
+  /**
+   * Requested gear shift by one step.
+   */
+  enum BoinkGearShift gear_shift;
 } BoinkControls;
+
+/**
+ * Represents controls accepted by drivetrain logic.
+ */
+typedef struct BoinkAcceptedControls {
+  /**
+   * Shift operation that was actually executed.
+   *
+   * Returns `BOINK_GEAR_SHIFT_NONE` when no shift was executed.
+   */
+  enum BoinkGearShift accepted_shift;
+} BoinkAcceptedControls;
 
 /**
  * Represents a quaternion rotation (x, y, z, w).
@@ -644,16 +678,18 @@ BOINK_API int boink_despawn_vehicle(BoinkHandle h, uint64_t vehicle_id);
  * - `h` - handle to a valid race.
  * - `vehicle_id` - identifier of the vehicle to control.
  * - `controls` - non-null pointer to the desired control inputs.
+ * - `out_accepted_controls` - non-null pointer that receives accepted controls.
  *
  * Returns:
  * - `BOINK_OK` on success.
- * - `BOINK_ERR_INVALID_ARG` if `controls` is null.
+ * - `BOINK_ERR_INVALID_ARG` if `controls` or `out_accepted_controls` is null.
  * - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
  * - Another error code for other failures.
  */
 BOINK_API int boink_set_controls(BoinkHandle h,
                               uint64_t vehicle_id,
-                              const struct BoinkControls *controls);
+                              const struct BoinkControls *controls,
+                              struct BoinkAcceptedControls *out_accepted_controls);
 
 /**
  * Sets the world-space position of a vehicle.
