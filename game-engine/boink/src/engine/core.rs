@@ -340,6 +340,16 @@ impl Engine {
             ));
         }
 
+        // TODO: Temp solution
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let spawn_orientation = Quaternion {
+            x: 0.0,
+            y: half,
+            z: 0.0,
+            w: half,
+        };
+        self.set_vehicle_orientation(vehicle_id, spawn_orientation)?;
+
         Ok(vehicle_id)
     }
 
