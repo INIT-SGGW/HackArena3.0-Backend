@@ -11,7 +11,8 @@ use tracing::trace;
 use crate::native::error::NativeLoadError;
 use crate::native::loader::{
     LegacyDisableGhostModeFn, LegacyGetTrackDataFn, LegacySetGhostModeSettingsFn,
-    LegacySetWeatherFn, LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
+    LegacySetVehicleOrientationFn, LegacySetWeatherFn, LegacyStringFn, LegacyVersionFn,
+    load_native_library, resolve_optional,
 };
 
 /// Lazily resolved optional symbols exposed by a potentially old native library.
@@ -24,6 +25,7 @@ pub struct NativeApi {
     set_ghost_mode_settings: Option<LegacySetGhostModeSettingsFn>,
     disable_ghost_mode: Option<LegacyDisableGhostModeFn>,
     get_track_data: Option<LegacyGetTrackDataFn>,
+    set_vehicle_orientation: Option<LegacySetVehicleOrientationFn>,
 }
 
 impl NativeApi {
@@ -84,6 +86,12 @@ impl NativeApi {
         self.get_track_data
     }
 
+    /// Returns the function pointer for `boink_set_vehicle_orientation`, when exported.
+    #[must_use]
+    pub fn boink_set_vehicle_orientation(&self) -> Option<LegacySetVehicleOrientationFn> {
+        self.set_vehicle_orientation
+    }
+
     fn load() -> Result<NativeApi, NativeLoadError> {
         let lib = load_native_library()?;
 
@@ -95,9 +103,10 @@ impl NativeApi {
         let set_ghost_mode_settings = resolve_optional(lib, b"boink_set_ghost_mode_settings\0");
         let disable_ghost_mode = resolve_optional(lib, b"boink_disable_ghost_mode\0");
         let get_track_data = resolve_optional(lib, b"boink_get_track_data\0");
+        let set_vehicle_orientation = resolve_optional(lib, b"boink_set_vehicle_orientation\0");
 
         trace!(
-            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}",
+            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}, set_vehicle_orientation={}",
             get_c_api_version.is_some(),
             get_engine_version.is_some(),
             get_engine_profile.is_some(),
@@ -105,7 +114,8 @@ impl NativeApi {
             set_weather.is_some(),
             set_ghost_mode_settings.is_some(),
             disable_ghost_mode.is_some(),
-            get_track_data.is_some()
+            get_track_data.is_some(),
+            set_vehicle_orientation.is_some()
         );
 
         Ok(NativeApi {
@@ -117,6 +127,7 @@ impl NativeApi {
             set_ghost_mode_settings,
             disable_ghost_mode,
             get_track_data,
+            set_vehicle_orientation,
         })
     }
 }

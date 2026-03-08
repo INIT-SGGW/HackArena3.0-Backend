@@ -14,11 +14,14 @@ use tracing::instrument;
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
 use crate::model::{
-    AcceptedControls, Controls, GhostModeSettings, TrackData, VehicleState, WeatherParams,
+    AcceptedControls, Controls, GhostModeSettings, Quaternion, TrackData, VehicleState,
+    WeatherParams,
 };
 #[cfg(feature = "legacy-native-lib")]
 use crate::native::api::NativeApi;
 use crate::version::ensure_c_api_compatible;
+#[cfg(feature = "legacy-native-lib")]
+use crate::version::{Version, query_c_api_version};
 
 /// Domain-level configuration of the vehicle model used by the engine.
 #[derive(Debug, Clone)]
@@ -172,19 +175,64 @@ impl Engine {
     #[instrument(skip(self))]
     pub fn step(&mut self, dt_seconds: f32) -> Result<()> {
         tracing::debug!(dt_seconds, "boink_step_race");
-        let code = unsafe { sys::boink_step_race(self.handle, dt_seconds) };
-        tracing::debug!(code, "boink_step_race result");
-        if code == sys::BOINK_OK {
-            if self.debug_drawer_enabled {
-                unsafe {
-                    sys::boink_update_debug();
-                }
-            }
-            Ok(())
-        } else {
+        let mut simulated_dt_seconds: f32 = 0.0;
+        let code =
+            unsafe { sys::boink_step_race(self.handle, dt_seconds, &mut simulated_dt_seconds) };
+        tracing::debug!(code, simulated_dt_seconds, "boink_step_race result");
+
+        if code != sys::BOINK_OK {
             tracing::debug!(code = code, "boink_step_race failed");
-            Err(Error::from_ffi_status(code, "boink_step_race"))
+            return Err(Error::from_ffi_status(code, "boink_step_race"));
         }
+
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let should_monitor_step_progress = {
+                static STEP_PROGRESS_MONITORING_ENABLED: OnceLock<bool> = OnceLock::new();
+                *STEP_PROGRESS_MONITORING_ENABLED.get_or_init(|| {
+                    let min_supported = Version::new(0, 10, 0);
+                    match query_c_api_version() {
+                        Ok(version) if version >= min_supported => true,
+                        Ok(_) => {
+                            tracing::warn!(
+                                min_supported = %min_supported,
+                                "Boink does not report simulated dt_seconds in boink_step_race; step progress stall detection is disabled"
+                            );
+                            false
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "Unable to query Boink version; step progress stall detection is disabled"
+                            );
+                            false
+                        }
+                    }
+                })
+            };
+            if should_monitor_step_progress
+                && (simulated_dt_seconds - dt_seconds).abs() > f32::EPSILON
+            {
+                let dt_delta_seconds = simulated_dt_seconds - dt_seconds;
+                let dt_delta_abs_seconds = dt_delta_seconds.abs();
+                tracing::warn!(
+                    requested_dt_seconds = dt_seconds,
+                    simulated_dt_seconds,
+                    delta_dt_seconds = dt_delta_seconds,
+                    delta_dt_abs_seconds = dt_delta_abs_seconds,
+                    delta_dt_ms = dt_delta_seconds * 1000.0,
+                    "Boink simulation advanced by a different dt than requested in step"
+                );
+            }
+        }
+
+        if self.debug_drawer_enabled {
+            unsafe {
+                sys::boink_update_debug();
+            }
+        }
+
+        Ok(())
     }
 
     /// Returns the elapsed duration of the race (seconds).
@@ -520,23 +568,73 @@ impl Engine {
         }
     }
 
-    /// Sets the world-space position on the track.
-    #[instrument(skip(self, position))]
-    pub fn set_track_position(&mut self, position: Vec3) -> Result<()> {
-        let ffi_pos = position.into();
-        tracing::debug!(
-            x = position.x,
-            y = position.y,
-            z = position.z,
-            "boink_set_track_position"
-        );
-        let code = unsafe { sys::boink_set_track_position(self.handle, &ffi_pos as *const _) };
-        tracing::debug!(code, "boink_set_track_position result");
-        if code == sys::BOINK_OK {
-            Ok(())
-        } else {
-            tracing::debug!(code = code, "boink_set_track_position failed");
-            Err(Error::from_ffi_status(code, "boink_set_track_position"))
+    /// Sets the world-space orientation of a vehicle.
+    #[instrument(skip(self, orientation))]
+    pub fn set_vehicle_orientation(
+        &mut self,
+        vehicle_id: u64,
+        orientation: Quaternion,
+    ) -> Result<()> {
+        let ffi_orientation: sys::BoinkQuaternion = orientation.into();
+
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_vehicle_orientation) = api.boink_set_vehicle_orientation() else {
+                static WARNED_MISSING_SET_VEHICLE_ORIENTATION: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_SET_VEHICLE_ORIENTATION.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_set_vehicle_orientation symbol not found in native library; orientation updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+            tracing::debug!(
+                vehicle_id,
+                x = orientation.x,
+                y = orientation.y,
+                z = orientation.z,
+                w = orientation.w,
+                "boink_set_vehicle_orientation (legacy dynamic symbol)"
+            );
+            let code = unsafe {
+                set_vehicle_orientation(self.handle, vehicle_id, &ffi_orientation as *const _)
+            };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_set_vehicle_orientation",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(
+                vehicle_id,
+                x = orientation.x,
+                y = orientation.y,
+                z = orientation.z,
+                w = orientation.w,
+                "boink_set_vehicle_orientation"
+            );
+            let code = unsafe {
+                sys::boink_set_vehicle_orientation(
+                    self.handle,
+                    vehicle_id,
+                    &ffi_orientation as *const _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_set_vehicle_orientation",
+                ))
+            }
         }
     }
 
