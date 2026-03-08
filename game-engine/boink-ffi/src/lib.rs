@@ -13,7 +13,7 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 10;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 11;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -152,6 +152,50 @@ pub struct BoinkGhostModeSettings {
     pub until_completed_laps: c_uint,
     /// Required time after overlap ends before ghost mode may be disabled.
     pub vehicle_overlap_exit_delay_ms: c_uint,
+}
+
+/// High-level runtime phase of ghost mode for a single vehicle.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BoinkGhostModePhase {
+    /// Ghost mode is disabled for this vehicle and collisions are enabled.
+    #[default]
+    BOINK_GHOST_MODE_PHASE_INACTIVE = 0,
+    /// Ghost mode enter conditions are progressing; collisions are still enabled.
+    BOINK_GHOST_MODE_PHASE_PENDING_ENTER = 1,
+    /// Ghost mode is enabled for this vehicle and collisions are disabled.
+    BOINK_GHOST_MODE_PHASE_ACTIVE = 2,
+    /// Ghost mode is still active, but exit countdown is currently running.
+    BOINK_GHOST_MODE_PHASE_PENDING_EXIT = 3,
+}
+
+/// completed_laps is below GhostModeSettings.until_completed_laps.
+pub const BOINK_GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET: c_uint = 1 << 0;
+/// Current speed is not above GhostModeSettings.exit_speed_min_mps.
+pub const BOINK_GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET: c_uint = 1 << 1;
+/// Exit speed condition is met, but exit delay is still counting down.
+pub const BOINK_GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING: c_uint = 1 << 2;
+/// Vehicle overlap is currently present and prevents ghost mode exit.
+pub const BOINK_GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE: c_uint = 1 << 3;
+/// Overlap is cleared, but no-overlap exit delay is still counting down.
+pub const BOINK_GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING: c_uint = 1 << 4;
+
+/// Runtime ghost mode state for a single vehicle.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkGhostModeRuntimeState {
+    /// Authoritative collision flag for this vehicle at current tick.
+    pub can_collide_now: bool,
+    /// Current high-level ghost mode phase.
+    pub phase: BoinkGhostModePhase,
+    /// Bitmask of currently active blockers.
+    ///
+    /// Uses `BOINK_GHOST_MODE_BLOCKER_*` constants.
+    pub blockers_mask: c_uint,
+    /// Remaining time to complete ghost-mode enter countdown.
+    pub enter_delay_remaining_ms: c_uint,
+    /// Remaining time to complete ghost-mode exit countdown.
+    pub exit_delay_remaining_ms: c_uint,
 }
 
 /// Represents one static centerline sample of a race track.
@@ -573,6 +617,24 @@ unsafe extern "C" {
         h: BoinkHandle,
         vehicle_id: u64,
         out_state: *mut BoinkVehicleState,
+    ) -> c_int;
+
+    /// Reads runtime ghost mode state for the specified vehicle.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle whose ghost-mode state is requested.
+    /// - `out_state` - non-null pointer that receives the ghost-mode runtime state.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success and writes the state to `*out_state`.
+    /// - `BOINK_ERR_INVALID_ARG` if `out_state` is null.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - Another error code for other failures.
+    pub fn boink_read_vehicle_ghost_mode_state(
+        h: BoinkHandle,
+        vehicle_id: u64,
+        out_state: *mut BoinkGhostModeRuntimeState,
     ) -> c_int;
 
     /// Sets global weather parameters used by the simulation engine.
