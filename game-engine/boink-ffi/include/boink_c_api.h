@@ -32,7 +32,7 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 9
+#define BOINK_C_API_VERSION_MINOR 10
 
 #define BOINK_C_API_VERSION_PATCH 0
 
@@ -563,13 +563,15 @@ BOINK_API void boink_destroy_vehicle_mesh(BoinkVehicleMeshHandle handle);
  *
  * Parameters:
  * - `h` - handle to a valid race.
- * - `dt_seconds` - time step in seconds.
+ * - `dt_seconds` - requested time step in seconds.
+ * - `out_simulated_dt_seconds` - non-null pointer receiving the actual
+ *   simulated step in seconds.
  *
  * Returns:
  * - `BOINK_OK` on success.
  * - An error code on failure.
  */
-BOINK_API int boink_step_race(BoinkHandle h, Real dt_seconds);
+BOINK_API int boink_step_race(BoinkHandle h, Real dt_seconds, Real *out_simulated_dt_seconds);
 
 /**
  * Retrieves the duration of the race.
@@ -712,20 +714,24 @@ BOINK_API int boink_set_vehicle_position(BoinkHandle h,
                                       const struct BoinkVec3 *position);
 
 /**
- * Sets the world-space position on the track.
+ * Sets the world-space orientation of a vehicle.
  *
- * This updates the track-relative position used for physics or race logic.
+ * This immediately updates the specified vehicle's orientation in the simulation.
  *
  * Parameters:
  * - `h` - handle to a valid race.
- * - `position` - non-null pointer to the new track position vector.
+ * - `vehicle_id` - identifier of the vehicle to rotate.
+ * - `orientation` - non-null pointer to the new orientation quaternion.
  *
  * Returns:
  * - `BOINK_OK` on success.
- * - `BOINK_ERR_INVALID_ARG` if `position` is null.
+ * - `BOINK_ERR_INVALID_ARG` if `orientation` is null.
+ * - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
  * - Another error code for other failures.
  */
-BOINK_API int boink_set_track_position(BoinkHandle h, const struct BoinkVec3 *position);
+BOINK_API int boink_set_vehicle_orientation(BoinkHandle h,
+                                         uint64_t vehicle_id,
+                                         const struct BoinkQuaternion *orientation);
 
 /**
  * Reads the current state of the specified vehicle.
