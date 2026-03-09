@@ -61,6 +61,8 @@ pub const GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE: u32 =
 /// Overlap is cleared, but no-overlap exit delay is still counting down.
 pub const GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING: u32 =
     sys::BOINK_GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING;
+/// Vehicle is currently in pit area.
+pub const GHOST_MODE_BLOCKER_IN_PIT: u32 = sys::BOINK_GHOST_MODE_BLOCKER_IN_PIT;
 
 /// Runtime ghost mode state for a single vehicle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

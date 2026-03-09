@@ -14,7 +14,7 @@ use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
 pub const BOINK_C_API_VERSION_MINOR: c_uint = 11;
-pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 1;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
@@ -179,6 +179,8 @@ pub const BOINK_GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING: c_uint = 1 << 2;
 pub const BOINK_GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE: c_uint = 1 << 3;
 /// Overlap is cleared, but no-overlap exit delay is still counting down.
 pub const BOINK_GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING: c_uint = 1 << 4;
+/// Vehicle is currently in pit area.
+pub const BOINK_GHOST_MODE_BLOCKER_IN_PIT: c_uint = 1 << 5;
 
 /// Runtime ghost mode state for a single vehicle.
 #[repr(C)]

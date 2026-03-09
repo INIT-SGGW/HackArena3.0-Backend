@@ -2,10 +2,10 @@
 
 use boink::model::{
     Controls, GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING, GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET,
-    GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET, GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING,
-    GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE, Gear, GearShift as EngineGearShift,
-    GhostModePhase as EngineGhostModePhase, GhostModeRuntimeState, TrackData as EngineTrackData,
-    VehicleState,
+    GHOST_MODE_BLOCKER_IN_PIT, GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET,
+    GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING, GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE, Gear,
+    GearShift as EngineGearShift, GhostModePhase as EngineGhostModePhase, GhostModeRuntimeState,
+    TrackData as EngineTrackData, VehicleState,
 };
 use proto::race::v1::{
     CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, FrontendCarFullState,
@@ -122,6 +122,9 @@ fn ghost_mode_blockers_to_proto(blockers_mask: u32) -> Vec<i32> {
     }
     if (blockers_mask & GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING) != 0 {
         blockers.push(ProtoGhostModeBlocker::OverlapExitDelayRunning as i32);
+    }
+    if (blockers_mask & GHOST_MODE_BLOCKER_IN_PIT) != 0 {
+        blockers.push(ProtoGhostModeBlocker::InPit as i32);
     }
     blockers
 }

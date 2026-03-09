@@ -34,7 +34,7 @@
 
 #define BOINK_C_API_VERSION_MINOR 11
 
-#define BOINK_C_API_VERSION_PATCH 0
+#define BOINK_C_API_VERSION_PATCH 1
 
 /**
  * Indicates successful operation.
@@ -95,6 +95,11 @@
  * Overlap is cleared, but no-overlap exit delay is still counting down.
  */
 #define BOINK_GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING (1 << 4)
+
+/**
+ * Vehicle is currently in pit area.
+ */
+#define BOINK_GHOST_MODE_BLOCKER_IN_PIT (1 << 5)
 
 /**
  * Requested gear-shift operation for a single controls command.
