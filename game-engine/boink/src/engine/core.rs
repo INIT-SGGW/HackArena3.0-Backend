@@ -14,8 +14,8 @@ use tracing::instrument;
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
 use crate::model::{
-    AcceptedControls, Controls, GhostModeSettings, Quaternion, TrackData, VehicleState,
-    WeatherParams,
+    AcceptedControls, Controls, GhostModeRuntimeState, GhostModeSettings, Quaternion, TrackData,
+    VehicleState, WeatherParams,
 };
 #[cfg(feature = "legacy-native-lib")]
 use crate::native::api::NativeApi;
@@ -657,10 +657,80 @@ impl Engine {
             unsafe { sys::boink_read_vehicle_state(self.handle, vehicle_id, &mut raw as *mut _) };
         tracing::debug!(code, vehicle_id, "boink_read_vehicle_state result");
         if code == sys::BOINK_OK {
-            VehicleState::try_from(raw)
+            let mut state = VehicleState::try_from(raw)?;
+            state.ghost_mode_runtime = self.read_vehicle_ghost_mode_runtime_state(vehicle_id);
+            Ok(state)
         } else {
             tracing::debug!(code = code, "boink_read_vehicle_state failed");
             Err(Error::from_ffi_status(code, "boink_read_vehicle_state"))
+        }
+    }
+
+    fn read_vehicle_ghost_mode_runtime_state(&self, vehicle_id: u64) -> GhostModeRuntimeState {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = match NativeApi::instance() {
+                Ok(api) => api,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        vehicle_id,
+                        "native api unavailable; falling back to inactive ghost mode state"
+                    );
+                    return GhostModeRuntimeState::default();
+                }
+            };
+            let Some(read_vehicle_ghost_mode_state) = api.boink_read_vehicle_ghost_mode_state()
+            else {
+                static WARNED_MISSING_READ_VEHICLE_GHOST_MODE_STATE: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_READ_VEHICLE_GHOST_MODE_STATE.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_read_vehicle_ghost_mode_state symbol not found in native library; falling back to inactive ghost mode state"
+                    );
+                }
+                return GhostModeRuntimeState::default();
+            };
+
+            let mut raw: sys::BoinkGhostModeRuntimeState = unsafe { core::mem::zeroed() };
+            tracing::debug!(
+                vehicle_id,
+                "boink_read_vehicle_ghost_mode_state (legacy dynamic symbol)"
+            );
+            let code = unsafe {
+                read_vehicle_ghost_mode_state(self.handle, vehicle_id, &mut raw as *mut _)
+            };
+            if code == sys::BOINK_OK {
+                return raw.into();
+            }
+            tracing::warn!(
+                vehicle_id,
+                code,
+                "boink_read_vehicle_ghost_mode_state failed; falling back to inactive ghost mode state"
+            );
+            return GhostModeRuntimeState::default();
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            let mut raw: sys::BoinkGhostModeRuntimeState = unsafe { core::mem::zeroed() };
+            tracing::debug!(vehicle_id, "boink_read_vehicle_ghost_mode_state");
+            let code = unsafe {
+                sys::boink_read_vehicle_ghost_mode_state(
+                    self.handle,
+                    vehicle_id,
+                    &mut raw as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                raw.into()
+            } else {
+                tracing::warn!(
+                    vehicle_id,
+                    code,
+                    "boink_read_vehicle_ghost_mode_state failed; falling back to inactive ghost mode state"
+                );
+                GhostModeRuntimeState::default()
+            }
         }
     }
 

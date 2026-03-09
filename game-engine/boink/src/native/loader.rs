@@ -28,6 +28,12 @@ pub type LegacyGetTrackDataFn =
 /// Legacy counterpart of vehicle-orientation update.
 pub type LegacySetVehicleOrientationFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, u64, *const boink_sys::BoinkQuaternion) -> i32;
+/// Legacy counterpart of vehicle ghost-mode runtime state query.
+pub type LegacyReadVehicleGhostModeStateFn = unsafe extern "C" fn(
+    boink_sys::BoinkHandle,
+    u64,
+    *mut boink_sys::BoinkGhostModeRuntimeState,
+) -> i32;
 
 /// Loads the Boink native library once and returns a reference to it.
 pub fn load_native_library() -> Result<&'static Library, NativeLoadError> {

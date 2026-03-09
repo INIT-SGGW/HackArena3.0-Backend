@@ -4,7 +4,10 @@ use boink_sys as sys;
 
 use crate::{
     error::{Error, Result},
-    model::math::{Quaternion, Vec3},
+    model::{
+        ghost::GhostModeRuntimeState,
+        math::{Quaternion, Vec3},
+    },
 };
 
 /// Transmission gear mapping shared with the native engine.
@@ -63,6 +66,8 @@ pub struct VehicleState {
     pub wheel_position: [Vec3; 4],
     /// Wheel angular speeds in RPM: [FL, FR, RL, RR].
     pub wheel_speeds: [f32; 4],
+    /// Runtime ghost mode state for this vehicle.
+    pub ghost_mode_runtime: GhostModeRuntimeState,
 }
 
 impl TryFrom<sys::BoinkVehicleState> for VehicleState {
@@ -80,6 +85,7 @@ impl TryFrom<sys::BoinkVehicleState> for VehicleState {
             brake_applied: raw.brake_applied,
             wheel_position: raw.wheel_position.map(Into::into),
             wheel_speeds: raw.wheel_speeds,
+            ghost_mode_runtime: GhostModeRuntimeState::default(),
         })
     }
 }

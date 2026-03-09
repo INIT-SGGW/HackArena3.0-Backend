@@ -1,13 +1,18 @@
 //! Transport-layer mapping helpers.
 
 use boink::model::{
-    Controls, Gear, GearShift as EngineGearShift, TrackData as EngineTrackData, VehicleState,
+    Controls, GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING, GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET,
+    GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET, GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING,
+    GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE, Gear, GearShift as EngineGearShift,
+    GhostModePhase as EngineGhostModePhase, GhostModeRuntimeState, TrackData as EngineTrackData,
+    VehicleState,
 };
 use proto::race::v1::{
     CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, FrontendCarFullState,
-    GearShift as ProtoGearShift, ParticipantOpponentState, ParticipantSelfState, Quaternion,
-    SetControlsDevRequest, SetControlsRequest, TrackData as ProtoTrackData, Vector3, WheelAngles,
-    WheelSpeeds,
+    GearShift as ProtoGearShift, GhostModeBlocker as ProtoGhostModeBlocker,
+    GhostModePhase as ProtoGhostModePhase, GhostModeState, ParticipantOpponentState,
+    ParticipantSelfState, Quaternion, SetControlsDevRequest, SetControlsRequest,
+    TrackData as ProtoTrackData, Vector3, WheelAngles, WheelSpeeds,
 };
 use tonic::Status;
 
@@ -92,6 +97,44 @@ pub(crate) fn participant_kinematics_from_state(state: &VehicleState) -> CarKine
     }
 }
 
+fn ghost_mode_phase_to_proto(phase: EngineGhostModePhase) -> i32 {
+    match phase {
+        EngineGhostModePhase::Inactive => ProtoGhostModePhase::Inactive as i32,
+        EngineGhostModePhase::PendingEnter => ProtoGhostModePhase::Inactive as i32,
+        EngineGhostModePhase::Active => ProtoGhostModePhase::Active as i32,
+        EngineGhostModePhase::PendingExit => ProtoGhostModePhase::PendingExit as i32,
+    }
+}
+
+fn ghost_mode_blockers_to_proto(blockers_mask: u32) -> Vec<i32> {
+    let mut blockers = Vec::new();
+    if (blockers_mask & GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET) != 0 {
+        blockers.push(ProtoGhostModeBlocker::LapsRequirementNotMet as i32);
+    }
+    if (blockers_mask & GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET) != 0 {
+        blockers.push(ProtoGhostModeBlocker::ExitSpeedNotMet as i32);
+    }
+    if (blockers_mask & GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING) != 0 {
+        blockers.push(ProtoGhostModeBlocker::ExitDelayRunning as i32);
+    }
+    if (blockers_mask & GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE) != 0 {
+        blockers.push(ProtoGhostModeBlocker::VehicleOverlapActive as i32);
+    }
+    if (blockers_mask & GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING) != 0 {
+        blockers.push(ProtoGhostModeBlocker::OverlapExitDelayRunning as i32);
+    }
+    blockers
+}
+
+fn ghost_mode_state_from_runtime(runtime: &GhostModeRuntimeState) -> GhostModeState {
+    GhostModeState {
+        can_collide_now: runtime.can_collide_now,
+        phase: ghost_mode_phase_to_proto(runtime.phase),
+        blockers: ghost_mode_blockers_to_proto(runtime.blockers_mask),
+        exit_delay_remaining_ms: runtime.exit_delay_remaining_ms,
+    }
+}
+
 pub(crate) fn participant_telemetry_from_state(
     state: &VehicleState,
     last_applied_client_seq: u64,
@@ -108,6 +151,7 @@ pub(crate) fn participant_telemetry_from_state(
         throttle_applied: state.throttle_applied,
         brake_applied: state.brake_applied,
         wheel_angles: Some(wheel_angles_from_state(state)),
+        ghost_mode: Some(ghost_mode_state_from_runtime(&state.ghost_mode_runtime)),
     }
 }
 
@@ -158,6 +202,7 @@ pub(crate) fn participant_opponent_state(
     ParticipantOpponentState {
         car_id,
         kinematics: Some(participant_kinematics_from_state(&state)),
+        ghost_mode: Some(ghost_mode_state_from_runtime(&state.ghost_mode_runtime)),
     }
 }
 
