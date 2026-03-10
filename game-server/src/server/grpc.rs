@@ -42,19 +42,19 @@ use crate::db::repos::weather::WeatherRepo;
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::LocalSandboxConfigStore;
 use crate::runtime::engine_worker::EngineClient;
-use crate::services::asset_service::AssetServiceImpl;
+use crate::services::asset::AssetServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
 #[cfg(feature = "official")]
-use crate::services::public_menu_service::{
+use crate::services::public_menu::{
     PublicMenuServiceImpl, SandboxConfigCacheInvalidation, UpcomingRacesCacheInvalidation,
 };
+use crate::services::race::RaceServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::race_config_admin::RaceConfigAdminServiceImpl;
-use crate::services::race_service::RaceServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::sandbox_admin::SandboxAdminServiceImpl;
-use crate::services::track_service::TrackServiceImpl;
+use crate::services::track::TrackServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::weather::WeatherAdminServiceImpl;
 use crate::services::weather::WeatherQueryServiceImpl;

@@ -36,7 +36,7 @@ use crate::runtime::engine_worker::{
     EngineActivityKind, EngineClient, EnginePendingSandboxActivation,
 };
 use crate::services::error_map::map_worker_err;
-use crate::services::public_menu_service::SandboxConfigCacheInvalidation;
+use crate::services::public_menu::SandboxConfigCacheInvalidation;
 
 /// Sandbox admin services backed by persisted sandbox config snapshot.
 #[derive(Clone)]

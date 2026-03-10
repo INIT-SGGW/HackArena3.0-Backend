@@ -20,7 +20,7 @@ use crate::db::repos::race_config::{
     RaceConfigInputRecord, RaceConfigRecord, RaceConfigRepo, RaceConfigRepoError,
 };
 use crate::domain::race_config::{RaceConfigDomainError, validate_schedule};
-use crate::services::public_menu_service::UpcomingRacesCacheInvalidation;
+use crate::services::public_menu::UpcomingRacesCacheInvalidation;
 
 /// RaceConfigAdmin service.
 #[derive(Clone)]
