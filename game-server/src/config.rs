@@ -5,6 +5,10 @@ use http::{HeaderName, HeaderValue};
 use tower_http::cors::{AllowOrigin, ExposeHeaders};
 
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
+#[cfg(feature = "local")]
+const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
+#[cfg(feature = "local")]
+const LOCAL_SANDBOX_STORE_RELATIVE_PATH: &str = "local/sandbox-configs.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEnv {
@@ -45,6 +49,10 @@ pub struct Config {
     pub jwks_url: String,
     pub jwt_audience: Vec<String>,
     pub jwt_issuers: Vec<String>,
+    #[cfg(feature = "local")]
+    pub local_sandbox_store_path: PathBuf,
+    #[cfg(feature = "local")]
+    pub local_max_active_sandboxes: u32,
     #[cfg(feature = "official")]
     pub official_database_url: String,
     #[cfg(feature = "official")]
@@ -155,6 +163,11 @@ impl Config {
             tracing::info!("debug drawer enabled");
         }
 
+        #[cfg(feature = "local")]
+        let local_sandbox_store_path = default_local_sandbox_store_path();
+        #[cfg(feature = "local")]
+        let local_max_active_sandboxes = LOCAL_MAX_ACTIVE_SANDBOXES;
+
         #[cfg(feature = "official")]
         let official_database_url = read_env_string("OFFICIAL_DATABASE_URL")
             .ok_or("OFFICIAL_DATABASE_URL must be set for official backend")?;
@@ -175,12 +188,24 @@ impl Config {
             jwks_url,
             jwt_audience,
             jwt_issuers,
+            #[cfg(feature = "local")]
+            local_sandbox_store_path,
+            #[cfg(feature = "local")]
+            local_max_active_sandboxes,
             #[cfg(feature = "official")]
             official_database_url,
             #[cfg(feature = "official")]
             official_db_max_connections,
         })
     }
+}
+
+#[cfg(feature = "local")]
+fn default_local_sandbox_store_path() -> PathBuf {
+    if let Some(dir) = exe_dir() {
+        return dir.join(LOCAL_SANDBOX_STORE_RELATIVE_PATH);
+    }
+    PathBuf::from(LOCAL_SANDBOX_STORE_RELATIVE_PATH)
 }
 
 fn exe_dir() -> Option<PathBuf> {
@@ -342,6 +367,7 @@ fn parse_list_env(name: &str) -> Result<Option<Vec<String>>, String> {
     Ok(Some(list))
 }
 
+#[cfg(feature = "official")]
 fn parse_u32_env(name: &str) -> Result<Option<u32>, String> {
     match read_env_string(name) {
         Some(value) => value

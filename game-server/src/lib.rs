@@ -5,6 +5,8 @@ pub mod config;
 #[cfg(feature = "official")]
 pub mod db;
 pub mod domain;
+#[cfg(feature = "local")]
+pub mod local;
 pub mod runtime;
 pub mod server;
 pub mod services;
