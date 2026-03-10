@@ -95,16 +95,33 @@ impl Config {
             .parse::<SocketAddr>()
             .map_err(|e| format!("Invalid LISTEN_ADDR: {}", e))?;
 
-        let allow_origin = match (
-            app_env.is_production(),
-            std::env::var("CORS_ALLOWED_ORIGINS"),
-        ) {
-            (true, Err(_)) => return Err("CORS_ALLOWED_ORIGINS must be set in production".into()),
-            (true, Ok(v)) if v.trim().is_empty() => {
+        let raw_allow_origins = std::env::var("CORS_ALLOWED_ORIGINS").ok();
+
+        #[cfg(feature = "local")]
+        {
+            let has_wildcard = match raw_allow_origins.as_deref() {
+                None => true,
+                Some(raw) => {
+                    let trimmed = raw.trim();
+                    trimmed.is_empty()
+                        || trimmed == "*"
+                        || raw.split(',').any(|entry| entry.trim() == "*")
+                }
+            };
+            if has_wildcard {
+                return Err(
+                    "CORS_ALLOWED_ORIGINS must contain explicit origins in local mode".into(),
+                );
+            }
+        }
+
+        let allow_origin = match (app_env.is_production(), raw_allow_origins.as_deref()) {
+            (true, None) => return Err("CORS_ALLOWED_ORIGINS must be set in production".into()),
+            (true, Some(v)) if v.trim().is_empty() => {
                 return Err("CORS_ALLOWED_ORIGINS cannot be empty in production".into());
             }
-            (_, Ok(v)) => parse_allow_origin(&v)?,
-            (false, Err(_)) => AllowOrigin::any(),
+            (_, Some(v)) => parse_allow_origin(v)?,
+            (false, None) => AllowOrigin::any(),
         };
 
         let raw_expose_headers = std::env::var("CORS_EXPOSE_HEADERS").ok();
