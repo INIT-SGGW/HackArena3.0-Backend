@@ -34,7 +34,7 @@
 
 #define BOINK_C_API_VERSION_MINOR 11
 
-#define BOINK_C_API_VERSION_PATCH 1
+#define BOINK_C_API_VERSION_PATCH 2
 
 /**
  * Indicates successful operation.
@@ -70,36 +70,6 @@
  * Indicates an internal engine error.
  */
 #define BOINK_ERR_INTERNAL 100
-
-/**
- * completed_laps is below GhostModeSettings.until_completed_laps.
- */
-#define BOINK_GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET (1 << 0)
-
-/**
- * Current speed is not above GhostModeSettings.exit_speed_min_mps.
- */
-#define BOINK_GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET (1 << 1)
-
-/**
- * Exit speed condition is met, but exit delay is still counting down.
- */
-#define BOINK_GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING (1 << 2)
-
-/**
- * Vehicle overlap is currently present and prevents ghost mode exit.
- */
-#define BOINK_GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE (1 << 3)
-
-/**
- * Overlap is cleared, but no-overlap exit delay is still counting down.
- */
-#define BOINK_GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING (1 << 4)
-
-/**
- * Vehicle is currently in pit area.
- */
-#define BOINK_GHOST_MODE_BLOCKER_IN_PIT (1 << 5)
 
 /**
  * Requested gear-shift operation for a single controls command.
@@ -140,6 +110,38 @@ typedef enum BoinkGhostModePhase {
    */
   BOINK_GHOST_MODE_PHASE_PENDING_EXIT = 3,
 } BoinkGhostModePhase;
+
+/**
+ * Active conditions that can keep a vehicle in ghost mode.
+ *
+ * Values are bit flags intended to be OR-combined inside [`BoinkGhostModeBlockersMask`].
+ */
+typedef enum BoinkGhostModeBlocker {
+  /**
+   * completed_laps is below GhostModeSettings.until_completed_laps.
+   */
+  BOINK_GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET = (1 << 0),
+  /**
+   * Current speed is not above GhostModeSettings.exit_speed_min_mps.
+   */
+  BOINK_GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET = (1 << 1),
+  /**
+   * Exit speed condition is met, but exit delay is still counting down.
+   */
+  BOINK_GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING = (1 << 2),
+  /**
+   * Vehicle overlap is currently present and prevents ghost mode exit.
+   */
+  BOINK_GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE = (1 << 3),
+  /**
+   * Overlap is cleared, but no-overlap exit delay is still counting down.
+   */
+  BOINK_GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING = (1 << 4),
+  /**
+   * Vehicle is currently in pit area.
+   */
+  BOINK_GHOST_MODE_BLOCKER_IN_PIT = (1 << 5),
+} BoinkGhostModeBlocker;
 
 /**
  * Represents an opaque engine handle.
@@ -414,6 +416,11 @@ typedef struct BoinkVehicleState {
 } BoinkVehicleState;
 
 /**
+ * Bitmask of active ghost-mode blockers.
+ */
+typedef unsigned int BoinkGhostModeBlockersMask;
+
+/**
  * Runtime ghost mode state for a single vehicle.
  */
 typedef struct BoinkGhostModeRuntimeState {
@@ -428,9 +435,9 @@ typedef struct BoinkGhostModeRuntimeState {
   /**
    * Bitmask of currently active blockers.
    *
-   * Uses `BOINK_GHOST_MODE_BLOCKER_*` constants.
+   * Uses bitwise OR of [`BoinkGhostModeBlocker`] values.
    */
-  unsigned int blockers_mask;
+  BoinkGhostModeBlockersMask blockers_mask;
   /**
    * Remaining time to complete ghost-mode enter countdown.
    */

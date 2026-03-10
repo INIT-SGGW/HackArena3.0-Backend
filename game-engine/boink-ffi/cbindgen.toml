@@ -37,3 +37,4 @@ parse_deps = false
 
 [export]
 exclude = ["bool"]
+include = ["BoinkGhostModeBlocker"]

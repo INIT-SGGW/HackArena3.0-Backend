@@ -48,21 +48,22 @@ impl From<sys::BoinkGhostModePhase> for GhostModePhase {
 
 /// completed_laps is below GhostModeSettings.until_completed_laps.
 pub const GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET: u32 =
-    sys::BOINK_GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET;
+    sys::BoinkGhostModeBlocker::BOINK_GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET as u32;
 /// Current speed is not above GhostModeSettings.exit_speed_min_mps.
 pub const GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET: u32 =
-    sys::BOINK_GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET;
+    sys::BoinkGhostModeBlocker::BOINK_GHOST_MODE_BLOCKER_EXIT_SPEED_NOT_MET as u32;
 /// Exit speed condition is met, but exit delay is still counting down.
 pub const GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING: u32 =
-    sys::BOINK_GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING;
+    sys::BoinkGhostModeBlocker::BOINK_GHOST_MODE_BLOCKER_EXIT_DELAY_RUNNING as u32;
 /// Vehicle overlap is currently present and prevents ghost mode exit.
 pub const GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE: u32 =
-    sys::BOINK_GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE;
+    sys::BoinkGhostModeBlocker::BOINK_GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE as u32;
 /// Overlap is cleared, but no-overlap exit delay is still counting down.
 pub const GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING: u32 =
-    sys::BOINK_GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING;
+    sys::BoinkGhostModeBlocker::BOINK_GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING as u32;
 /// Vehicle is currently in pit area.
-pub const GHOST_MODE_BLOCKER_IN_PIT: u32 = sys::BOINK_GHOST_MODE_BLOCKER_IN_PIT;
+pub const GHOST_MODE_BLOCKER_IN_PIT: u32 =
+    sys::BoinkGhostModeBlocker::BOINK_GHOST_MODE_BLOCKER_IN_PIT as u32;
 
 /// Runtime ghost mode state for a single vehicle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
