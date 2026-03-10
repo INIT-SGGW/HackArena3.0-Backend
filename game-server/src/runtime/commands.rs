@@ -1,5 +1,7 @@
 //! Command types sent to the engine worker.
 
+#[cfg(feature = "local")]
+use boink::model::WeatherParams;
 use boink::model::{AcceptedControls, Controls, GhostModeSettings, TrackData, VehicleState};
 use tokio::sync::oneshot;
 
@@ -72,6 +74,12 @@ pub enum EngineCommand {
     SetGhostModeSettings {
         target: EngineCommandTarget,
         settings: GhostModeSettings,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
+    #[cfg(feature = "local")]
+    SetWeather {
+        sandbox_id: String,
+        weather: WeatherParams,
         reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
     },
     DespawnCar {

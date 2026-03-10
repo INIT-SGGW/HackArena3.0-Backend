@@ -20,6 +20,8 @@ use boink::model::ghost::GhostModeSettings;
 use boink::model::math::Vec3;
 use boink::model::state::VehicleState;
 use boink::model::track::TrackData;
+#[cfg(feature = "local")]
+use boink::model::weather::WeatherParams;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -480,6 +482,28 @@ impl EngineClient {
             .send(EngineCommand::SetGhostModeSettings {
                 target,
                 settings,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Updates weather settings in target sandbox world.
+    #[cfg(feature = "local")]
+    pub async fn set_sandbox_weather(
+        &self,
+        sandbox_id: String,
+        weather: WeatherParams,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetWeather {
+                sandbox_id,
+                weather,
                 reply_tx,
             })
             .await
@@ -1032,6 +1056,28 @@ async fn handle_command(
                         .map_err(EngineWorkerError::Engine)?;
                     slot.ghost_mode_settings = settings;
                     Ok(())
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        #[cfg(feature = "local")]
+        EngineCommand::SetWeather {
+            sandbox_id,
+            weather,
+            reply_tx,
+        } => {
+            let target = EngineCommandTarget::Sandbox { sandbox_id };
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_weather(weather)
+                        .map_err(EngineWorkerError::Engine)
                 },
             )
             .await;
