@@ -8,6 +8,7 @@ use super::error::LocalSandboxConfigStoreError;
 use super::model::{
     LocalSandboxConfigRecord, LocalSandboxConfigSnapshot, LocalSandboxSpawnModeRecord,
     LocalTimeOfDaySettingsRecord, LocalWeatherSettingsRecord, validate_local_sandbox_config_input,
+    validate_local_weather_settings,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -178,6 +179,7 @@ impl LocalSandboxConfigStore {
         sandbox_id: &str,
         weather: LocalWeatherSettingsRecord,
     ) -> Result<u64, LocalSandboxConfigStoreError> {
+        validate_local_weather_settings(weather)?;
         let mut guard = self.state.write().await;
         ensure_expected_revision(expected_revision, guard.revision)?;
         let Some(current) = guard

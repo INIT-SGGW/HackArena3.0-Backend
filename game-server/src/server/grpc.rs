@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use proto::race::v1::asset_service_server::AssetServiceServer;
+#[cfg(feature = "local")]
+use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::public_menu_service_server::PublicMenuServiceServer;
 #[cfg(feature = "official")]
@@ -37,8 +39,12 @@ use crate::db::repos::race_config::RaceConfigRepo;
 use crate::db::repos::sandbox_config::SandboxConfigRepo;
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
+#[cfg(feature = "local")]
+use crate::local::sandbox_config_store::LocalSandboxConfigStore;
 use crate::runtime::engine_worker::EngineClient;
 use crate::services::asset_service::AssetServiceImpl;
+#[cfg(feature = "local")]
+use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::public_menu_service::{
     PublicMenuServiceImpl, SandboxConfigCacheInvalidation, UpcomingRacesCacheInvalidation,
@@ -78,6 +84,10 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<WeatherQueryServiceServer<WeatherQueryServiceImpl>>()
         .await;
+    #[cfg(feature = "local")]
+    health_reporter
+        .set_serving::<LocalSandboxAdminServiceServer<LocalSandboxAdminServiceImpl>>()
+        .await;
     #[cfg(feature = "official")]
     health_reporter
         .set_serving::<WeatherAdminServiceServer<WeatherAdminServiceImpl>>()
@@ -115,6 +125,8 @@ pub async fn serve_grpc(
     let sandbox_engine = engine.clone();
     #[cfg(feature = "official")]
     let public_menu_engine = engine.clone();
+    #[cfg(feature = "local")]
+    let local_sandbox_engine = engine.clone();
     let track_impl = TrackServiceImpl::new(engine);
 
     #[cfg(feature = "official")]
@@ -156,6 +168,22 @@ pub async fn serve_grpc(
 
     #[cfg(not(feature = "official"))]
     let weather_query_impl = WeatherQueryServiceImpl::default();
+    #[cfg(feature = "local")]
+    let local_sandbox_admin_impl = {
+        let store =
+            LocalSandboxConfigStore::load_or_create(cfg.local_sandbox_store_path.clone()).await?;
+        tracing::info!(
+            path = %store.path().display(),
+            max_active_sandboxes = cfg.local_max_active_sandboxes,
+            "local sandbox config store ready"
+        );
+        LocalSandboxAdminServiceImpl::new(
+            store,
+            local_sandbox_engine,
+            cfg.local_max_active_sandboxes,
+            cfg.tracks_dir.clone(),
+        )
+    };
 
     let cors = cors_layer(&cfg);
 
@@ -212,6 +240,10 @@ pub async fn serve_grpc(
     let server = server.add_service(RuntimeAdminServiceServer::new(sandbox_admin_impl));
     #[cfg(feature = "official")]
     let server = server.add_service(PublicMenuServiceServer::new(public_menu_impl));
+    #[cfg(feature = "local")]
+    let server = server.add_service(LocalSandboxAdminServiceServer::new(
+        local_sandbox_admin_impl,
+    ));
 
     server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))

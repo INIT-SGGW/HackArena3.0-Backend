@@ -2,6 +2,8 @@
 
 pub mod asset_service;
 mod error_map;
+#[cfg(feature = "local")]
+pub mod local_sandbox_admin;
 mod mappers;
 #[cfg(feature = "official")]
 pub mod public_menu_service;

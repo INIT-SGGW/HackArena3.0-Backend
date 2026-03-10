@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use super::error::LocalSandboxConfigStoreError;
 
+const MAX_SANDBOX_NAME_LEN_CHARS: usize = 64;
+const MAX_GHOST_DELAY_MS: u32 = 600_000;
+const MAX_GHOST_UNTIL_COMPLETED_LAPS: u32 = 100_000;
+
 /// Snapshot of persisted local sandbox configuration data.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalSandboxConfigSnapshot {
@@ -97,17 +101,36 @@ pub enum LocalSandboxSpawnModeRecord {
 pub fn validate_local_sandbox_config_input(
     input: &LocalSandboxConfigInputRecord,
 ) -> Result<(), LocalSandboxConfigStoreError> {
-    if input.sandbox_name.trim().is_empty() {
+    let sandbox_name = input.sandbox_name.trim();
+    if sandbox_name.is_empty() {
         return Err(LocalSandboxConfigStoreError::InvalidConfig {
             message: "sandbox_name must be non-empty".to_string(),
         });
     }
-    if input.map_id.trim().is_empty() {
+    if sandbox_name.chars().count() > MAX_SANDBOX_NAME_LEN_CHARS {
+        return Err(LocalSandboxConfigStoreError::InvalidConfig {
+            message: format!(
+                "sandbox_name must be at most {MAX_SANDBOX_NAME_LEN_CHARS} characters"
+            ),
+        });
+    }
+
+    let map_id = input.map_id.trim();
+    if map_id.is_empty() {
         return Err(LocalSandboxConfigStoreError::InvalidConfig {
             message: "map_id must be non-empty".to_string(),
         });
     }
+    if !map_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(LocalSandboxConfigStoreError::InvalidConfig {
+            message: "map_id contains invalid characters".to_string(),
+        });
+    }
     validate_time_of_day_settings(input.time_of_day)?;
+    validate_local_weather_settings(input.weather)?;
 
     if let Some(ghost) = input.ghost_mode {
         if !ghost.enter_speed_max_mps.is_finite() || ghost.enter_speed_max_mps < 0.0 {
@@ -126,8 +149,44 @@ pub fn validate_local_sandbox_config_input(
                     .to_string(),
             });
         }
+        if ghost.enter_delay_ms > MAX_GHOST_DELAY_MS {
+            return Err(LocalSandboxConfigStoreError::InvalidConfig {
+                message: format!("ghost_mode.enter_delay_ms must be <= {MAX_GHOST_DELAY_MS}"),
+            });
+        }
+        if ghost.exit_delay_ms > MAX_GHOST_DELAY_MS {
+            return Err(LocalSandboxConfigStoreError::InvalidConfig {
+                message: format!("ghost_mode.exit_delay_ms must be <= {MAX_GHOST_DELAY_MS}"),
+            });
+        }
+        if ghost.vehicle_overlap_exit_delay_ms > MAX_GHOST_DELAY_MS {
+            return Err(LocalSandboxConfigStoreError::InvalidConfig {
+                message: format!(
+                    "ghost_mode.vehicle_overlap_exit_delay_ms must be <= {MAX_GHOST_DELAY_MS}"
+                ),
+            });
+        }
+        if ghost.until_completed_laps > MAX_GHOST_UNTIL_COMPLETED_LAPS {
+            return Err(LocalSandboxConfigStoreError::InvalidConfig {
+                message: format!(
+                    "ghost_mode.until_completed_laps must be <= {MAX_GHOST_UNTIL_COMPLETED_LAPS}"
+                ),
+            });
+        }
     }
 
+    Ok(())
+}
+
+/// Validates local weather settings.
+pub fn validate_local_weather_settings(
+    settings: LocalWeatherSettingsRecord,
+) -> Result<(), LocalSandboxConfigStoreError> {
+    if !(1..=30).contains(&settings.temperature_c) {
+        return Err(LocalSandboxConfigStoreError::InvalidConfig {
+            message: "weather.temperature_c must be in range 1..=30".to_string(),
+        });
+    }
     Ok(())
 }
 
