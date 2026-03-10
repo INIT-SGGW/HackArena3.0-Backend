@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::db::repos::sandbox_config::SandboxConfigRepo;
-use crate::services::sandbox_mappers::{
+use crate::services::sandbox_admin::mappers::{
     engine_ghost_mode_settings_from_record, runtime_time_of_day_preset_from_proto,
 };
 

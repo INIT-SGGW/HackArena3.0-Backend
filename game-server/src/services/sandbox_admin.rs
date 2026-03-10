@@ -1,5 +1,7 @@
 //! gRPC sandbox admin services implementation.
 
+pub(crate) mod mappers;
+
 use std::sync::Arc;
 
 use proto::race::v1::runtime_admin_service_server::RuntimeAdminService;
@@ -20,6 +22,12 @@ use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use self::mappers::{
+    admin_sandbox_runtime_info_from_record, engine_ghost_mode_settings_from_record,
+    find_sandbox_by_id, pending_sandbox_operation_to_proto, runtime_time_of_day_preset_from_proto,
+    runtime_time_of_day_preset_to_proto, sandbox_input_from_proto, sandbox_to_proto,
+    timestamp_to_unix_ms, unix_ms_to_timestamp, utc_now_timestamp,
+};
 use crate::auth::auth_claims::TokenValidator;
 use crate::db::repos::sandbox_config::{
     SandboxConfigInputRecord, SandboxConfigRecord, SandboxConfigRepo, SandboxConfigRepoError,
@@ -29,12 +37,6 @@ use crate::runtime::engine_worker::{
 };
 use crate::services::error_map::map_worker_err;
 use crate::services::public_menu_service::SandboxConfigCacheInvalidation;
-use crate::services::sandbox_mappers::{
-    admin_sandbox_runtime_info_from_record, engine_ghost_mode_settings_from_record,
-    find_sandbox_by_id, pending_sandbox_operation_to_proto, runtime_time_of_day_preset_from_proto,
-    runtime_time_of_day_preset_to_proto, sandbox_input_from_proto, sandbox_to_proto,
-    timestamp_to_unix_ms, unix_ms_to_timestamp, utc_now_timestamp,
-};
 
 /// Sandbox admin services backed by persisted sandbox config snapshot.
 #[derive(Clone)]

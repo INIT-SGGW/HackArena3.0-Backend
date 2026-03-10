@@ -1,5 +1,7 @@
 //! gRPC RaceConfigAdminService implementation.
 
+mod mappers;
+
 use std::sync::Arc;
 
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminService;
@@ -12,15 +14,13 @@ use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use self::mappers::{race_input_from_proto, race_to_proto, repo_schedule_to_domain};
 use crate::auth::auth_claims::TokenValidator;
 use crate::db::repos::race_config::{
     RaceConfigInputRecord, RaceConfigRecord, RaceConfigRepo, RaceConfigRepoError,
 };
 use crate::domain::race_config::{RaceConfigDomainError, validate_schedule};
 use crate::services::public_menu_service::UpcomingRacesCacheInvalidation;
-use crate::services::race_config_mappers::{
-    race_input_from_proto, race_to_proto, repo_schedule_to_domain,
-};
 
 /// RaceConfigAdmin service.
 #[derive(Clone)]

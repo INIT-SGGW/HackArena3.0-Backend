@@ -23,12 +23,12 @@ use tracing::error;
 use tracing::{debug, warn};
 
 #[cfg(feature = "official")]
+use super::mappers::forecast_points_to_proto;
+#[cfg(feature = "official")]
+use super::stochastic::stochasticize_forecast_points;
+#[cfg(feature = "official")]
 use crate::domain::weather::project_forecast;
 use crate::domain::weather::{ScheduleEntry, temperature_c_for_weather_type, weather_type_at};
-#[cfg(feature = "official")]
-use crate::services::weather_mappers::forecast_points_to_proto;
-#[cfg(feature = "official")]
-use crate::services::weather_stochastic::stochasticize_forecast_points;
 
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
@@ -572,6 +572,7 @@ fn current_time_ms() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(feature = "official")]
 fn current_minute_start_ms() -> i64 {
     let now_ms = current_time_ms();
     now_ms - now_ms.rem_euclid(MINUTE_MS)

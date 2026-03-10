@@ -18,7 +18,8 @@ use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 use crate::db::repos::sandbox_config::{SandboxConfigRecord, SandboxConfigRepo};
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
-use crate::services::sandbox_mappers::{
+#[cfg(feature = "official")]
+use crate::services::sandbox_admin::mappers::{
     find_sandbox_by_id, public_sandbox_runtime_info_from_record,
     runtime_time_of_day_preset_to_proto, unix_ms_to_timestamp, utc_now_timestamp,
 };

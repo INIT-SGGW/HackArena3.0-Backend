@@ -50,14 +50,14 @@ use crate::services::public_menu_service::{
     PublicMenuServiceImpl, SandboxConfigCacheInvalidation, UpcomingRacesCacheInvalidation,
 };
 #[cfg(feature = "official")]
-use crate::services::race_config_admin_service::RaceConfigAdminServiceImpl;
+use crate::services::race_config_admin::RaceConfigAdminServiceImpl;
 use crate::services::race_service::RaceServiceImpl;
 #[cfg(feature = "official")]
-use crate::services::sandbox_admin_service::SandboxAdminServiceImpl;
+use crate::services::sandbox_admin::SandboxAdminServiceImpl;
 use crate::services::track_service::TrackServiceImpl;
 #[cfg(feature = "official")]
-use crate::services::weather_admin_service::WeatherAdminServiceImpl;
-use crate::services::weather_query_service::WeatherQueryServiceImpl;
+use crate::services::weather::WeatherAdminServiceImpl;
+use crate::services::weather::WeatherQueryServiceImpl;
 
 use super::cors::cors_layer;
 use super::shutdown::shutdown_signal;
