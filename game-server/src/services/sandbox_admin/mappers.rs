@@ -9,6 +9,7 @@ use proto::race::v1::{
 };
 use tonic::Status;
 
+use super::validation::{validate_ghost_mode, validate_sandbox_name_and_map_id};
 use crate::db::repos::sandbox_config::{
     GhostModeSettingsRecord, SandboxConfigInputRecord, SandboxConfigRecord,
 };
@@ -31,12 +32,7 @@ pub fn sandbox_input_from_proto(
         None => None,
     };
 
-    if input.sandbox_name.trim().is_empty() {
-        return Err(Status::invalid_argument("sandbox_name must be non-empty"));
-    }
-    if input.map_id.trim().is_empty() {
-        return Err(Status::invalid_argument("map_id must be non-empty"));
-    }
+    validate_sandbox_name_and_map_id(&input.sandbox_name, &input.map_id)?;
 
     Ok(SandboxConfigInputRecord {
         sandbox_name: input.sandbox_name.clone(),
@@ -67,21 +63,8 @@ pub fn sandbox_input_to_proto(input: SandboxConfigInputRecord) -> ProtoSandboxCo
 fn ghost_mode_from_proto(
     proto: &ProtoGhostModeSettings,
 ) -> Result<GhostModeSettingsRecord, Status> {
-    if !proto.enter_speed_max_mps.is_finite() || proto.enter_speed_max_mps < 0.0 {
-        return Err(Status::invalid_argument(
-            "ghost_mode.enter_speed_max_mps must be finite and >= 0",
-        ));
-    }
-    if !proto.exit_speed_min_mps.is_finite() || proto.exit_speed_min_mps < 0.0 {
-        return Err(Status::invalid_argument(
-            "ghost_mode.exit_speed_min_mps must be finite and >= 0",
-        ));
-    }
-    if proto.enter_speed_max_mps > proto.exit_speed_min_mps {
-        return Err(Status::invalid_argument(
-            "ghost_mode.enter_speed_max_mps must be <= ghost_mode.exit_speed_min_mps",
-        ));
-    }
+    validate_ghost_mode(proto)?;
+
     Ok(GhostModeSettingsRecord {
         enabled: proto.enabled,
         enter_speed_max_mps: proto.enter_speed_max_mps,
