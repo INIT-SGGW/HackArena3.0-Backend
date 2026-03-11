@@ -5,6 +5,8 @@ use boink::model::WeatherParams;
 use boink::model::{AcceptedControls, Controls, GhostModeSettings, TrackData, VehicleState};
 use tokio::sync::oneshot;
 
+#[cfg(feature = "local")]
+use super::engine_worker::EngineRuntimeWeatherNow;
 use super::engine_worker::{
     EngineActivityKind, EngineCommandTarget, EnginePendingSandboxActivation, EngineRuntimeState,
     EngineRuntimeTimeOfDayPreset, EngineWorkerError,
@@ -80,6 +82,7 @@ pub enum EngineCommand {
     SetWeather {
         sandbox_id: String,
         weather: WeatherParams,
+        weather_now: EngineRuntimeWeatherNow,
         reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
     },
     DespawnCar {

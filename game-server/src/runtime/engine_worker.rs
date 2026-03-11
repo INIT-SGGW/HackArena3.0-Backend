@@ -71,6 +71,26 @@ pub enum EngineRuntimeTimeOfDayPreset {
     Night,
 }
 
+/// Local runtime weather type reflected by engine worker sandbox snapshots.
+#[cfg(feature = "local")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineRuntimeWeatherType {
+    Clear,
+    PartlyCloudy,
+    Overcast,
+    LightRain,
+    MediumRain,
+    HeavyRain,
+}
+
+/// Local runtime weather snapshot reflected by engine worker sandbox snapshots.
+#[cfg(feature = "local")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineRuntimeWeatherNow {
+    pub weather_type: EngineRuntimeWeatherType,
+    pub temperature_c: i32,
+}
+
 /// Scheduled sandbox activation/deactivation stored in runtime metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnginePendingSandboxActivation {
@@ -88,6 +108,8 @@ pub struct EngineActiveSandboxState {
     pub sandbox_id: String,
     pub map_id: String,
     pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
+    #[cfg(feature = "local")]
+    pub weather_now: Option<EngineRuntimeWeatherNow>,
 }
 
 struct EngineWorldSlot {
@@ -498,12 +520,14 @@ impl EngineClient {
         &self,
         sandbox_id: String,
         weather: WeatherParams,
+        weather_now: EngineRuntimeWeatherNow,
     ) -> Result<(), EngineWorkerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::SetWeather {
                 sandbox_id,
                 weather,
+                weather_now,
                 reply_tx,
             })
             .await
@@ -1066,9 +1090,12 @@ async fn handle_command(
         EngineCommand::SetWeather {
             sandbox_id,
             weather,
+            weather_now,
             reply_tx,
         } => {
-            let target = EngineCommandTarget::Sandbox { sandbox_id };
+            let target = EngineCommandTarget::Sandbox {
+                sandbox_id: sandbox_id.clone(),
+            };
             let result = with_target_slot_mut(
                 &target,
                 runtime_state,
@@ -1080,7 +1107,20 @@ async fn handle_command(
                         .map_err(EngineWorkerError::Engine)
                 },
             )
-            .await;
+            .await
+            .and_then(|_| {
+                let active = runtime_state
+                    .active_sandboxes
+                    .iter_mut()
+                    .find(|entry| entry.sandbox_id == sandbox_id)
+                    .ok_or_else(|| {
+                        EngineWorkerError::InvalidArgument(
+                            "sandbox_id does not match active sandbox session".to_string(),
+                        )
+                    })?;
+                active.weather_now = Some(weather_now);
+                Ok(())
+            });
             let _ = reply_tx.send(result);
             Ok(())
         }
@@ -1223,6 +1263,8 @@ fn switch_runtime(
                     sandbox_id: sandbox_id.clone(),
                     map_id: map_id.clone(),
                     time_of_day_preset,
+                    #[cfg(feature = "local")]
+                    weather_now: None,
                 },
             );
             upserted_sandbox_id = Some(sandbox_id.clone());

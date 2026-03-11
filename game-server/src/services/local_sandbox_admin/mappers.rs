@@ -13,7 +13,9 @@ use crate::local::sandbox_config_store::{
     LocalTimeOfDaySettingsRecord, LocalWeatherSettingsRecord, RuntimeTimeOfDayPresetRecord,
     WeatherTypeRecord,
 };
-use crate::runtime::engine_worker::EngineRuntimeTimeOfDayPreset;
+use crate::runtime::engine_worker::{
+    EngineRuntimeTimeOfDayPreset, EngineRuntimeWeatherNow, EngineRuntimeWeatherType,
+};
 
 pub(crate) fn local_time_of_day_from_proto(
     proto: &LocalTimeOfDaySettings,
@@ -118,6 +120,15 @@ pub(crate) fn weather_params_from_local(weather: LocalWeatherSettingsRecord) -> 
         cloudiness: params.cloudiness,
         temperature_c: weather.temperature_c as f32,
         rain_intensity: params.rain_intensity,
+    }
+}
+
+pub(crate) fn runtime_weather_now_from_local(
+    weather: LocalWeatherSettingsRecord,
+) -> EngineRuntimeWeatherNow {
+    EngineRuntimeWeatherNow {
+        weather_type: weather_type_record_to_runtime(weather.weather_type),
+        temperature_c: weather.temperature_c,
     }
 }
 
@@ -254,5 +265,16 @@ fn weather_type_record_to_proto(weather_type: WeatherTypeRecord) -> WeatherType 
         WeatherTypeRecord::LightRain => WeatherType::LightRain,
         WeatherTypeRecord::MediumRain => WeatherType::MediumRain,
         WeatherTypeRecord::HeavyRain => WeatherType::HeavyRain,
+    }
+}
+
+fn weather_type_record_to_runtime(weather_type: WeatherTypeRecord) -> EngineRuntimeWeatherType {
+    match weather_type {
+        WeatherTypeRecord::Clear => EngineRuntimeWeatherType::Clear,
+        WeatherTypeRecord::PartlyCloudy => EngineRuntimeWeatherType::PartlyCloudy,
+        WeatherTypeRecord::Overcast => EngineRuntimeWeatherType::Overcast,
+        WeatherTypeRecord::LightRain => EngineRuntimeWeatherType::LightRain,
+        WeatherTypeRecord::MediumRain => EngineRuntimeWeatherType::MediumRain,
+        WeatherTypeRecord::HeavyRain => EngineRuntimeWeatherType::HeavyRain,
     }
 }

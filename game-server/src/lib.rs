@@ -1,5 +1,8 @@
 //! Game server library entrypoints and shared runtime helpers.
 
+#[cfg(all(feature = "official", feature = "local"))]
+compile_error!("features `official` and `local` are mutually exclusive");
+
 pub mod auth;
 pub mod config;
 #[cfg(feature = "official")]

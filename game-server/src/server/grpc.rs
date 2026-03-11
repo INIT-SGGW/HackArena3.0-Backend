@@ -55,6 +55,8 @@ use crate::services::race_config_admin::RaceConfigAdminServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::sandbox_admin::SandboxAdminServiceImpl;
 use crate::services::track::TrackServiceImpl;
+#[cfg(feature = "local")]
+use crate::services::weather::LocalWeatherEventHub;
 #[cfg(feature = "official")]
 use crate::services::weather::WeatherAdminServiceImpl;
 use crate::services::weather::WeatherQueryServiceImpl;
@@ -166,7 +168,14 @@ pub async fn serve_grpc(
         )
     };
 
-    #[cfg(not(feature = "official"))]
+    #[cfg(feature = "local")]
+    let local_weather_events = LocalWeatherEventHub::new();
+    #[cfg(feature = "local")]
+    let weather_query_impl = WeatherQueryServiceImpl::for_local(
+        local_sandbox_engine.clone(),
+        local_weather_events.clone(),
+    );
+    #[cfg(all(not(feature = "official"), not(feature = "local")))]
     let weather_query_impl = WeatherQueryServiceImpl::default();
     #[cfg(feature = "local")]
     let local_sandbox_admin_impl = {
@@ -182,6 +191,7 @@ pub async fn serve_grpc(
             local_sandbox_engine,
             cfg.local_max_active_sandboxes,
             cfg.tracks_dir.clone(),
+            local_weather_events,
         )
     };
 

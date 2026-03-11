@@ -9,8 +9,8 @@ use proto::weather::v1::weather_query_service_server::WeatherQueryService;
 use proto::weather::v1::{
     ForecastPoint as ProtoForecastPoint, ForecastPreset, ForecastUpdateEvent,
     GetForecastNowRequest, GetForecastNowResponse, GetWeatherNowRequest, GetWeatherNowResponse,
-    StreamForecastUpdatesRequest, StreamWeatherUpdatesRequest, WeatherNow, WeatherType,
-    WeatherUpdateEvent,
+    StreamForecastUpdatesRequest, StreamWeatherUpdatesRequest, WeatherNow, WeatherTarget,
+    WeatherType, WeatherUpdateEvent, weather_target,
 };
 use tokio::sync::mpsc;
 #[cfg(feature = "official")]
@@ -26,9 +26,17 @@ use tracing::{debug, warn};
 use super::mappers::forecast_points_to_proto;
 #[cfg(feature = "official")]
 use super::stochastic::stochasticize_forecast_points;
+#[cfg(feature = "local")]
+use super::{LocalWeatherEventHub, LocalWeatherEventKind};
+use crate::domain::weather::ScheduleEntry;
 #[cfg(feature = "official")]
 use crate::domain::weather::project_forecast;
-use crate::domain::weather::{ScheduleEntry, temperature_c_for_weather_type, weather_type_at};
+#[cfg(feature = "official")]
+use crate::domain::weather::{temperature_c_for_weather_type, weather_type_at};
+#[cfg(feature = "local")]
+use crate::runtime::engine_worker::{EngineClient, EngineRuntimeWeatherType};
+#[cfg(feature = "local")]
+use crate::services::error_map::map_worker_err;
 
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
@@ -42,6 +50,8 @@ static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 pub struct WeatherQueryServiceImpl {
     #[cfg(feature = "official")]
     inner: Option<Arc<WeatherQueryInner>>,
+    #[cfg(feature = "local")]
+    local_inner: Option<LocalWeatherQueryInner>,
 }
 
 #[cfg(feature = "official")]
@@ -76,6 +86,19 @@ struct CachedForecast {
     schedule_generation: Option<u64>,
 }
 
+#[cfg(feature = "local")]
+#[derive(Clone)]
+struct LocalWeatherQueryInner {
+    engine: EngineClient,
+    weather_events: LocalWeatherEventHub,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedWeatherTarget {
+    OfficialRace,
+    Sandbox { sandbox_id: String },
+}
+
 impl WeatherQueryServiceImpl {
     #[cfg(feature = "official")]
     pub fn with_repo(repo: WeatherRepo) -> Self {
@@ -88,7 +111,21 @@ impl WeatherQueryServiceImpl {
         });
 
         tokio::spawn(run_cache_refresh_loop(inner.clone()));
-        Self { inner: Some(inner) }
+        Self {
+            inner: Some(inner),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(feature = "local")]
+    pub fn for_local(engine: EngineClient, weather_events: LocalWeatherEventHub) -> Self {
+        Self {
+            local_inner: Some(LocalWeatherQueryInner {
+                engine,
+                weather_events,
+            }),
+            ..Self::default()
+        }
     }
 }
 
@@ -99,62 +136,97 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
 
     async fn get_weather_now(
         &self,
-        _request: Request<GetWeatherNowRequest>,
+        request: Request<GetWeatherNowRequest>,
     ) -> Result<Response<GetWeatherNowResponse>, Status> {
-        let now_ms = current_time_ms();
-        let schedule = self.current_schedule().await?;
-        let weather_type = weather_type_at(&schedule, now_ms).unwrap_or(WeatherType::Unspecified);
-        let temperature_c = temperature_c_for_weather_type(weather_type);
-
-        Ok(Response::new(GetWeatherNowResponse {
-            now: Some(WeatherNow {
-                r#type: weather_type as i32,
-                temperature_c,
-            }),
-        }))
+        let target = parse_required_weather_target(request.into_inner().target)?;
+        let now = self.weather_now_for_target(target).await?;
+        Ok(Response::new(GetWeatherNowResponse { now: Some(now) }))
     }
 
     async fn stream_weather_updates(
         &self,
         request: Request<StreamWeatherUpdatesRequest>,
     ) -> Result<Response<Self::StreamWeatherUpdatesStream>, Status> {
-        let _ = self.current_schedule().await?;
+        let target = parse_required_weather_target(request.get_ref().target.clone())?;
         let peer_addr = peer_addr_from_request(&request);
         let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
 
-        let service = self.clone();
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            debug!(stream_id, peer = ?peer_addr, "weather stream started");
-            let mut last_weather_type: Option<WeatherType> = None;
-
-            let mut ticker = tokio::time::interval_at(
-                next_boundary_instant(MINUTE_MS),
-                Duration::from_millis(MINUTE_MS as u64),
-            );
-
-            if let Err(status) = emit_weather_update(&service, &tx, &mut last_weather_type).await {
-                handle_weather_stream_error(&tx, status, stream_id, peer_addr, "initial emission")
-                    .await;
-                return;
-            }
-
-            loop {
-                ticker.tick().await;
-                let result = emit_weather_update(&service, &tx, &mut last_weather_type).await;
-                if let Err(status) = result {
-                    handle_weather_stream_error(&tx, status, stream_id, peer_addr, "tick").await;
-                    break;
+        match target {
+            ParsedWeatherTarget::OfficialRace => {
+                #[cfg(not(feature = "official"))]
+                {
+                    return Err(Status::unimplemented(
+                        "official-race weather target is available only in official backend",
+                    ));
                 }
-                if tx.is_closed() {
-                    debug!(stream_id, peer = ?peer_addr, "weather stream closed by client");
-                    break;
+
+                #[cfg(feature = "official")]
+                {
+                    let _ = self.current_schedule().await?;
+                    let service = self.clone();
+                    let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+                    tokio::spawn(async move {
+                        debug!(stream_id, peer = ?peer_addr, "weather stream started");
+                        let mut last_weather_type: Option<WeatherType> = None;
+
+                        let mut ticker = tokio::time::interval_at(
+                            next_boundary_instant(MINUTE_MS),
+                            Duration::from_millis(MINUTE_MS as u64),
+                        );
+
+                        if let Err(status) =
+                            emit_weather_update(&service, &tx, &mut last_weather_type).await
+                        {
+                            handle_weather_stream_error(
+                                &tx,
+                                status,
+                                stream_id,
+                                peer_addr,
+                                "initial emission",
+                            )
+                            .await;
+                            return;
+                        }
+
+                        loop {
+                            ticker.tick().await;
+                            let result =
+                                emit_weather_update(&service, &tx, &mut last_weather_type).await;
+                            if let Err(status) = result {
+                                handle_weather_stream_error(
+                                    &tx, status, stream_id, peer_addr, "tick",
+                                )
+                                .await;
+                                break;
+                            }
+                            if tx.is_closed() {
+                                debug!(stream_id, peer = ?peer_addr, "weather stream closed by client");
+                                break;
+                            }
+                        }
+                        debug!(stream_id, peer = ?peer_addr, "weather stream stopped");
+                    });
+
+                    return Ok(Response::new(ReceiverStream::new(rx)));
                 }
             }
-            debug!(stream_id, peer = ?peer_addr, "weather stream stopped");
-        });
+            ParsedWeatherTarget::Sandbox { sandbox_id } => {
+                #[cfg(not(feature = "local"))]
+                {
+                    let _ = sandbox_id;
+                    return Err(Status::unimplemented(
+                        "sandbox weather target is available only in local backend",
+                    ));
+                }
 
-        Ok(Response::new(ReceiverStream::new(rx)))
+                #[cfg(feature = "local")]
+                {
+                    return self
+                        .stream_weather_updates_local(stream_id, peer_addr, sandbox_id)
+                        .await;
+                }
+            }
+        }
     }
 
     async fn get_forecast_now(
@@ -296,6 +368,171 @@ impl WeatherQueryServiceImpl {
             ))
         }
     }
+
+    async fn weather_now_for_target(
+        &self,
+        target: ParsedWeatherTarget,
+    ) -> Result<WeatherNow, Status> {
+        match target {
+            ParsedWeatherTarget::OfficialRace => {
+                #[cfg(feature = "official")]
+                {
+                    let now_ms = current_time_ms();
+                    let schedule = self.current_schedule().await?;
+                    let weather_type =
+                        weather_type_at(&schedule, now_ms).unwrap_or(WeatherType::Unspecified);
+                    let temperature_c = temperature_c_for_weather_type(weather_type);
+                    return Ok(WeatherNow {
+                        r#type: weather_type as i32,
+                        temperature_c,
+                    });
+                }
+
+                #[cfg(not(feature = "official"))]
+                {
+                    Err(Status::unimplemented(
+                        "official-race weather target is available only in official backend",
+                    ))
+                }
+            }
+            ParsedWeatherTarget::Sandbox { sandbox_id } => {
+                #[cfg(feature = "local")]
+                {
+                    return self.local_weather_now(&sandbox_id).await;
+                }
+
+                #[cfg(not(feature = "local"))]
+                {
+                    let _ = sandbox_id;
+                    Err(Status::unimplemented(
+                        "sandbox weather target is available only in local backend",
+                    ))
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "local")]
+    async fn local_weather_now(&self, sandbox_id: &str) -> Result<WeatherNow, Status> {
+        let local = self.local_inner.as_ref().ok_or_else(|| {
+            Status::failed_precondition("weather query service is not configured")
+        })?;
+        let runtime = local.engine.runtime_state().await.map_err(map_worker_err)?;
+        let active = runtime
+            .active_sandboxes
+            .iter()
+            .find(|entry| entry.sandbox_id == sandbox_id)
+            .ok_or_else(|| {
+                Status::not_found("active sandbox session not found for weather target")
+            })?;
+        let snapshot = active.weather_now.ok_or_else(|| {
+            Status::failed_precondition(
+                "weather runtime snapshot is unavailable for active sandbox",
+            )
+        })?;
+
+        Ok(WeatherNow {
+            r#type: runtime_weather_type_to_proto(snapshot.weather_type) as i32,
+            temperature_c: snapshot.temperature_c,
+        })
+    }
+
+    #[cfg(feature = "local")]
+    async fn stream_weather_updates_local(
+        &self,
+        stream_id: u64,
+        peer_addr: Option<std::net::SocketAddr>,
+        sandbox_id: String,
+    ) -> Result<Response<ReceiverStream<Result<WeatherUpdateEvent, Status>>>, Status> {
+        let local = self.local_inner.as_ref().ok_or_else(|| {
+            Status::failed_precondition("weather query service is not configured")
+        })?;
+        let mut events_rx = local.weather_events.subscribe();
+        let service = self.clone();
+        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+
+        let initial = service.local_weather_now(&sandbox_id).await?;
+        tokio::spawn(async move {
+            debug!(stream_id, peer = ?peer_addr, sandbox_id = %sandbox_id, "local weather stream started");
+            let mut last_now = initial;
+            let initial_event = WeatherUpdateEvent { now: Some(initial) };
+            if tx.send(Ok(initial_event)).await.is_err() {
+                debug!(stream_id, peer = ?peer_addr, sandbox_id = %sandbox_id, "local weather stream closed before initial emission");
+                return;
+            }
+
+            loop {
+                match events_rx.recv().await {
+                    Ok(event) => {
+                        if event.sandbox_id != sandbox_id {
+                            continue;
+                        }
+                        if matches!(event.kind, LocalWeatherEventKind::Deactivated) {
+                            let _ = tx
+                                .send(Err(Status::not_found(
+                                    "active sandbox session not found for weather target",
+                                )))
+                                .await;
+                            break;
+                        }
+
+                        match service.local_weather_now(&sandbox_id).await {
+                            Ok(now) => {
+                                if now == last_now {
+                                    continue;
+                                }
+                                last_now = now;
+                                if tx
+                                    .send(Ok(WeatherUpdateEvent { now: Some(now) }))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(status) => {
+                                let _ = tx.send(Err(status)).await;
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            stream_id,
+                            peer = ?peer_addr,
+                            sandbox_id = %sandbox_id,
+                            skipped,
+                            "local weather stream lagged; resyncing from latest runtime snapshot"
+                        );
+                        match service.local_weather_now(&sandbox_id).await {
+                            Ok(now) => {
+                                if now == last_now {
+                                    continue;
+                                }
+                                last_now = now;
+                                if tx
+                                    .send(Ok(WeatherUpdateEvent { now: Some(now) }))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(status) => {
+                                let _ = tx.send(Err(status)).await;
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+
+            debug!(stream_id, peer = ?peer_addr, sandbox_id = %sandbox_id, "local weather stream stopped");
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
 }
 
 #[cfg(feature = "official")]
@@ -427,6 +664,7 @@ async fn run_cache_refresh_loop(inner: Arc<WeatherQueryInner>) {
     }
 }
 
+#[cfg(feature = "official")]
 async fn emit_weather_update(
     service: &WeatherQueryServiceImpl,
     tx: &mpsc::Sender<Result<WeatherUpdateEvent, Status>>,
@@ -471,6 +709,7 @@ async fn emit_forecast_update(
         .map_err(|_| Status::cancelled("forecast stream closed"))
 }
 
+#[cfg(feature = "official")]
 async fn handle_weather_stream_error(
     tx: &mpsc::Sender<Result<WeatherUpdateEvent, Status>>,
     status: Status,
@@ -502,6 +741,40 @@ async fn handle_forecast_stream_error(
 
     warn!(stream_id, peer = ?peer_addr, preset = ?preset, phase, error = %status, "forecast stream failed");
     let _ = tx.send(Err(status)).await;
+}
+
+fn parse_required_weather_target(
+    target: Option<WeatherTarget>,
+) -> Result<ParsedWeatherTarget, Status> {
+    let target = target.ok_or_else(|| Status::invalid_argument("weather target is required"))?;
+    match target.target {
+        Some(weather_target::Target::OfficialRace(_)) => Ok(ParsedWeatherTarget::OfficialRace),
+        Some(weather_target::Target::Sandbox(sandbox)) => {
+            if sandbox.sandbox_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "weather target sandbox_id must be non-empty",
+                ));
+            }
+            Ok(ParsedWeatherTarget::Sandbox {
+                sandbox_id: sandbox.sandbox_id,
+            })
+        }
+        None => Err(Status::invalid_argument(
+            "weather target must include exactly one target",
+        )),
+    }
+}
+
+#[cfg(feature = "local")]
+fn runtime_weather_type_to_proto(weather_type: EngineRuntimeWeatherType) -> WeatherType {
+    match weather_type {
+        EngineRuntimeWeatherType::Clear => WeatherType::Clear,
+        EngineRuntimeWeatherType::PartlyCloudy => WeatherType::PartlyCloudy,
+        EngineRuntimeWeatherType::Overcast => WeatherType::Overcast,
+        EngineRuntimeWeatherType::LightRain => WeatherType::LightRain,
+        EngineRuntimeWeatherType::MediumRain => WeatherType::MediumRain,
+        EngineRuntimeWeatherType::HeavyRain => WeatherType::HeavyRain,
+    }
 }
 
 #[cfg(feature = "official")]

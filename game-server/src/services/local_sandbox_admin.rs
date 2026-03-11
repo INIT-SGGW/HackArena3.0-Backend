@@ -14,6 +14,7 @@ use crate::local::sandbox_config_store::{
 };
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
+use crate::services::weather::{LocalWeatherEvent, LocalWeatherEventHub, LocalWeatherEventKind};
 use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminService;
 use proto::race::v1::{
     CreateLocalSandboxConfigRequest, CreateLocalSandboxConfigResponse,
@@ -34,8 +35,8 @@ use self::mappers::{
     engine_ghost_mode_settings_from_local_record, local_ghost_mode_to_proto,
     local_spawn_mode_from_proto_value, local_spawn_mode_to_proto, local_time_of_day_from_proto,
     local_time_of_day_to_proto, local_weather_from_proto, local_weather_to_proto,
-    resolve_runtime_time_of_day_preset, runtime_time_of_day_preset_to_proto, utc_now_timestamp,
-    weather_params_from_local,
+    resolve_runtime_time_of_day_preset, runtime_time_of_day_preset_to_proto,
+    runtime_weather_now_from_local, utc_now_timestamp, weather_params_from_local,
 };
 use self::validation::{ensure_supported_spawn_mode, validate_map_id_track_exists};
 
@@ -46,6 +47,7 @@ pub struct LocalSandboxAdminServiceImpl {
     max_active_sandboxes: u32,
     tracks_dir: PathBuf,
     started_at_utc: Arc<RwLock<HashMap<String, prost_types::Timestamp>>>,
+    weather_events: LocalWeatherEventHub,
 }
 
 impl LocalSandboxAdminServiceImpl {
@@ -54,6 +56,7 @@ impl LocalSandboxAdminServiceImpl {
         engine: EngineClient,
         max_active_sandboxes: u32,
         tracks_dir: PathBuf,
+        weather_events: LocalWeatherEventHub,
     ) -> Self {
         Self {
             store,
@@ -61,6 +64,7 @@ impl LocalSandboxAdminServiceImpl {
             max_active_sandboxes,
             tracks_dir,
             started_at_utc: Arc::new(RwLock::new(HashMap::new())),
+            weather_events,
         }
     }
 
@@ -120,7 +124,11 @@ impl LocalSandboxAdminServiceImpl {
         }
     }
 
-    async fn apply_weather_if_active(&self, sandbox_id: &str, weather: LocalWeatherSettingsRecord) {
+    async fn apply_weather_if_active(
+        &self,
+        sandbox_id: &str,
+        weather: LocalWeatherSettingsRecord,
+    ) -> bool {
         let runtime_before = match self.engine.runtime_state().await {
             Ok(state) => state,
             Err(err) => {
@@ -129,7 +137,7 @@ impl LocalSandboxAdminServiceImpl {
                     error = %err,
                     "failed to read runtime state for local weather apply"
                 );
-                return;
+                return false;
             }
         };
         if !runtime_before
@@ -137,13 +145,14 @@ impl LocalSandboxAdminServiceImpl {
             .iter()
             .any(|entry| entry.sandbox_id == sandbox_id)
         {
-            return;
+            return false;
         }
 
+        let weather_now = runtime_weather_now_from_local(weather);
         let weather = weather_params_from_local(weather);
         if let Err(err) = self
             .engine
-            .set_sandbox_weather(sandbox_id.to_string(), weather)
+            .set_sandbox_weather(sandbox_id.to_string(), weather, weather_now)
             .await
         {
             tracing::warn!(
@@ -151,7 +160,23 @@ impl LocalSandboxAdminServiceImpl {
                 error = %err,
                 "failed to apply local sandbox weather to active runtime"
             );
+            return false;
         }
+        true
+    }
+
+    fn publish_weather_updated(&self, sandbox_id: &str) {
+        self.weather_events.publish(LocalWeatherEvent {
+            sandbox_id: sandbox_id.to_string(),
+            kind: LocalWeatherEventKind::Updated,
+        });
+    }
+
+    fn publish_weather_deactivated(&self, sandbox_id: &str) {
+        self.weather_events.publish(LocalWeatherEvent {
+            sandbox_id: sandbox_id.to_string(),
+            kind: LocalWeatherEventKind::Deactivated,
+        });
     }
 }
 
@@ -309,8 +334,12 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
             .await
             .map_err(map_store_err)?;
 
-        self.apply_weather_if_active(&request.sandbox_id, weather)
-            .await;
+        if self
+            .apply_weather_if_active(&request.sandbox_id, weather)
+            .await
+        {
+            self.publish_weather_updated(&request.sandbox_id);
+        }
 
         Ok(Response::new(UpdateLocalSandboxWeatherResponse {
             revision,
@@ -403,10 +432,39 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
                 .await
                 .map_err(map_worker_err)?;
 
+            let weather_now = runtime_weather_now_from_local(sandbox.config.weather);
+            let weather_params = weather_params_from_local(sandbox.config.weather);
+            if let Err(err) = self
+                .engine
+                .set_sandbox_weather(sandbox.sandbox_id.clone(), weather_params, weather_now)
+                .await
+            {
+                tracing::warn!(
+                    sandbox_id = %sandbox.sandbox_id,
+                    error = %err,
+                    "failed to apply local sandbox weather during activation; rolling back activation"
+                );
+                if let Err(rollback_err) = self
+                    .engine
+                    .deactivate_sandbox(runtime_after.revision, sandbox.sandbox_id.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        sandbox_id = %sandbox.sandbox_id,
+                        error = %rollback_err,
+                        "failed to rollback sandbox activation after weather apply failure"
+                    );
+                }
+                return Err(Status::internal(
+                    "failed to apply local sandbox weather during activation",
+                ));
+            }
+
             self.started_at_utc
                 .write()
                 .await
                 .insert(sandbox.sandbox_id.clone(), utc_now_timestamp());
+            self.publish_weather_updated(&sandbox.sandbox_id);
 
             return Ok(Response::new(SetLocalSandboxActivationResponse {
                 revision: runtime_after.revision,
@@ -424,6 +482,7 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
             .write()
             .await
             .remove(&request.sandbox_id);
+        self.publish_weather_deactivated(&request.sandbox_id);
 
         Ok(Response::new(SetLocalSandboxActivationResponse {
             revision: runtime_after.revision,
