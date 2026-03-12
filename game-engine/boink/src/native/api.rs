@@ -10,9 +10,11 @@ use tracing::trace;
 
 use crate::native::error::NativeLoadError;
 use crate::native::loader::{
-    LegacyDisableGhostModeFn, LegacyGetTrackDataFn, LegacyReadVehicleGhostModeStateFn,
-    LegacySetGhostModeSettingsFn, LegacySetVehicleOrientationFn, LegacySetWeatherFn,
-    LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
+    LegacyDisableGhostModeFn, LegacyGetNumberOfStartPosFn, LegacyGetTrackDataFn,
+    LegacyReadVehicleGhostModeStateFn, LegacySetGhostModeSettingsFn, LegacySetVehicleAtStartPosFn,
+    LegacySetVehicleBeforeFinishLineFn, LegacySetVehicleBeforePointFn,
+    LegacySetVehicleOrientationFn, LegacySetVehicleRandomPosFn, LegacySetWeatherFn, LegacyStringFn,
+    LegacyVersionFn, load_native_library, resolve_optional,
 };
 
 /// Lazily resolved optional symbols exposed by a potentially old native library.
@@ -26,6 +28,11 @@ pub struct NativeApi {
     disable_ghost_mode: Option<LegacyDisableGhostModeFn>,
     get_track_data: Option<LegacyGetTrackDataFn>,
     set_vehicle_orientation: Option<LegacySetVehicleOrientationFn>,
+    set_vehicle_before_point: Option<LegacySetVehicleBeforePointFn>,
+    set_vehicle_before_finish_line: Option<LegacySetVehicleBeforeFinishLineFn>,
+    set_vehicle_random_pos: Option<LegacySetVehicleRandomPosFn>,
+    set_vehicle_at_start_pos: Option<LegacySetVehicleAtStartPosFn>,
+    get_number_of_start_pos: Option<LegacyGetNumberOfStartPosFn>,
     read_vehicle_ghost_mode_state: Option<LegacyReadVehicleGhostModeStateFn>,
 }
 
@@ -93,6 +100,38 @@ impl NativeApi {
         self.set_vehicle_orientation
     }
 
+    /// Returns the function pointer for `boink_set_vehicle_before_point`, when exported.
+    #[must_use]
+    pub fn boink_set_vehicle_before_point(&self) -> Option<LegacySetVehicleBeforePointFn> {
+        self.set_vehicle_before_point
+    }
+
+    /// Returns the function pointer for `boink_set_vehicle_before_finish_line`, when exported.
+    #[must_use]
+    pub fn boink_set_vehicle_before_finish_line(
+        &self,
+    ) -> Option<LegacySetVehicleBeforeFinishLineFn> {
+        self.set_vehicle_before_finish_line
+    }
+
+    /// Returns the function pointer for `boink_set_vehicle_random_pos`, when exported.
+    #[must_use]
+    pub fn boink_set_vehicle_random_pos(&self) -> Option<LegacySetVehicleRandomPosFn> {
+        self.set_vehicle_random_pos
+    }
+
+    /// Returns the function pointer for `boink_set_vehicle_at_start_pos`, when exported.
+    #[must_use]
+    pub fn boink_set_vehicle_at_start_pos(&self) -> Option<LegacySetVehicleAtStartPosFn> {
+        self.set_vehicle_at_start_pos
+    }
+
+    /// Returns the function pointer for `boink_get_number_of_start_pos`, when exported.
+    #[must_use]
+    pub fn boink_get_number_of_start_pos(&self) -> Option<LegacyGetNumberOfStartPosFn> {
+        self.get_number_of_start_pos
+    }
+
     /// Returns the function pointer for `boink_read_vehicle_ghost_mode_state`, when exported.
     #[must_use]
     pub fn boink_read_vehicle_ghost_mode_state(&self) -> Option<LegacyReadVehicleGhostModeStateFn> {
@@ -111,11 +150,17 @@ impl NativeApi {
         let disable_ghost_mode = resolve_optional(lib, b"boink_disable_ghost_mode\0");
         let get_track_data = resolve_optional(lib, b"boink_get_track_data\0");
         let set_vehicle_orientation = resolve_optional(lib, b"boink_set_vehicle_orientation\0");
+        let set_vehicle_before_point = resolve_optional(lib, b"boink_set_vehicle_before_point\0");
+        let set_vehicle_before_finish_line =
+            resolve_optional(lib, b"boink_set_vehicle_before_finish_line\0");
+        let set_vehicle_random_pos = resolve_optional(lib, b"boink_set_vehicle_random_pos\0");
+        let set_vehicle_at_start_pos = resolve_optional(lib, b"boink_set_vehicle_at_start_pos\0");
+        let get_number_of_start_pos = resolve_optional(lib, b"boink_get_number_of_start_pos\0");
         let read_vehicle_ghost_mode_state =
             resolve_optional(lib, b"boink_read_vehicle_ghost_mode_state\0");
 
         trace!(
-            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}, set_vehicle_orientation={}, read_vehicle_ghost_mode_state={}",
+            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}, set_vehicle_orientation={}, set_vehicle_before_point={}, set_vehicle_before_finish_line={}, set_vehicle_random_pos={}, set_vehicle_at_start_pos={}, get_number_of_start_pos={}, read_vehicle_ghost_mode_state={}",
             get_c_api_version.is_some(),
             get_engine_version.is_some(),
             get_engine_profile.is_some(),
@@ -125,6 +170,11 @@ impl NativeApi {
             disable_ghost_mode.is_some(),
             get_track_data.is_some(),
             set_vehicle_orientation.is_some(),
+            set_vehicle_before_point.is_some(),
+            set_vehicle_before_finish_line.is_some(),
+            set_vehicle_random_pos.is_some(),
+            set_vehicle_at_start_pos.is_some(),
+            get_number_of_start_pos.is_some(),
             read_vehicle_ghost_mode_state.is_some()
         );
 
@@ -138,6 +188,11 @@ impl NativeApi {
             disable_ghost_mode,
             get_track_data,
             set_vehicle_orientation,
+            set_vehicle_before_point,
+            set_vehicle_before_finish_line,
+            set_vehicle_random_pos,
+            set_vehicle_at_start_pos,
+            get_number_of_start_pos,
             read_vehicle_ghost_mode_state,
         })
     }

@@ -578,6 +578,254 @@ impl Engine {
         }
     }
 
+    /// Sets the world-space position of a vehicle to a point before the given point.
+    #[instrument(skip(self, point))]
+    pub fn set_vehicle_before_point(&mut self, vehicle_id: u64, point: Vec3) -> Result<()> {
+        let ffi_point: sys::BoinkVec3 = point.into();
+
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_vehicle_before_point) = api.boink_set_vehicle_before_point() else {
+                static WARNED_MISSING_SET_VEHICLE_BEFORE_POINT: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_SET_VEHICLE_BEFORE_POINT.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_set_vehicle_before_point symbol not found in native library; before-point updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+            tracing::debug!(
+                vehicle_id,
+                x = point.x,
+                y = point.y,
+                z = point.z,
+                "boink_set_vehicle_before_point (legacy dynamic symbol)"
+            );
+            let code = unsafe {
+                set_vehicle_before_point(self.handle, vehicle_id, &ffi_point as *const _)
+            };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_set_vehicle_before_point",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(
+                vehicle_id,
+                x = point.x,
+                y = point.y,
+                z = point.z,
+                "boink_set_vehicle_before_point"
+            );
+            let code = unsafe {
+                sys::boink_set_vehicle_before_point(self.handle, vehicle_id, &ffi_point as *const _)
+            };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_set_vehicle_before_point",
+                ))
+            }
+        }
+    }
+
+    /// Sets the world-space position of a vehicle to a point before the finish line.
+    #[instrument(skip(self))]
+    pub fn set_vehicle_before_finish_line(&mut self, vehicle_id: u64) -> Result<()> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_vehicle_before_finish_line) = api.boink_set_vehicle_before_finish_line()
+            else {
+                static WARNED_MISSING_SET_VEHICLE_BEFORE_FINISH_LINE: OnceLock<()> =
+                    OnceLock::new();
+                if WARNED_MISSING_SET_VEHICLE_BEFORE_FINISH_LINE
+                    .set(())
+                    .is_ok()
+                {
+                    tracing::warn!(
+                        "boink_set_vehicle_before_finish_line symbol not found in native library; before-finish-line updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+            tracing::debug!(
+                vehicle_id,
+                "boink_set_vehicle_before_finish_line (legacy dynamic symbol)"
+            );
+            let code = unsafe { set_vehicle_before_finish_line(self.handle, vehicle_id) };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_set_vehicle_before_finish_line",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(vehicle_id, "boink_set_vehicle_before_finish_line");
+            let code =
+                unsafe { sys::boink_set_vehicle_before_finish_line(self.handle, vehicle_id) };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_set_vehicle_before_finish_line",
+                ))
+            }
+        }
+    }
+
+    /// Sets the world-space position of a vehicle to a random point.
+    #[instrument(skip(self))]
+    pub fn set_vehicle_random_pos(&mut self, vehicle_id: u64) -> Result<()> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_vehicle_random_pos) = api.boink_set_vehicle_random_pos() else {
+                static WARNED_MISSING_SET_VEHICLE_RANDOM_POS: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_SET_VEHICLE_RANDOM_POS.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_set_vehicle_random_pos symbol not found in native library; random position updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+            tracing::debug!(
+                vehicle_id,
+                "boink_set_vehicle_random_pos (legacy dynamic symbol)"
+            );
+            let code = unsafe { set_vehicle_random_pos(self.handle, vehicle_id) };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(code, "boink_set_vehicle_random_pos"));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(vehicle_id, "boink_set_vehicle_random_pos");
+            let code = unsafe { sys::boink_set_vehicle_random_pos(self.handle, vehicle_id) };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(code, "boink_set_vehicle_random_pos"))
+            }
+        }
+    }
+
+    /// Sets the world-space position of a vehicle at a selected starting position.
+    #[instrument(skip(self))]
+    pub fn set_vehicle_at_start_pos(&mut self, vehicle_id: u64, position_index: u64) -> Result<()> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_vehicle_at_start_pos) = api.boink_set_vehicle_at_start_pos() else {
+                static WARNED_MISSING_SET_VEHICLE_AT_START_POS: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_SET_VEHICLE_AT_START_POS.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_set_vehicle_at_start_pos symbol not found in native library; start-position updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+            tracing::debug!(
+                vehicle_id,
+                position_index,
+                "boink_set_vehicle_at_start_pos (legacy dynamic symbol)"
+            );
+            let code = unsafe { set_vehicle_at_start_pos(self.handle, vehicle_id, position_index) };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_set_vehicle_at_start_pos",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(vehicle_id, position_index, "boink_set_vehicle_at_start_pos");
+            let code = unsafe {
+                sys::boink_set_vehicle_at_start_pos(self.handle, vehicle_id, position_index)
+            };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_set_vehicle_at_start_pos",
+                ))
+            }
+        }
+    }
+
+    /// Returns number of available start positions.
+    #[instrument(skip(self))]
+    pub fn get_number_of_start_pos(&self) -> Result<u64> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(get_number_of_start_pos) = api.boink_get_number_of_start_pos() else {
+                static WARNED_MISSING_GET_NUMBER_OF_START_POS: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_GET_NUMBER_OF_START_POS.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_get_number_of_start_pos symbol not found in native library; start-position count query is unavailable"
+                    );
+                }
+                return Err(Error::Internal(
+                    "boink_get_number_of_start_pos is unavailable in this native library"
+                        .to_string(),
+                ));
+            };
+            let mut out_number_pos: u64 = 0;
+            tracing::debug!("boink_get_number_of_start_pos (legacy dynamic symbol)");
+            let code =
+                unsafe { get_number_of_start_pos(self.handle, &mut out_number_pos as *mut _) };
+            if code == sys::BOINK_OK {
+                return Ok(out_number_pos);
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_get_number_of_start_pos",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            let mut out_number_pos: u64 = 0;
+            tracing::debug!("boink_get_number_of_start_pos");
+            let code = unsafe {
+                sys::boink_get_number_of_start_pos(self.handle, &mut out_number_pos as *mut _)
+            };
+            if code == sys::BOINK_OK {
+                Ok(out_number_pos)
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_get_number_of_start_pos",
+                ))
+            }
+        }
+    }
+
     /// Sets the world-space orientation of a vehicle.
     #[instrument(skip(self, orientation))]
     pub fn set_vehicle_orientation(

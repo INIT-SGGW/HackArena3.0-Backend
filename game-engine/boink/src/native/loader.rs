@@ -28,6 +28,20 @@ pub type LegacyGetTrackDataFn =
 /// Legacy counterpart of vehicle-orientation update.
 pub type LegacySetVehicleOrientationFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, u64, *const boink_sys::BoinkQuaternion) -> i32;
+/// Legacy counterpart of vehicle repositioning to a point before the given point.
+pub type LegacySetVehicleBeforePointFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, u64, *const boink_sys::BoinkVec3) -> i32;
+/// Legacy counterpart of vehicle repositioning before finish line.
+pub type LegacySetVehicleBeforeFinishLineFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
+/// Legacy counterpart of vehicle repositioning to a random point.
+pub type LegacySetVehicleRandomPosFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
+/// Legacy counterpart of vehicle repositioning at a selected start position.
+pub type LegacySetVehicleAtStartPosFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, u64, u64) -> i32;
+/// Legacy counterpart of start-position count query.
+pub type LegacyGetNumberOfStartPosFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, *mut u64) -> i32;
 /// Legacy counterpart of vehicle ghost-mode runtime state query.
 pub type LegacyReadVehicleGhostModeStateFn = unsafe extern "C" fn(
     boink_sys::BoinkHandle,
