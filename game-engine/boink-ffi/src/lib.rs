@@ -13,8 +13,8 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 11;
-pub const BOINK_C_API_VERSION_PATCH: c_uint = 2;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 12;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
@@ -592,6 +592,86 @@ unsafe extern "C" {
         vehicle_id: u64,
         position: *const BoinkVec3,
     ) -> c_int;
+
+    /// Sets the world-space position of a vehicle to a point before the given point.
+    ///
+    /// This immediately updates the specified vehicle's position in the simulation.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle to move.
+    /// - `point` - non-null pointer to the point vector.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_INVALID_ARG` if `point` is null.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - Another error code for other failures.
+    pub fn boink_set_vehicle_before_point(
+        h: BoinkHandle,
+        vehicle_id: u64,
+        point: *const BoinkVec3,
+    ) -> c_int;
+
+    /// Sets the world-space position of a vehicle to a point before the finish line.
+    ///
+    /// This immediately updates the specified vehicle's position in the simulation.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle to move.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - Another error code for other failures.
+    pub fn boink_set_vehicle_before_finish_line(h: BoinkHandle, vehicle_id: u64) -> c_int;
+
+    /// Sets the world-space position of a vehicle to a random point.
+    ///
+    /// This immediately updates the specified vehicle's position in the simulation.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle to move.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - Another error code for other failures.
+    pub fn boink_set_vehicle_random_pos(h: BoinkHandle, vehicle_id: u64) -> c_int;
+
+    /// Sets the world-space position of a vehicle at a selected starting position.
+    ///
+    /// This immediately updates the specified vehicle's position in the simulation.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle to move.
+    /// - `position_index` - index of a starting position from 1 to max starting positions.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_INVALID_ARG` if `h` is null.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist or `position_index` does not exist.
+    /// - Another error code for other failures.
+    pub fn boink_set_vehicle_at_start_pos(
+        h: BoinkHandle,
+        vehicle_id: u64,
+        position_index: u64,
+    ) -> c_int;
+
+    /// Retrieves the number of available starting positions.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `out_number_pos` - non-null pointer that receives number of available starting positions.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_INVALID_ARG` if `h` or `out_number_pos` is null.
+    /// - Another error code for other failures.
+    pub fn boink_get_number_of_start_pos(h: BoinkHandle, out_number_pos: *mut u64) -> c_int;
 
     /// Sets the world-space orientation of a vehicle.
     ///
