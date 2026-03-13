@@ -1,5 +1,6 @@
-//! gRPC AssetService implementation for track metadata and streaming.
+//! gRPC AssetService implementation for map assets and minimap metadata.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
@@ -8,9 +9,11 @@ use bytes::{Bytes, BytesMut};
 use hash_cache::HashCache;
 use proto::race::v1::asset_service_server::AssetService;
 use proto::race::v1::{
-    GetTrackMetaRequest, GetTrackMetaResponse, GetTrackRequest, GetTrackResponse, ListMapsRequest,
-    ListMapsResponse, MapCatalogEntry, MimeType, TrackMeta,
+    GetMapAssetBundleMetaRequest, GetMapAssetBundleMetaResponse, GetMapAssetRequest,
+    GetMapAssetResponse, ListMapsRequest, ListMapsResponse, MapAssetBundleMeta, MapAssetKind,
+    MapAssetMeta, MapCatalogEntry, MapMetadata, MimeType, MinimapMetadata,
 };
+use serde::Deserialize;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use tonic::{Request, Response, Status};
@@ -20,11 +23,65 @@ type BoxStream<T> = Pin<Box<dyn tokio_stream::Stream<Item = Result<T, Status>> +
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 const MAX_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB
 
+#[derive(Debug, Deserialize)]
+struct MinimapMetadataJson {
+    #[serde(alias = "viewBoxMinX")]
+    view_box_min_x: f64,
+    #[serde(alias = "viewBoxMinY")]
+    view_box_min_y: f64,
+    #[serde(alias = "viewBoxWidth")]
+    view_box_width: f64,
+    #[serde(alias = "viewBoxHeight")]
+    view_box_height: f64,
+    #[serde(alias = "originWorldX")]
+    origin_world_x: f64,
+    #[serde(alias = "originWorldZ")]
+    origin_world_z: f64,
+    #[serde(alias = "rotationRad")]
+    rotation_rad: f64,
+    #[serde(alias = "scaleSvgUnitsPerMeter")]
+    scale_svg_units_per_meter: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct MapMetadataJson {
+    id: String,
+    name: String,
+    #[serde(alias = "lapLengthMeters")]
+    lap_length_meters: f32,
+}
+
+impl From<MinimapMetadataJson> for MinimapMetadata {
+    fn from(value: MinimapMetadataJson) -> Self {
+        Self {
+            view_box_min_x: value.view_box_min_x,
+            view_box_min_y: value.view_box_min_y,
+            view_box_width: value.view_box_width,
+            view_box_height: value.view_box_height,
+            origin_world_x: value.origin_world_x,
+            origin_world_z: value.origin_world_z,
+            rotation_rad: value.rotation_rad,
+            scale_svg_units_per_meter: value.scale_svg_units_per_meter,
+        }
+    }
+}
+
+impl From<MapMetadataJson> for MapMetadata {
+    fn from(value: MapMetadataJson) -> Self {
+        Self {
+            map_id: value.id,
+            map_name: value.name,
+            total_length_m: value.lap_length_meters,
+        }
+    }
+}
+
 /// gRPC AssetService implementation.
 pub struct AssetServiceImpl {
     tracks_dir: PathBuf,
     hash_cache: HashCache,
 }
+
 impl AssetServiceImpl {
     /// Builds the service with the given track directory.
     pub fn new(tracks_dir: PathBuf) -> Self {
@@ -47,8 +104,53 @@ impl AssetServiceImpl {
         }
     }
 
-    fn resolve_track_path(root: &Path, id: &str) -> PathBuf {
-        root.join(format!("{id}.glb"))
+    fn validate_map_id(raw_map_id: &str) -> Result<String, Status> {
+        let map_id = raw_map_id.trim();
+        if map_id.is_empty() {
+            return Err(Status::invalid_argument("map_id is required"));
+        }
+        Self::sanitize_id(map_id)?;
+        Ok(map_id.to_string())
+    }
+
+    fn resolve_main_glb_path(root: &Path, map_id: &str) -> PathBuf {
+        root.join(format!("{map_id}.glb"))
+    }
+
+    fn resolve_animation_glb_path(root: &Path, map_id: &str) -> PathBuf {
+        root.join(format!("{map_id}.animation.glb"))
+    }
+
+    fn resolve_minimap_svg_path(root: &Path, map_id: &str) -> PathBuf {
+        root.join(format!("{map_id}.minimap.svg"))
+    }
+
+    fn resolve_minimap_metadata_path(root: &Path, map_id: &str) -> PathBuf {
+        root.join(format!("{map_id}.minimap.json"))
+    }
+
+    fn resolve_map_metadata_path(root: &Path, map_id: &str) -> PathBuf {
+        root.join(format!("{map_id}.json"))
+    }
+
+    fn map_id_from_glb_entry(path: &Path) -> Option<String> {
+        let file_name = path.file_name()?.to_str()?;
+        if !file_name.ends_with(".glb") || file_name.ends_with(".animation.glb") {
+            return None;
+        }
+        let map_id = file_name.strip_suffix(".glb")?;
+        Some(map_id.to_string())
+    }
+
+    fn has_required_bundle_assets(root: &Path, map_id: &str) -> bool {
+        let main = Self::resolve_main_glb_path(root, map_id);
+        let minimap_svg = Self::resolve_minimap_svg_path(root, map_id);
+        let minimap_metadata = Self::resolve_minimap_metadata_path(root, map_id);
+        let map_metadata = Self::resolve_map_metadata_path(root, map_id);
+        main.is_file()
+            && minimap_svg.is_file()
+            && minimap_metadata.is_file()
+            && map_metadata.is_file()
     }
 
     fn choose_chunk_size(requested: u64) -> Result<usize, Status> {
@@ -62,6 +164,155 @@ impl AssetServiceImpl {
                 Ok(size)
             }
         }
+    }
+
+    fn content_type_for_kind(kind: MapAssetKind) -> Result<MimeType, Status> {
+        match kind {
+            MapAssetKind::MainGlb | MapAssetKind::AnimationGlb => Ok(MimeType::GltfBinary),
+            MapAssetKind::MinimapSvg => Ok(MimeType::ImageSvgXml),
+            MapAssetKind::Unspecified => {
+                Err(Status::invalid_argument("map asset kind is required"))
+            }
+        }
+    }
+
+    fn resolve_path_for_kind(
+        root: &Path,
+        map_id: &str,
+        kind: MapAssetKind,
+    ) -> Result<PathBuf, Status> {
+        match kind {
+            MapAssetKind::MainGlb => Ok(Self::resolve_main_glb_path(root, map_id)),
+            MapAssetKind::AnimationGlb => Ok(Self::resolve_animation_glb_path(root, map_id)),
+            MapAssetKind::MinimapSvg => Ok(Self::resolve_minimap_svg_path(root, map_id)),
+            MapAssetKind::Unspecified => {
+                Err(Status::invalid_argument("map asset kind is required"))
+            }
+        }
+    }
+
+    async fn build_asset_meta(
+        &self,
+        map_id: &str,
+        kind: MapAssetKind,
+        path: &Path,
+    ) -> Result<MapAssetMeta, Status> {
+        let content_type = Self::content_type_for_kind(kind)?;
+        let fs_meta = fs::metadata(path).await.map_err(|e| match e.kind() {
+            ErrorKind::NotFound => {
+                tracing::warn!(%map_id, kind = ?kind, file = %path.display(), "asset file missing");
+                Status::not_found("map asset not found")
+            }
+            _ => {
+                tracing::error!(
+                    error = ?e,
+                    %map_id,
+                    kind = ?kind,
+                    file = %path.display(),
+                    "asset metadata failed"
+                );
+                Status::internal("failed to read map asset metadata")
+            }
+        })?;
+
+        let content_hash = self.hash_cache.get_or_compute(path).await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                %map_id,
+                kind = ?kind,
+                file = %path.display(),
+                "asset hash computation failed"
+            );
+            Status::internal("failed to hash map asset")
+        })?;
+
+        Ok(MapAssetMeta {
+            kind: kind as i32,
+            content_type: content_type as i32,
+            size_bytes: fs_meta.len(),
+            content_hash,
+        })
+    }
+
+    async fn read_minimap_metadata(
+        &self,
+        map_id: &str,
+        path: &Path,
+    ) -> Result<MinimapMetadata, Status> {
+        let raw = fs::read_to_string(path).await.map_err(|e| match e.kind() {
+            ErrorKind::NotFound => {
+                tracing::warn!(%map_id, file = %path.display(), "minimap metadata file missing");
+                Status::not_found("map minimap metadata not found")
+            }
+            _ => {
+                tracing::error!(
+                    error = ?e,
+                    %map_id,
+                    file = %path.display(),
+                    "failed to read minimap metadata file"
+                );
+                Status::internal("failed to read minimap metadata")
+            }
+        })?;
+
+        let parsed: MinimapMetadataJson = serde_json::from_str(&raw).map_err(|e| {
+            tracing::warn!(
+                error = ?e,
+                %map_id,
+                file = %path.display(),
+                "invalid minimap metadata json"
+            );
+            Status::failed_precondition("invalid minimap metadata json")
+        })?;
+
+        Ok(parsed.into())
+    }
+
+    async fn read_map_metadata(&self, map_id: &str, path: &Path) -> Result<MapMetadata, Status> {
+        let raw = fs::read_to_string(path).await.map_err(|e| match e.kind() {
+            ErrorKind::NotFound => {
+                tracing::warn!(%map_id, file = %path.display(), "map metadata file missing");
+                Status::not_found("map metadata not found")
+            }
+            _ => {
+                tracing::error!(
+                    error = ?e,
+                    %map_id,
+                    file = %path.display(),
+                    "failed to read map metadata file"
+                );
+                Status::internal("failed to read map metadata")
+            }
+        })?;
+
+        let parsed: MapMetadataJson = serde_json::from_str(&raw).map_err(|e| {
+            tracing::warn!(
+                error = ?e,
+                %map_id,
+                file = %path.display(),
+                "invalid map metadata json"
+            );
+            Status::failed_precondition("invalid map metadata json")
+        })?;
+
+        if parsed.id.trim() != map_id {
+            tracing::warn!(
+                expected_map_id = %map_id,
+                actual_map_id = %parsed.id,
+                file = %path.display(),
+                "map metadata map_id mismatch"
+            );
+            return Err(Status::failed_precondition("map metadata map_id mismatch"));
+        }
+
+        if parsed.name.trim().is_empty() {
+            tracing::warn!(%map_id, file = %path.display(), "map metadata map_name is empty");
+            return Err(Status::failed_precondition(
+                "map metadata map_name must be non-empty",
+            ));
+        }
+
+        Ok(parsed.into())
     }
 }
 
@@ -90,25 +341,23 @@ impl AssetService for AssetServiceImpl {
             Status::internal("failed to list maps")
         })? {
             let path = entry.path();
-            let is_glb = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("glb"));
-            if !is_glb {
+            let Some(map_id) = Self::map_id_from_glb_entry(&path) else {
+                continue;
+            };
+
+            if Self::sanitize_id(&map_id).is_err() {
+                tracing::warn!(%map_id, "skipping invalid map id");
                 continue;
             }
 
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            if Self::sanitize_id(stem).is_err() {
-                tracing::warn!(map_id = %stem, "skipping invalid map id");
+            if !Self::has_required_bundle_assets(&self.tracks_dir, &map_id) {
+                tracing::warn!(%map_id, "skipping incomplete map asset bundle");
                 continue;
             }
 
             maps.push(MapCatalogEntry {
-                map_id: stem.to_string(),
-                display_name: stem.to_string(),
+                map_id: map_id.clone(),
+                display_name: map_id,
             });
         }
 
@@ -116,99 +365,130 @@ impl AssetService for AssetServiceImpl {
         Ok(Response::new(ListMapsResponse { maps }))
     }
 
-    async fn get_track_meta(
+    async fn get_map_asset_bundle_meta(
         &self,
-        request: Request<GetTrackMetaRequest>,
-    ) -> Result<Response<GetTrackMetaResponse>, Status> {
-        let GetTrackMetaRequest { id } = request.into_inner();
-        Self::sanitize_id(&id)?;
+        request: Request<GetMapAssetBundleMetaRequest>,
+    ) -> Result<Response<GetMapAssetBundleMetaResponse>, Status> {
+        let GetMapAssetBundleMetaRequest { map_id } = request.into_inner();
+        let map_id = Self::validate_map_id(&map_id)?;
 
-        let path = Self::resolve_track_path(&self.tracks_dir, &id);
-        tracing::debug!(%id, file = %path.display(), "requested");
+        let main_glb_path = Self::resolve_main_glb_path(&self.tracks_dir, &map_id);
+        let animation_glb_path = Self::resolve_animation_glb_path(&self.tracks_dir, &map_id);
+        let minimap_svg_path = Self::resolve_minimap_svg_path(&self.tracks_dir, &map_id);
+        let minimap_metadata_path = Self::resolve_minimap_metadata_path(&self.tracks_dir, &map_id);
+        let map_metadata_path = Self::resolve_map_metadata_path(&self.tracks_dir, &map_id);
 
-        let meta = fs::metadata(&path).await.map_err(|e| {
-            tracing::warn!(error = ?e, %id, file = %path.display(), "metadata failed");
-            Status::not_found("track not found")
-        })?;
-        let size = meta.len();
+        let main_glb = self
+            .build_asset_meta(&map_id, MapAssetKind::MainGlb, &main_glb_path)
+            .await?;
+        let minimap_svg = self
+            .build_asset_meta(&map_id, MapAssetKind::MinimapSvg, &minimap_svg_path)
+            .await?;
+        let minimap_metadata = self
+            .read_minimap_metadata(&map_id, &minimap_metadata_path)
+            .await?;
+        let map_metadata = self.read_map_metadata(&map_id, &map_metadata_path).await?;
 
-        let hash = self.hash_cache.get_or_compute(&path).await.map_err(|e| {
-            tracing::error!(error = ?e, %id, file = %path.display(), "hash computation failed");
-            Status::internal("hash computation failed")
-        })?;
-
-        let track_meta = TrackMeta {
-            id: id.clone(),
-            content_type: MimeType::GltfBinary as i32,
-            size_bytes: size,
-            content_hash: hash,
+        let animation_glb = match fs::metadata(&animation_glb_path).await {
+            Ok(_) => Some(
+                self.build_asset_meta(&map_id, MapAssetKind::AnimationGlb, &animation_glb_path)
+                    .await?,
+            ),
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
+            Err(e) => {
+                tracing::error!(
+                    error = ?e,
+                    %map_id,
+                    file = %animation_glb_path.display(),
+                    "failed to read animation asset metadata"
+                );
+                return Err(Status::internal("failed to read map asset metadata"));
+            }
         };
 
-        tracing::info!(%id, "meta ok");
-        Ok(Response::new(GetTrackMetaResponse {
-            meta: Some(track_meta),
+        let bundle = MapAssetBundleMeta {
+            map_id: map_id.clone(),
+            main_glb: Some(main_glb),
+            animation_glb,
+            minimap_svg: Some(minimap_svg),
+            minimap_metadata: Some(minimap_metadata),
+            map_metadata: Some(map_metadata),
+        };
+
+        tracing::info!(%map_id, "map asset bundle meta resolved");
+        Ok(Response::new(GetMapAssetBundleMetaResponse {
+            bundle: Some(bundle),
         }))
     }
 
-    type GetTrackStream = BoxStream<GetTrackResponse>;
+    type GetMapAssetStream = BoxStream<GetMapAssetResponse>;
 
-    async fn get_track(
+    async fn get_map_asset(
         &self,
-        request: Request<GetTrackRequest>,
-    ) -> Result<Response<Self::GetTrackStream>, Status> {
-        let GetTrackRequest {
-            id,
+        request: Request<GetMapAssetRequest>,
+    ) -> Result<Response<Self::GetMapAssetStream>, Status> {
+        let GetMapAssetRequest {
+            map_id,
+            kind,
             offset,
             limit,
             if_match_hash,
         } = request.into_inner();
-        Self::sanitize_id(&id)?;
 
-        let path = Self::resolve_track_path(&self.tracks_dir, &id);
-        tracing::debug!(%id, file = %path.display(), "requested");
+        let map_id = Self::validate_map_id(&map_id)?;
+        let kind = MapAssetKind::try_from(kind).unwrap_or(MapAssetKind::Unspecified);
+        let path = Self::resolve_path_for_kind(&self.tracks_dir, &map_id, kind)?;
 
-        let meta = fs::metadata(&path).await.map_err(|e| {
-            tracing::warn!(error = ?e, %id, file = %path.display(), "metadata failed");
-            Status::not_found("track not found")
+        tracing::debug!(%map_id, kind = ?kind, file = %path.display(), "asset requested");
+
+        let meta = fs::metadata(&path).await.map_err(|e| match e.kind() {
+            ErrorKind::NotFound => {
+                tracing::warn!(error = ?e, %map_id, kind = ?kind, file = %path.display(), "asset metadata failed");
+                Status::not_found("map asset not found")
+            }
+            _ => {
+                tracing::error!(error = ?e, %map_id, kind = ?kind, file = %path.display(), "asset metadata failed");
+                Status::internal("file IO error")
+            }
         })?;
         let total_len = meta.len();
 
         if !if_match_hash.is_empty() {
             let hash = self.hash_cache.get_or_compute(&path).await.map_err(|e| {
-                tracing::error!(error=?e, %id, file=%path.display(), "hash compute failed");
+                tracing::error!(error=?e, %map_id, kind = ?kind, file=%path.display(), "hash compute failed");
                 Status::internal("hash compute failed")
             })?;
 
             if if_match_hash != hash {
-                tracing::warn!(%id, "if_match_hash mismatch");
+                tracing::warn!(%map_id, kind = ?kind, "if_match_hash mismatch");
                 return Err(Status::failed_precondition("hash mismatch"));
             }
         }
 
         if offset >= total_len {
-            tracing::debug!(%id, offset, total_len, "offset beyond EOF -> immediate EOF");
+            tracing::debug!(%map_id, kind = ?kind, offset, total_len, "offset beyond EOF -> immediate EOF");
             let s = try_stream! {
-                yield GetTrackResponse {
+                yield GetMapAssetResponse {
                     offset,
                     data: Bytes::new(),
                     eof: true,
                 };
             };
-            return Ok(Response::new(Box::pin(s) as Self::GetTrackStream));
+            return Ok(Response::new(Box::pin(s) as Self::GetMapAssetStream));
         }
 
         let chunk_size = Self::choose_chunk_size(limit)?;
-        let stream_id = id.clone();
+        let stream_map_id = map_id.clone();
         let stream_path = path.clone();
 
         let s = try_stream! {
             let mut file = File::open(&stream_path).await.map_err(|e| {
-                tracing::warn!(error = ?e, %stream_id, file = %stream_path.display(), "open failed");
-                Status::not_found("track not found")
+                tracing::warn!(error = ?e, %stream_map_id, kind = ?kind, file = %stream_path.display(), "open failed");
+                Status::not_found("map asset not found")
             })?;
 
             file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|e| {
-                tracing::error!(error = ?e, %stream_id, file = %stream_path.display(), "seek failed");
+                tracing::error!(error = ?e, %stream_map_id, kind = ?kind, file = %stream_path.display(), "seek failed");
                 Status::internal("file IO error")
             })?;
 
@@ -221,24 +501,16 @@ impl AssetService for AssetServiceImpl {
                 buf.reserve(chunk_size);
 
                 let n = reader.read_buf(&mut buf).await.map_err(|e| {
-                    tracing::error!(error = ?e, %stream_id, file = %stream_path.display(), "read failed");
+                    tracing::error!(error = ?e, %stream_map_id, kind = ?kind, file = %stream_path.display(), "read failed");
                     Status::internal("file IO error")
                 })?;
 
                 if n == 0 {
-                    if pos == offset {
-                        yield GetTrackResponse {
-                            offset: pos,
-                            data: Bytes::new(),
-                            eof: true,
-                        };
-                    } else {
-                        yield GetTrackResponse {
-                            offset: pos,
-                            data: Bytes::new(),
-                            eof: true,
-                        };
-                    }
+                    yield GetMapAssetResponse {
+                        offset: pos,
+                        data: Bytes::new(),
+                        eof: true,
+                    };
                     break;
                 }
 
@@ -246,7 +518,7 @@ impl AssetService for AssetServiceImpl {
                 let eof = end >= total_len;
                 let chunk_bytes = buf.split().freeze();
 
-                yield GetTrackResponse {
+                yield GetMapAssetResponse {
                     offset: pos,
                     data: chunk_bytes,
                     eof,
@@ -258,7 +530,7 @@ impl AssetService for AssetServiceImpl {
                 }
             }
         };
-        tracing::info!(%id, "streaming started");
+        tracing::info!(%map_id, kind = ?kind, "asset streaming started");
 
         Ok(Response::new(Box::pin(s)))
     }
