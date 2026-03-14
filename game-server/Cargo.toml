@@ -16,7 +16,6 @@ default = []
 ide = []
 official = ["sqlx"]
 local = []
-proto-local = ["proto/proto-local"]
 
 [dependencies]
 bytes = { workspace = true }
