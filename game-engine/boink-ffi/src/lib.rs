@@ -13,29 +13,33 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 12;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 13;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
 
+/// Indicates that no data is currently available for the request.
+/// This is not considered an error.
+pub const BOINK_NO_DATA: c_int = 1;
+
 /// Indicates an invalid argument (for example a null pointer or an out-of-range value).
-pub const BOINK_ERR_INVALID_ARG: c_int = 1;
+pub const BOINK_ERR_INVALID_ARG: c_int = -1;
 
 /// Indicates that the output buffer was too small.
-pub const BOINK_ERR_BUFFER_TOO_SMALL: c_int = 2;
+pub const BOINK_ERR_BUFFER_TOO_SMALL: c_int = -2;
 
 /// Indicates that a requested object or identifier was not found.
-pub const BOINK_ERR_NOT_FOUND: c_int = 3;
+pub const BOINK_ERR_NOT_FOUND: c_int = -3;
 
 /// Indicates that the file format is not supported.
-pub const BOINK_ERR_UNSUPPORTED_FORMAT: c_int = 4;
+pub const BOINK_ERR_UNSUPPORTED_FORMAT: c_int = -4;
 
 /// Indicates an input/output error (for example a file read/write failure).
-pub const BOINK_ERR_IO: c_int = 5;
+pub const BOINK_ERR_IO: c_int = -5;
 
 /// Indicates an internal engine error.
-pub const BOINK_ERR_INTERNAL: c_int = 100;
+pub const BOINK_ERR_INTERNAL: c_int = -100;
 
 /// Represents an opaque engine handle.
 ///
@@ -314,6 +318,26 @@ pub struct BoinkVehicleState {
     ///   [2] = rear-left
     ///   [3] = rear-right
     pub wheel_speeds: [Real; 4],
+}
+
+/// Represents race-progress metrics of a vehicle at a specific simulation instant.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkVehicleRaceMetrics {
+    /// Number of fully completed laps.
+    pub completed_laps: c_uint,
+    /// Arc-length progress within the current lap in meters.
+    ///
+    /// The value is expected to be in `[0, lap_length_m)`.
+    pub lap_progress_m: Real,
+    /// Elapsed time in the currently running lap in milliseconds.
+    pub current_lap_time_ms: c_uint,
+    /// True when `last_lap_time_ms` contains a valid value.
+    pub has_last_lap_time: bool,
+    /// Duration of the previously finished lap in milliseconds.
+    ///
+    /// Valid only when `has_last_lap_time == true`.
+    pub last_lap_time_ms: c_uint,
 }
 
 unsafe extern "C" {
@@ -709,6 +733,69 @@ unsafe extern "C" {
         h: BoinkHandle,
         vehicle_id: u64,
         out_state: *mut BoinkVehicleState,
+    ) -> c_int;
+
+    /// Reads race-progress metrics for the specified vehicle.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle whose race metrics are requested.
+    /// - `out_metrics` - non-null pointer that receives race metrics.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success and writes metrics to `*out_metrics`.
+    /// - `BOINK_ERR_INVALID_ARG` if `out_metrics` is null.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - Another error code for other failures.
+    pub fn boink_read_vehicle_race_metrics(
+        h: BoinkHandle,
+        vehicle_id: u64,
+        out_metrics: *mut BoinkVehicleRaceMetrics,
+    ) -> c_int;
+
+    /// Returns the lap number and lap time of the vehicle's personal best lap.
+    ///
+    /// Output parameters are written only when `BOINK_OK` is returned.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle whose race metrics are requested.
+    /// - `out_lap` - non-null pointer that receives lap number.
+    /// - `out_lap_time_ms` - non-null pointer that receives the best lap time in milliseconds.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_NO_DATA` if the vehicle exists but has no personal best lap yet.
+    /// - `BOINK_ERR_INVALID_ARG` if `out_lap` or `out_lap_time_ms` is null.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - An error code on failure.
+    pub fn boink_get_vehicle_personal_best_lap(
+        h: BoinkHandle,
+        vehicle_id: u64,
+        out_lap: *mut c_uint,
+        out_lap_time_ms: *mut c_uint,
+    ) -> c_int;
+
+    /// Returns the vehicle ID, lap number, and lap time of the best lap in the race.
+    ///
+    /// Output parameters are written only when `BOINK_OK` is returned.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `out_vehicle_id` - non-null pointer that receives the vehicle identifier.
+    /// - `out_lap` - non-null pointer that receives the lap number.
+    /// - `out_lap_time_ms` - non-null pointer that receives the best lap time in milliseconds.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_NO_DATA` if no laps have been completed yet.
+    /// - `BOINK_ERR_INVALID_ARG` if `out_vehicle_id`, `out_lap`, or `out_lap_time_ms` is null.
+    /// - An error code on failure.
+    pub fn boink_get_best_lap(
+        h: BoinkHandle,
+        out_vehicle_id: *mut u64,
+        out_lap: *mut c_uint,
+        out_lap_time_ms: *mut c_uint,
     ) -> c_int;
 
     /// Reads runtime ghost mode state for the specified vehicle.
