@@ -48,6 +48,18 @@ pub type LegacyReadVehicleGhostModeStateFn = unsafe extern "C" fn(
     u64,
     *mut boink_sys::BoinkGhostModeRuntimeState,
 ) -> i32;
+/// Legacy counterpart of vehicle race-metrics query.
+pub type LegacyReadVehicleRaceMetricsFn = unsafe extern "C" fn(
+    boink_sys::BoinkHandle,
+    u64,
+    *mut boink_sys::BoinkVehicleRaceMetrics,
+) -> i32;
+/// Legacy counterpart of per-vehicle personal-best-lap query.
+pub type LegacyGetVehiclePersonalBestLapFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, u64, *mut u32, *mut u32) -> i32;
+/// Legacy counterpart of race best-lap query.
+pub type LegacyGetBestLapFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, *mut u64, *mut u32, *mut u32) -> i32;
 
 /// Loads the Boink native library once and returns a reference to it.
 pub fn load_native_library() -> Result<&'static Library, NativeLoadError> {

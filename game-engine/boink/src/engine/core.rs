@@ -14,8 +14,8 @@ use tracing::instrument;
 use crate::error::{Error, Result};
 use crate::model::math::Vec3;
 use crate::model::{
-    AcceptedControls, Controls, GhostModeRuntimeState, GhostModeSettings, Quaternion, TrackData,
-    VehicleState, WeatherParams,
+    AcceptedControls, Controls, GhostModeRuntimeState, GhostModeSettings, Quaternion, RaceBestLap,
+    TrackData, VehicleBestLap, VehicleRaceMetrics, VehicleState, WeatherParams,
 };
 #[cfg(feature = "legacy-native-lib")]
 use crate::native::api::NativeApi;
@@ -911,6 +911,201 @@ impl Engine {
         } else {
             tracing::debug!(code = code, "boink_read_vehicle_state failed");
             Err(Error::from_ffi_status(code, "boink_read_vehicle_state"))
+        }
+    }
+
+    /// Reads race-progress metrics for the specified vehicle.
+    #[instrument(skip(self))]
+    pub fn read_vehicle_race_metrics(&self, vehicle_id: u64) -> Result<VehicleRaceMetrics> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(read_vehicle_race_metrics) = api.boink_read_vehicle_race_metrics() else {
+                static WARNED_MISSING_READ_VEHICLE_RACE_METRICS: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_READ_VEHICLE_RACE_METRICS.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_read_vehicle_race_metrics symbol not found in native library; returning default race metrics"
+                    );
+                }
+                return Ok(VehicleRaceMetrics::default());
+            };
+
+            let mut raw: sys::BoinkVehicleRaceMetrics = unsafe { core::mem::zeroed() };
+            tracing::debug!(
+                vehicle_id,
+                "boink_read_vehicle_race_metrics (legacy dynamic symbol)"
+            );
+            let code =
+                unsafe { read_vehicle_race_metrics(self.handle, vehicle_id, &mut raw as *mut _) };
+            if code == sys::BOINK_OK {
+                return Ok(raw.into());
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_read_vehicle_race_metrics",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            let mut raw: sys::BoinkVehicleRaceMetrics = unsafe { core::mem::zeroed() };
+            tracing::debug!(vehicle_id, "boink_read_vehicle_race_metrics");
+            let code = unsafe {
+                sys::boink_read_vehicle_race_metrics(self.handle, vehicle_id, &mut raw as *mut _)
+            };
+            if code == sys::BOINK_OK {
+                Ok(raw.into())
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_read_vehicle_race_metrics",
+                ))
+            }
+        }
+    }
+
+    /// Returns personal best lap data for the specified vehicle.
+    ///
+    /// Returns `Ok(None)` when the vehicle exists but has no best lap yet.
+    #[instrument(skip(self))]
+    pub fn get_vehicle_personal_best_lap(&self, vehicle_id: u64) -> Result<Option<VehicleBestLap>> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(get_vehicle_personal_best_lap) = api.boink_get_vehicle_personal_best_lap()
+            else {
+                static WARNED_MISSING_GET_VEHICLE_PERSONAL_BEST_LAP: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_GET_VEHICLE_PERSONAL_BEST_LAP.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_get_vehicle_personal_best_lap symbol not found in native library; returning no data"
+                    );
+                }
+                return Ok(None);
+            };
+
+            let mut lap: u32 = 0;
+            let mut lap_time_ms: u32 = 0;
+            tracing::debug!(
+                vehicle_id,
+                "boink_get_vehicle_personal_best_lap (legacy dynamic symbol)"
+            );
+            let code = unsafe {
+                get_vehicle_personal_best_lap(
+                    self.handle,
+                    vehicle_id,
+                    &mut lap as *mut _,
+                    &mut lap_time_ms as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                return Ok(Some(VehicleBestLap { lap, lap_time_ms }));
+            }
+            if code == sys::BOINK_NO_DATA {
+                return Ok(None);
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_get_vehicle_personal_best_lap",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            let mut lap: u32 = 0;
+            let mut lap_time_ms: u32 = 0;
+            tracing::debug!(vehicle_id, "boink_get_vehicle_personal_best_lap");
+            let code = unsafe {
+                sys::boink_get_vehicle_personal_best_lap(
+                    self.handle,
+                    vehicle_id,
+                    &mut lap as *mut _,
+                    &mut lap_time_ms as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                Ok(Some(VehicleBestLap { lap, lap_time_ms }))
+            } else if code == sys::BOINK_NO_DATA {
+                Ok(None)
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_get_vehicle_personal_best_lap",
+                ))
+            }
+        }
+    }
+
+    /// Returns best-lap data in the entire race.
+    ///
+    /// Returns `Ok(None)` when no best lap is available yet.
+    #[instrument(skip(self))]
+    pub fn get_best_lap(&self) -> Result<Option<RaceBestLap>> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(get_best_lap) = api.boink_get_best_lap() else {
+                static WARNED_MISSING_GET_BEST_LAP: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_GET_BEST_LAP.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_get_best_lap symbol not found in native library; returning no data"
+                    );
+                }
+                return Ok(None);
+            };
+
+            let mut vehicle_id: u64 = 0;
+            let mut lap: u32 = 0;
+            let mut lap_time_ms: u32 = 0;
+            tracing::debug!("boink_get_best_lap (legacy dynamic symbol)");
+            let code = unsafe {
+                get_best_lap(
+                    self.handle,
+                    &mut vehicle_id as *mut _,
+                    &mut lap as *mut _,
+                    &mut lap_time_ms as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                return Ok(Some(RaceBestLap {
+                    vehicle_id,
+                    lap,
+                    lap_time_ms,
+                }));
+            }
+            if code == sys::BOINK_NO_DATA {
+                return Ok(None);
+            }
+            return Err(Error::from_ffi_status(code, "boink_get_best_lap"));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            let mut vehicle_id: u64 = 0;
+            let mut lap: u32 = 0;
+            let mut lap_time_ms: u32 = 0;
+            tracing::debug!("boink_get_best_lap");
+            let code = unsafe {
+                sys::boink_get_best_lap(
+                    self.handle,
+                    &mut vehicle_id as *mut _,
+                    &mut lap as *mut _,
+                    &mut lap_time_ms as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                Ok(Some(RaceBestLap {
+                    vehicle_id,
+                    lap,
+                    lap_time_ms,
+                }))
+            } else if code == sys::BOINK_NO_DATA {
+                Ok(None)
+            } else {
+                Err(Error::from_ffi_status(code, "boink_get_best_lap"))
+            }
         }
     }
 

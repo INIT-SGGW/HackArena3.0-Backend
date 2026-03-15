@@ -89,3 +89,47 @@ impl TryFrom<sys::BoinkVehicleState> for VehicleState {
         })
     }
 }
+
+/// Race-progress metrics of a vehicle at a single simulation instant.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct VehicleRaceMetrics {
+    /// Number of fully completed laps.
+    pub completed_laps: u32,
+    /// Arc-length progress within current lap, in meters.
+    pub lap_progress_m: f32,
+    /// Elapsed time in the currently running lap, in milliseconds.
+    pub current_lap_time_ms: u32,
+    /// Previously completed lap time, if available.
+    pub last_lap_time_ms: Option<u32>,
+}
+
+impl From<sys::BoinkVehicleRaceMetrics> for VehicleRaceMetrics {
+    fn from(raw: sys::BoinkVehicleRaceMetrics) -> Self {
+        Self {
+            completed_laps: raw.completed_laps,
+            lap_progress_m: raw.lap_progress_m,
+            current_lap_time_ms: raw.current_lap_time_ms,
+            last_lap_time_ms: raw.has_last_lap_time.then_some(raw.last_lap_time_ms),
+        }
+    }
+}
+
+/// Best lap data for a specific vehicle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VehicleBestLap {
+    /// Lap number in which the best time was achieved.
+    pub lap: u32,
+    /// Best lap duration in milliseconds.
+    pub lap_time_ms: u32,
+}
+
+/// Best lap data in the whole race.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RaceBestLap {
+    /// Vehicle identifier that set the best lap.
+    pub vehicle_id: u64,
+    /// Lap number in which the best time was achieved.
+    pub lap: u32,
+    /// Best lap duration in milliseconds.
+    pub lap_time_ms: u32,
+}

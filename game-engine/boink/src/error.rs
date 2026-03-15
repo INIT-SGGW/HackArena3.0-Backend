@@ -37,6 +37,10 @@ pub enum Error {
     #[error("resource not found")]
     NotFound,
 
+    /// A request succeeded semantically, but no data is currently available.
+    #[error("no data available")]
+    NoData,
+
     /// The file format is not supported by the native engine.
     #[error("unsupported format")]
     UnsupportedFormat,
@@ -121,6 +125,7 @@ impl Error {
         log_last_error_if_available(func, Some(code));
 
         match code {
+            x if x == sys::BOINK_NO_DATA => Self::NoData,
             x if x == sys::BOINK_ERR_INVALID_ARG => Self::InvalidArg,
             x if x == sys::BOINK_ERR_BUFFER_TOO_SMALL => Self::BufferTooSmall,
             x if x == sys::BOINK_ERR_NOT_FOUND => Self::NotFound,

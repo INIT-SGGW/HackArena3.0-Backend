@@ -17,6 +17,6 @@ pub use ghost::{
     GhostModePhase, GhostModeRuntimeState, GhostModeSettings,
 };
 pub use math::{Quaternion, Vec3};
-pub use state::{Gear, VehicleState};
+pub use state::{Gear, RaceBestLap, VehicleBestLap, VehicleRaceMetrics, VehicleState};
 pub use track::{CenterlineSample, TrackData};
 pub use weather::WeatherParams;
