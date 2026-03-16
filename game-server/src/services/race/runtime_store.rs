@@ -63,6 +63,49 @@ impl RaceRuntimeStore {
             .map(|entry| entry.value().clone())
     }
 
+    pub fn car_target(&self, car_id: u64) -> Option<EngineCommandTarget> {
+        self.car_targets
+            .get(&car_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    pub fn car_engine_id(&self, car_id: u64) -> Option<u64> {
+        self.car_engine_ids.get(&car_id).map(|entry| *entry.value())
+    }
+
+    pub fn car_last_client_seq(&self, car_id: u64) -> u64 {
+        self.last_client_seq
+            .get(&car_id)
+            .map(|entry| *entry.value())
+            .unwrap_or(0)
+    }
+
+    pub fn known_car_ids(&self) -> Vec<u64> {
+        let mut car_ids: Vec<u64> = self.known_cars.iter().map(|entry| *entry.key()).collect();
+        car_ids.sort_unstable();
+        car_ids
+    }
+
+    pub fn remove_car(&self, car_id: u64) {
+        self.known_cars.remove(&car_id);
+        self.last_client_seq.remove(&car_id);
+        self.car_engine_ids.remove(&car_id);
+        self.car_targets.remove(&car_id);
+        self.car_identity.remove(&car_id);
+
+        let Some((_, owner_instance_uuid)) = self.car_owners.remove(&car_id) else {
+            return;
+        };
+        let should_remove_instance = self
+            .instance_cars
+            .get(&owner_instance_uuid)
+            .map(|entry| *entry.value() == car_id)
+            .unwrap_or(false);
+        if should_remove_instance {
+            self.instance_cars.remove(&owner_instance_uuid);
+        }
+    }
+
     pub fn known_cars(&self) -> Arc<DashMap<u64, ()>> {
         Arc::clone(&self.known_cars)
     }

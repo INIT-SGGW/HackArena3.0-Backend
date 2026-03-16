@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use boink::error::Error as BoinkError;
 use boink::model::VehicleRaceMetrics;
 use proto::race::v1::race_table_query_service_server::RaceTableQueryService;
 use proto::race::v1::{
@@ -19,14 +18,13 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::runtime::engine_worker::{
-    EngineActivityKind, EngineClient, EngineCommandTarget, EngineRuntimeState, EngineWorkerError,
-};
+use crate::runtime::engine_worker::{EngineActivityKind, EngineCommandTarget, EngineRuntimeState};
 
-use super::error_map::map_worker_err;
+use super::race::FrameHub;
+use super::race::frame_hub::RuntimeFrame;
 use super::race::runtime_store::{RaceRuntimeStore, RuntimeCarIdentity};
 
-const STREAM_CHANNEL_CAPACITY: usize = 16;
+const STREAM_CHANNEL_CAPACITY: usize = 1;
 const SNAPSHOT_TICK_MS: u64 = 2000;
 const TRAJECTORY_MAX_AGE_MS_OFFICIAL: u64 = 24 * 60 * 60 * 1000;
 const GAP_DISABLED_LAPS_BEHIND_THRESHOLD: u32 = 1;
@@ -43,7 +41,6 @@ enum ParsedRaceTableTarget {
 #[derive(Default)]
 struct OfficialRaceCache {
     session_marker: Option<String>,
-    lap_length_m: Option<f64>,
     last_race_elapsed_ms: Option<u64>,
     last_active_rows: HashMap<u64, OfficialRaceTableEntry>,
     archived_dnf_rows: HashMap<u64, OfficialRaceTableEntry>,
@@ -65,7 +62,6 @@ impl OfficialRaceCache {
             return;
         }
         self.session_marker = Some(marker.to_owned());
-        self.lap_length_m = None;
         self.reset_runtime_progress();
     }
 }
@@ -90,16 +86,16 @@ struct TrajectorySample {
 
 #[derive(Clone)]
 pub struct RaceTableQueryServiceImpl {
-    engine: EngineClient,
     runtime_store: Arc<RaceRuntimeStore>,
+    frame_hub: FrameHub,
     cache: Arc<Mutex<RaceTableCache>>,
 }
 
 impl RaceTableQueryServiceImpl {
-    pub fn new(engine: EngineClient, runtime_store: Arc<RaceRuntimeStore>) -> Self {
+    pub fn new(runtime_store: Arc<RaceRuntimeStore>, frame_hub: FrameHub) -> Self {
         Self {
-            engine,
             runtime_store,
+            frame_hub,
             cache: Arc::new(Mutex::new(RaceTableCache::default())),
         }
     }
@@ -109,15 +105,21 @@ impl RaceTableQueryServiceImpl {
         target: ParsedRaceTableTarget,
     ) -> Result<RaceTableSnapshot, Status> {
         ensure_target_supported(&target)?;
-        let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
-        ensure_target_active(&runtime_state, &target)?;
+
+        let frame = self.frame_hub.latest();
+        let runtime_state = frame
+            .runtime_state
+            .as_ref()
+            .ok_or_else(|| Status::not_found("runtime state is unavailable"))?;
+        ensure_target_active(runtime_state, &target)?;
 
         match target {
             ParsedRaceTableTarget::Sandbox { sandbox_id } => {
                 self.build_sandbox_snapshot(sandbox_id).await
             }
             ParsedRaceTableTarget::OfficialRace => {
-                self.build_official_race_snapshot(&runtime_state).await
+                self.build_official_race_snapshot(runtime_state, &frame)
+                    .await
             }
         }
     }
@@ -166,13 +168,15 @@ impl RaceTableQueryServiceImpl {
     async fn build_official_race_snapshot(
         &self,
         runtime_state: &EngineRuntimeState,
+        frame: &RuntimeFrame,
     ) -> Result<RaceTableSnapshot, Status> {
-        let engine_target = EngineCommandTarget::OfficialRace;
-        let lap_length_m = self.lap_length_for_official_race(&engine_target).await?;
-        let race_elapsed_ms = self.race_elapsed_ms_for_target(&engine_target).await?;
-        let mut active_entries = self
-            .collect_official_active_entries(&engine_target, lap_length_m)
-            .await;
+        let lap_length_m = f64::from(frame.official_lap_length_m.unwrap_or(1.0).max(1.0));
+        let race_elapsed_ms = frame
+            .official_race_duration_s
+            .map(|duration_s| (duration_s.max(0.0) * 1000.0) as u64)
+            .unwrap_or(0);
+
+        let mut active_entries = self.collect_official_active_entries(frame, lap_length_m);
         sort_active_entries(&mut active_entries);
 
         let session_marker = format!("official-race:{}", runtime_state.map_id);
@@ -190,96 +194,27 @@ impl RaceTableQueryServiceImpl {
         })
     }
 
-    async fn lap_length_for_official_race(
+    fn collect_official_active_entries(
         &self,
-        engine_target: &EngineCommandTarget,
-    ) -> Result<f64, Status> {
-        {
-            let cache = self.cache.lock().await;
-            if let Some(lap_length_m) = cache.official.lap_length_m {
-                return Ok(lap_length_m);
-            }
-        }
-
-        let track_data = self
-            .engine
-            .track_data_in(engine_target.clone())
-            .await
-            .map_err(map_target_worker_err)?;
-        let lap_length_m = track_data.lap_length_m.max(1.0);
-
-        let mut cache = self.cache.lock().await;
-        cache.official.lap_length_m = Some(lap_length_m);
-        Ok(lap_length_m)
-    }
-
-    async fn race_elapsed_ms_for_target(
-        &self,
-        engine_target: &EngineCommandTarget,
-    ) -> Result<u64, Status> {
-        match self.engine.race_duration_in(engine_target.clone()).await {
-            Ok(duration_s) => Ok((duration_s.max(0.0) * 1000.0) as u64),
-            Err(err) => Err(map_target_worker_err(err)),
-        }
-    }
-
-    async fn collect_official_active_entries(
-        &self,
-        engine_target: &EngineCommandTarget,
+        frame: &RuntimeFrame,
         lap_length_m: f64,
     ) -> Vec<ActiveEntrySample> {
-        let known_cars = self.runtime_store.known_cars();
-        let car_targets = self.runtime_store.car_targets();
-        let car_engine_ids = self.runtime_store.car_engine_ids();
-
-        let car_ids: Vec<u64> = known_cars.iter().map(|entry| *entry.key()).collect();
-        let mut entries = Vec::with_capacity(car_ids.len());
-
-        for public_car_id in car_ids {
-            let Some(car_target) = car_targets
-                .get(&public_car_id)
-                .map(|entry| entry.value().clone())
-            else {
-                continue;
-            };
-            if car_target != *engine_target {
+        let mut entries = Vec::new();
+        for car in frame.cars.values() {
+            if !matches!(car.target, EngineCommandTarget::OfficialRace) {
                 continue;
             }
-
-            let Some(engine_car_id) = car_engine_ids
-                .get(&public_car_id)
-                .map(|entry| *entry.value())
-            else {
+            let Some(metrics) = car.race_metrics else {
                 continue;
-            };
-
-            let metrics = match self
-                .engine
-                .read_car_race_metrics_in(engine_target.clone(), engine_car_id)
-                .await
-            {
-                Ok(metrics) => metrics,
-                Err(EngineWorkerError::Engine(BoinkError::NotFound)) => continue,
-                Err(EngineWorkerError::Engine(BoinkError::NoData)) => VehicleRaceMetrics::default(),
-                Err(err) => {
-                    tracing::warn!(
-                        public_car_id,
-                        engine_car_id,
-                        error = %err,
-                        "failed to read race metrics for official race-table row"
-                    );
-                    continue;
-                }
             };
 
             entries.push(sample_to_official_entry(
-                public_car_id,
+                car.public_car_id,
                 metrics,
                 lap_length_m,
-                self.runtime_store.car_identity(public_car_id),
+                car.identity.clone(),
             ));
         }
-
         entries
     }
 
@@ -703,13 +638,4 @@ fn interpolate_leader_time_ms(
     let ratio = ((progress_total_m - lower.progress_total_m) / delta_progress).clamp(0.0, 1.0);
     let delta_time_ms = upper.race_elapsed_ms.saturating_sub(lower.race_elapsed_ms);
     Some(lower.race_elapsed_ms as f64 + ratio * delta_time_ms as f64)
-}
-
-fn map_target_worker_err(err: EngineWorkerError) -> Status {
-    match err {
-        EngineWorkerError::InvalidArgument(_) => {
-            Status::not_found("race-table target runtime session is not active")
-        }
-        other => map_worker_err(other),
-    }
 }

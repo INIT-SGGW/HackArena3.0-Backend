@@ -50,7 +50,7 @@ use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
 use crate::services::public_menu::{
     PublicMenuServiceImpl, SandboxConfigCacheInvalidation, UpcomingRacesCacheInvalidation,
 };
-use crate::services::race::{RaceRuntimeStore, RaceServiceImpl};
+use crate::services::race::{RaceRuntimeStore, RaceServiceImpl, spawn_frame_hub};
 #[cfg(feature = "official")]
 use crate::services::race_config_admin::RaceConfigAdminServiceImpl;
 use crate::services::race_table::RaceTableQueryServiceImpl;
@@ -121,6 +121,12 @@ pub async fn serve_grpc(
 
     let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
     let race_runtime_store = Arc::new(RaceRuntimeStore::new());
+    let (frame_hub, frame_hub_handle) = spawn_frame_hub(
+        engine.clone(),
+        race_runtime_store.clone(),
+        cfg.simulation_hz,
+        shutdown_rx.resubscribe(),
+    );
     let race_impl = RaceServiceImpl::new(
         engine.clone(),
         cfg.simulation_hz,
@@ -129,8 +135,9 @@ pub async fn serve_grpc(
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
         race_runtime_store.clone(),
+        frame_hub.clone(),
     );
-    let race_table_impl = RaceTableQueryServiceImpl::new(engine.clone(), race_runtime_store);
+    let race_table_impl = RaceTableQueryServiceImpl::new(race_runtime_store, frame_hub);
     #[cfg(feature = "official")]
     let sandbox_engine = engine.clone();
     #[cfg(feature = "official")]
@@ -264,10 +271,16 @@ pub async fn serve_grpc(
         local_sandbox_admin_impl,
     ));
 
-    server
+    let serve_result = server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))
         .await
-        .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)
+        .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>);
+
+    if !frame_hub_handle.is_finished() {
+        frame_hub_handle.abort();
+    }
+
+    serve_result
 }
 
 fn client_ip_from_headers(headers: &http::HeaderMap) -> String {
