@@ -18,7 +18,7 @@ use boink::error::Error as BoinkError;
 use boink::model::control::{AcceptedControls, Controls};
 use boink::model::ghost::GhostModeSettings;
 use boink::model::math::Vec3;
-use boink::model::state::VehicleState;
+use boink::model::state::{VehicleRaceMetrics, VehicleState};
 use boink::model::track::TrackData;
 #[cfg(feature = "local")]
 use boink::model::weather::WeatherParams;
@@ -273,6 +273,46 @@ impl EngineClient {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::ReadCarState {
+                target,
+                car_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Reads race-progress metrics for a given official-race vehicle.
+    pub async fn read_car_race_metrics(
+        &self,
+        car_id: u64,
+    ) -> Result<VehicleRaceMetrics, EngineWorkerError> {
+        self.read_car_race_metrics_in(EngineCommandTarget::OfficialRace, car_id)
+            .await
+    }
+
+    /// Reads race-progress metrics for a given sandbox vehicle.
+    pub async fn read_sandbox_car_race_metrics(
+        &self,
+        sandbox_id: String,
+        car_id: u64,
+    ) -> Result<VehicleRaceMetrics, EngineWorkerError> {
+        self.read_car_race_metrics_in(EngineCommandTarget::Sandbox { sandbox_id }, car_id)
+            .await
+    }
+
+    /// Reads race-progress metrics for a given vehicle in target runtime world.
+    pub async fn read_car_race_metrics_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<VehicleRaceMetrics, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::ReadCarRaceMetrics {
                 target,
                 car_id,
                 reply_tx,
@@ -952,6 +992,26 @@ async fn handle_command(
                 |slot| {
                     slot.engine
                         .read_vehicle_state(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::ReadCarRaceMetrics {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .read_vehicle_race_metrics(car_id)
                         .map_err(EngineWorkerError::Engine)
                 },
             )

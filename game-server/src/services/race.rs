@@ -25,6 +25,9 @@ use crate::runtime::engine_worker::{
     EngineRuntimeState,
 };
 
+pub mod runtime_store;
+pub use runtime_store::{RaceRuntimeStore, RuntimeCarIdentity};
+
 use super::error_map::map_worker_err;
 use super::mappers::{
     engine_gear_shift_to_proto, frontend_full_state, participant_opponent_state,
@@ -41,7 +44,7 @@ pub struct RaceServiceImpl {
     engine: EngineClient,
     simulation_hz: u32,
     app_env: AppEnv,
-    next_public_car_id: Arc<AtomicU64>,
+    runtime_store: Arc<RaceRuntimeStore>,
     active_streams: Arc<DashMap<u64, ()>>,
     known_cars: Arc<DashMap<u64, ()>>,
     last_client_seq: Arc<DashMap<u64, u64>>,
@@ -63,19 +66,20 @@ impl RaceServiceImpl {
         jwks_url: &str,
         jwt_audience: Vec<String>,
         jwt_issuers: Vec<String>,
+        runtime_store: Arc<RaceRuntimeStore>,
     ) -> Self {
         Self {
             engine,
             simulation_hz,
             app_env,
-            next_public_car_id: Arc::new(AtomicU64::new(1)),
+            runtime_store: runtime_store.clone(),
             active_streams: Arc::new(DashMap::new()),
-            known_cars: Arc::new(DashMap::new()),
-            last_client_seq: Arc::new(DashMap::new()),
-            instance_cars: Arc::new(DashMap::new()),
-            car_owners: Arc::new(DashMap::new()),
-            car_engine_ids: Arc::new(DashMap::new()),
-            car_targets: Arc::new(DashMap::new()),
+            known_cars: runtime_store.known_cars(),
+            last_client_seq: runtime_store.last_client_seq(),
+            instance_cars: runtime_store.instance_cars(),
+            car_owners: runtime_store.car_owners(),
+            car_engine_ids: runtime_store.car_engine_ids(),
+            car_targets: runtime_store.car_targets(),
             token_validator: Arc::new(GameTokenValidator::new_with_config(
                 jwks_url,
                 jwt_audience,
@@ -117,18 +121,27 @@ impl RaceService for RaceServiceImpl {
             .spawn_sandbox_car(sandbox_id.clone())
             .await
             .map_err(map_worker_err)?;
-        let public_car_id = self.next_public_car_id.fetch_add(1, Ordering::Relaxed);
-        if let Some(token) = auth {
-            let instance_uuid = self
-                .token_validator
-                .instance_uuid_from_token(&token)
-                .await?;
-            if let Some(instance_uuid) = instance_uuid {
+        let public_car_id = self.runtime_store.allocate_public_car_id();
+        let mut identity = RuntimeCarIdentity::default();
+        if let Some(token) = auth.as_ref() {
+            identity.subject = Some(self.token_validator.subject_from_token(token).await?);
+            identity.team_id = self.token_validator.team_id_from_token(token).await?;
+            identity.instance_uuid = self.token_validator.instance_uuid_from_token(token).await?;
+            if let Some(instance_uuid) = identity.instance_uuid.clone() {
                 self.instance_cars
                     .insert(instance_uuid.clone(), public_car_id);
                 self.car_owners.insert(public_car_id, instance_uuid);
             }
         }
+        let local_user_id = identity
+            .subject
+            .clone()
+            .unwrap_or_else(|| format!("car-{public_car_id}"));
+        identity.local_bot_index = Some(
+            self.runtime_store
+                .allocate_local_bot_index(&sandbox_id, &local_user_id),
+        );
+        self.runtime_store.set_car_identity(public_car_id, identity);
 
         let resp = QuickJoinDevResponse {
             car_id: public_car_id,

@@ -2,7 +2,9 @@
 
 #[cfg(feature = "local")]
 use boink::model::WeatherParams;
-use boink::model::{AcceptedControls, Controls, GhostModeSettings, TrackData, VehicleState};
+use boink::model::{
+    AcceptedControls, Controls, GhostModeSettings, TrackData, VehicleRaceMetrics, VehicleState,
+};
 use tokio::sync::oneshot;
 
 #[cfg(feature = "local")]
@@ -31,6 +33,11 @@ pub enum EngineCommand {
         target: EngineCommandTarget,
         car_id: u64,
         reply_tx: oneshot::Sender<Result<VehicleState, EngineWorkerError>>,
+    },
+    ReadCarRaceMetrics {
+        target: EngineCommandTarget,
+        car_id: u64,
+        reply_tx: oneshot::Sender<Result<VehicleRaceMetrics, EngineWorkerError>>,
     },
     GetTrackData {
         target: EngineCommandTarget,

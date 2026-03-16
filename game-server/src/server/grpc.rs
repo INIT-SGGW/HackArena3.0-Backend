@@ -11,6 +11,7 @@ use proto::race::v1::public_menu_service_server::PublicMenuServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
+use proto::race::v1::race_table_query_service_server::RaceTableQueryServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::runtime_admin_service_server::RuntimeAdminServiceServer;
 #[cfg(feature = "official")]
@@ -49,9 +50,10 @@ use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
 use crate::services::public_menu::{
     PublicMenuServiceImpl, SandboxConfigCacheInvalidation, UpcomingRacesCacheInvalidation,
 };
-use crate::services::race::RaceServiceImpl;
+use crate::services::race::{RaceRuntimeStore, RaceServiceImpl};
 #[cfg(feature = "official")]
 use crate::services::race_config_admin::RaceConfigAdminServiceImpl;
+use crate::services::race_table::RaceTableQueryServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::sandbox_admin::SandboxAdminServiceImpl;
 use crate::services::track::TrackServiceImpl;
@@ -79,6 +81,9 @@ pub async fn serve_grpc(
         .await;
     health_reporter
         .set_serving::<RaceServiceServer<RaceServiceImpl>>()
+        .await;
+    health_reporter
+        .set_serving::<RaceTableQueryServiceServer<RaceTableQueryServiceImpl>>()
         .await;
     health_reporter
         .set_serving::<TrackServiceServer<TrackServiceImpl>>()
@@ -115,6 +120,7 @@ pub async fn serve_grpc(
     let token_validator = std::sync::Arc::new(TokenValidator::new());
 
     let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
+    let race_runtime_store = Arc::new(RaceRuntimeStore::new());
     let race_impl = RaceServiceImpl::new(
         engine.clone(),
         cfg.simulation_hz,
@@ -122,7 +128,9 @@ pub async fn serve_grpc(
         &cfg.jwks_url,
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
+        race_runtime_store.clone(),
     );
+    let race_table_impl = RaceTableQueryServiceImpl::new(engine.clone(), race_runtime_store);
     #[cfg(feature = "official")]
     let sandbox_engine = engine.clone();
     #[cfg(feature = "official")]
@@ -235,6 +243,7 @@ pub async fn serve_grpc(
         .add_service(health_service)
         .add_service(AssetServiceServer::new(asset_impl))
         .add_service(RaceServiceServer::new(race_impl))
+        .add_service(RaceTableQueryServiceServer::new(race_table_impl))
         .add_service(TrackServiceServer::new(track_impl))
         .add_service(WeatherQueryServiceServer::new(weather_query_impl));
 
