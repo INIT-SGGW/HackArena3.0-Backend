@@ -9,3 +9,12 @@ pub mod weather {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/gen/weather.v1.rs"));
     }
 }
+
+pub mod achievement {
+    pub mod v1 {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/gen/achievement.v1.rs"
+        ));
+    }
+}

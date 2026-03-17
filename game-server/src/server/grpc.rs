@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "official")]
+use proto::achievement::v1::achievement_stream_service_server::AchievementStreamServiceServer;
 use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "local")]
 use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminServiceServer;
@@ -43,6 +45,8 @@ use crate::db::repos::weather::WeatherRepo;
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::LocalSandboxConfigStore;
 use crate::runtime::engine_worker::EngineClient;
+#[cfg(feature = "official")]
+use crate::services::achievement_stream::AchievementStreamServiceImpl;
 use crate::services::asset::AssetServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
@@ -84,6 +88,10 @@ pub async fn serve_grpc(
         .await;
     health_reporter
         .set_serving::<RaceTableQueryServiceServer<RaceTableQueryServiceImpl>>()
+        .await;
+    #[cfg(feature = "official")]
+    health_reporter
+        .set_serving::<AchievementStreamServiceServer<AchievementStreamServiceImpl>>()
         .await;
     health_reporter
         .set_serving::<TrackServiceServer<TrackServiceImpl>>()
@@ -137,7 +145,10 @@ pub async fn serve_grpc(
         race_runtime_store.clone(),
         frame_hub.clone(),
     );
-    let race_table_impl = RaceTableQueryServiceImpl::new(race_runtime_store, frame_hub);
+    let race_table_impl = RaceTableQueryServiceImpl::new(race_runtime_store, frame_hub.clone());
+    #[cfg(feature = "official")]
+    let achievement_stream_impl =
+        AchievementStreamServiceImpl::new(engine.clone(), frame_hub, cfg.simulation_hz);
     #[cfg(feature = "official")]
     let sandbox_engine = engine.clone();
     #[cfg(feature = "official")]
@@ -253,6 +264,8 @@ pub async fn serve_grpc(
         .add_service(RaceTableQueryServiceServer::new(race_table_impl))
         .add_service(TrackServiceServer::new(track_impl))
         .add_service(WeatherQueryServiceServer::new(weather_query_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(AchievementStreamServiceServer::new(achievement_stream_impl));
 
     #[cfg(feature = "official")]
     let server = server.add_service(WeatherAdminServiceServer::new(weather_admin_impl));

@@ -1,5 +1,7 @@
 //! gRPC service implementations and shared helpers.
 
+#[cfg(feature = "official")]
+pub mod achievement_stream;
 pub mod asset;
 mod error_map;
 #[cfg(feature = "local")]

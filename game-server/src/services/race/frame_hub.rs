@@ -259,31 +259,37 @@ async fn collect_frame(
             }
         };
 
-        let race_metrics = if matches!(target, EngineCommandTarget::OfficialRace) {
-            match engine
-                .read_car_race_metrics_in(EngineCommandTarget::OfficialRace, engine_car_id)
-                .await
+        let race_metrics = {
+            #[cfg(feature = "official")]
             {
-                Ok(metrics) => Some(metrics),
-                Err(EngineWorkerError::Engine(BoinkError::NoData)) => {
-                    Some(VehicleRaceMetrics::default())
-                }
-                Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
-                    runtime_store.remove_car(public_car_id);
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        public_car_id,
-                        engine_car_id,
-                        error = %err,
-                        "frame hub: failed to read race metrics"
-                    );
-                    None
+                match engine
+                    .read_car_race_metrics_in(target.clone(), engine_car_id)
+                    .await
+                {
+                    Ok(metrics) => Some(metrics),
+                    Err(EngineWorkerError::Engine(BoinkError::NoData)) => {
+                        Some(VehicleRaceMetrics::default())
+                    }
+                    Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
+                        runtime_store.remove_car(public_car_id);
+                        continue;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            public_car_id,
+                            engine_car_id,
+                            target = ?target,
+                            error = %err,
+                            "frame hub: failed to read race metrics"
+                        );
+                        None
+                    }
                 }
             }
-        } else {
-            None
+            #[cfg(not(feature = "official"))]
+            {
+                None
+            }
         };
 
         frame.cars.insert(
