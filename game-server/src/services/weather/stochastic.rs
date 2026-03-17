@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use proto::weather::v1::{ForecastPoint as ProtoForecastPoint, ForecastPreset, WeatherType};
 use rand::Rng;
 
-use crate::domain::weather::temperature_c_for_weather_type;
+use crate::domain::weather::clamp_schedule_temperature_c;
 
 const MINUTE_MS: i64 = 60 * 1_000;
 
@@ -70,8 +70,13 @@ fn stochasticize_point<R: Rng + ?Sized>(
         prev_output_type,
         rng,
     );
+    let temp_delta_c = rng.gen_range(-profile.max_temp_delta_c..=profile.max_temp_delta_c);
+    let base_temperature_c = clamp_schedule_temperature_c(base.temperature_c);
+    let stochastic_temperature_c =
+        clamp_schedule_temperature_c((base_temperature_c as f32 + temp_delta_c).round() as i32);
+
     out.r#type = stochastic_type as i32;
-    out.temperature_c = temperature_c_for_weather_type(stochastic_type);
+    out.temperature_c = stochastic_temperature_c;
     out.rain_probability = rain_probability;
 
     cohere_rain_probability_and_type(&mut out);
@@ -243,6 +248,7 @@ fn pick_weighted_weather_type<R: Rng + ?Sized>(
 struct StochasticProfile {
     max_rain_delta: f32,
     type_mismatch_chance: f32,
+    max_temp_delta_c: f32,
 }
 
 fn stochastic_profile(preset: ForecastPreset, bucket_idx: usize) -> StochasticProfile {
@@ -254,6 +260,7 @@ fn stochastic_profile(preset: ForecastPreset, bucket_idx: usize) -> StochasticPr
         ForecastPreset::Unspecified => StochasticProfile {
             max_rain_delta: 0.0,
             type_mismatch_chance: 0.0,
+            max_temp_delta_c: 0.0,
         },
     }
 }
@@ -263,22 +270,27 @@ fn one_hour_stochastic_profile(bucket_idx: usize) -> StochasticProfile {
         0 => StochasticProfile {
             max_rain_delta: 0.02,
             type_mismatch_chance: 0.0,
+            max_temp_delta_c: 0.6,
         },
         1 => StochasticProfile {
             max_rain_delta: 0.03,
             type_mismatch_chance: 0.0,
+            max_temp_delta_c: 0.9,
         },
         2 => StochasticProfile {
             max_rain_delta: 0.04,
             type_mismatch_chance: 0.03,
+            max_temp_delta_c: 1.2,
         },
         3 => StochasticProfile {
             max_rain_delta: 0.05,
             type_mismatch_chance: 0.06,
+            max_temp_delta_c: 1.6,
         },
         _ => StochasticProfile {
             max_rain_delta: 0.06,
             type_mismatch_chance: 0.10,
+            max_temp_delta_c: 2.0,
         },
     }
 }
@@ -291,6 +303,7 @@ fn twelve_hours_stochastic_profile(bucket_idx: usize) -> StochasticProfile {
     const LINEAR_BLEND_WEIGHT: f32 = 0.35;
     const TARGET_MAX_RAIN_DELTA_12H: f32 = 0.66;
     const TARGET_MAX_TYPE_MISMATCH_12H: f32 = 0.66;
+    const TARGET_MAX_TEMP_DELTA_C_12H: f32 = 6.0;
 
     if bucket_idx == 0 {
         return one_hour_stochastic_profile(START_PROFILE_BUCKET_1H);
@@ -315,6 +328,11 @@ fn twelve_hours_stochastic_profile(bucket_idx: usize) -> StochasticProfile {
         type_mismatch_chance: lerp(
             one_hour_reference_profile.type_mismatch_chance,
             TARGET_MAX_TYPE_MISMATCH_12H,
+            blended_progress,
+        ),
+        max_temp_delta_c: lerp(
+            one_hour_reference_profile.max_temp_delta_c,
+            TARGET_MAX_TEMP_DELTA_C_12H,
             blended_progress,
         ),
     }

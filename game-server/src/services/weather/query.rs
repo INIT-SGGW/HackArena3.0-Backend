@@ -32,7 +32,9 @@ use crate::domain::weather::ScheduleEntry;
 #[cfg(feature = "official")]
 use crate::domain::weather::project_forecast;
 #[cfg(feature = "official")]
-use crate::domain::weather::{temperature_c_for_weather_type, weather_type_at};
+use crate::domain::weather::{
+    clamp_schedule_temperature_c, temperature_c_for_weather_type, weather_at,
+};
 #[cfg(feature = "local")]
 use crate::runtime::engine_worker::{EngineClient, EngineRuntimeWeatherType};
 #[cfg(feature = "local")]
@@ -167,7 +169,7 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
                     let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
                     tokio::spawn(async move {
                         debug!(stream_id, peer = ?peer_addr, "weather stream started");
-                        let mut last_weather_type: Option<WeatherType> = None;
+                        let mut last_weather: Option<WeatherNow> = None;
 
                         let mut ticker = tokio::time::interval_at(
                             next_boundary_instant(MINUTE_MS),
@@ -175,7 +177,7 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
                         );
 
                         if let Err(status) =
-                            emit_weather_update(&service, &tx, &mut last_weather_type).await
+                            emit_weather_update(&service, &tx, &mut last_weather).await
                         {
                             handle_weather_stream_error(
                                 &tx,
@@ -191,7 +193,7 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
                         loop {
                             ticker.tick().await;
                             let result =
-                                emit_weather_update(&service, &tx, &mut last_weather_type).await;
+                                emit_weather_update(&service, &tx, &mut last_weather).await;
                             if let Err(status) = result {
                                 handle_weather_stream_error(
                                     &tx, status, stream_id, peer_addr, "tick",
@@ -379,13 +381,7 @@ impl WeatherQueryServiceImpl {
                 {
                     let now_ms = current_time_ms();
                     let schedule = self.current_schedule().await?;
-                    let weather_type =
-                        weather_type_at(&schedule, now_ms).unwrap_or(WeatherType::Unspecified);
-                    let temperature_c = temperature_c_for_weather_type(weather_type);
-                    return Ok(WeatherNow {
-                        r#type: weather_type as i32,
-                        temperature_c,
-                    });
+                    return Ok(official_weather_now_from_schedule(&schedule, now_ms));
                 }
 
                 #[cfg(not(feature = "official"))]
@@ -668,26 +664,37 @@ async fn run_cache_refresh_loop(inner: Arc<WeatherQueryInner>) {
 async fn emit_weather_update(
     service: &WeatherQueryServiceImpl,
     tx: &mpsc::Sender<Result<WeatherUpdateEvent, Status>>,
-    last_weather_type: &mut Option<WeatherType>,
+    last_weather: &mut Option<WeatherNow>,
 ) -> Result<(), Status> {
     let now_ms = current_time_ms();
     let schedule = service.current_schedule().await?;
-    let weather_type = weather_type_at(&schedule, now_ms).unwrap_or(WeatherType::Unspecified);
-    if *last_weather_type == Some(weather_type) {
+    let now = official_weather_now_from_schedule(&schedule, now_ms);
+    if last_weather.as_ref() == Some(&now) {
         return Ok(());
     }
-    *last_weather_type = Some(weather_type);
+    *last_weather = Some(now.clone());
 
-    let event = WeatherUpdateEvent {
-        now: Some(WeatherNow {
-            r#type: weather_type as i32,
-            temperature_c: temperature_c_for_weather_type(weather_type),
-        }),
-    };
+    let event = WeatherUpdateEvent { now: Some(now) };
 
     tx.send(Ok(event))
         .await
         .map_err(|_| Status::cancelled("weather stream closed"))
+}
+
+#[cfg(feature = "official")]
+fn official_weather_now_from_schedule(schedule: &[ScheduleEntry], now_ms: i64) -> WeatherNow {
+    if let Some(entry) = weather_at(schedule, now_ms) {
+        return WeatherNow {
+            r#type: entry.weather_type as i32,
+            temperature_c: clamp_schedule_temperature_c(entry.temperature_c),
+        };
+    }
+
+    let weather_type = WeatherType::Unspecified;
+    WeatherNow {
+        r#type: weather_type as i32,
+        temperature_c: temperature_c_for_weather_type(weather_type),
+    }
 }
 
 async fn emit_forecast_update(

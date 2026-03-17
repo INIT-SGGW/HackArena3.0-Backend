@@ -5,14 +5,16 @@ use proto::weather::v1::{ForecastPoint, ForecastPreset, WeatherScheduleEntry, We
 use tonic::Status;
 
 use crate::domain::weather::{
-    ForecastPoint as DomainForecastPoint, ScheduleEntry, dominant_weather_type_for_window,
-    rain_probability_for_window, temperature_c_for_weather_type,
+    ForecastPoint as DomainForecastPoint, ScheduleEntry, average_temperature_c_for_window,
+    clamp_schedule_temperature_c, dominant_weather_type_for_window,
+    is_valid_schedule_temperature_c, rain_probability_for_window, temperature_c_for_weather_type,
 };
 
 pub fn schedule_entry_to_proto(entry: ScheduleEntry) -> WeatherScheduleEntry {
     WeatherScheduleEntry {
         from: Some(ms_to_timestamp(entry.starts_at_ms)),
         r#type: entry.weather_type as i32,
+        temperature_c: entry.temperature_c,
     }
 }
 
@@ -21,11 +23,17 @@ pub fn schedule_entry_from_proto(entry: &WeatherScheduleEntry) -> Result<Schedul
         .from
         .as_ref()
         .ok_or_else(|| Status::invalid_argument("entry.from is required"))?;
+    if !is_valid_schedule_temperature_c(entry.temperature_c) {
+        return Err(Status::invalid_argument(
+            "entry.temperature_c must be in range 1..=30",
+        ));
+    }
     let weather_type = WeatherType::try_from(entry.r#type)
         .map_err(|_| Status::invalid_argument("invalid weather type"))?;
     Ok(ScheduleEntry {
         starts_at_ms: timestamp_to_ms(from)?,
         weather_type,
+        temperature_c: entry.temperature_c,
     })
 }
 
@@ -50,11 +58,14 @@ pub fn forecast_points_to_proto(
         let rain_probability = rain_probability_for_window(schedule, point.time_ms, bucket_end_ms);
         let dominant_type =
             dominant_weather_type_for_window(schedule, point.time_ms, bucket_end_ms);
+        let temperature_c =
+            average_temperature_c_for_window(schedule, point.time_ms, bucket_end_ms)
+                .unwrap_or_else(|| temperature_c_for_weather_type(dominant_type));
         out.push(ForecastPoint {
             time: Some(ms_to_timestamp(point.time_ms)),
             r#type: dominant_type as i32,
             rain_probability,
-            temperature_c: temperature_c_for_weather_type(dominant_type),
+            temperature_c: clamp_schedule_temperature_c(temperature_c),
         });
     }
 

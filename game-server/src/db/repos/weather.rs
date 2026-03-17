@@ -60,7 +60,7 @@ impl WeatherRepo {
     /// Fetches full global schedule ordered by start timestamp.
     pub async fn get_schedule(&self) -> anyhow::Result<Vec<ScheduleEntry>> {
         let rows = sqlx::query!(
-            r#"SELECT starts_at_ms, weather_type AS "weather_type: DbWeatherType" FROM weather_schedule ORDER BY starts_at_ms ASC"#
+            r#"SELECT starts_at_ms, weather_type AS "weather_type: DbWeatherType", temperature_c FROM weather_schedule ORDER BY starts_at_ms ASC"#
         )
         .fetch_all(&self.pool)
         .await?;
@@ -70,6 +70,7 @@ impl WeatherRepo {
             entries.push(ScheduleEntry {
                 starts_at_ms: row.starts_at_ms,
                 weather_type: row.weather_type.into(),
+                temperature_c: row.temperature_c,
             });
         }
 
@@ -87,9 +88,10 @@ impl WeatherRepo {
         for entry in entries {
             let weather_type = DbWeatherType::from(entry.weather_type);
             sqlx::query!(
-                "INSERT INTO weather_schedule (starts_at_ms, weather_type) VALUES ($1, $2)",
+                "INSERT INTO weather_schedule (starts_at_ms, weather_type, temperature_c) VALUES ($1, $2, $3)",
                 entry.starts_at_ms,
-                weather_type as _
+                weather_type as _,
+                entry.temperature_c
             )
             .execute(&mut *tx)
             .await?;

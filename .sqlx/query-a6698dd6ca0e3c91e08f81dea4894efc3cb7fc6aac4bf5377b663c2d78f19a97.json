@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT starts_at_ms, weather_type AS \"weather_type: DbWeatherType\" FROM weather_schedule ORDER BY starts_at_ms ASC",
+  "query": "SELECT starts_at_ms, weather_type AS \"weather_type: DbWeatherType\", temperature_c FROM weather_schedule ORDER BY starts_at_ms ASC",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,11 @@
             }
           }
         }
+      },
+      {
+        "ordinal": 2,
+        "name": "temperature_c",
+        "type_info": "Int4"
       }
     ],
     "parameters": {
@@ -34,8 +39,9 @@
     },
     "nullable": [
       false,
+      false,
       false
     ]
   },
-  "hash": "9e85c8654535df04c3aa6b81a85332d48d22c2ba894fb9d01fcb482df73080f2"
+  "hash": "a6698dd6ca0e3c91e08f81dea4894efc3cb7fc6aac4bf5377b663c2d78f19a97"
 }

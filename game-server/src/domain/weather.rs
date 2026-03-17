@@ -9,12 +9,16 @@ use crate::config::AppEnv;
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const MINUTE_MS: i64 = 60 * 1000;
+pub const SCHEDULE_TEMPERATURE_MIN_C: i32 = 1;
+pub const SCHEDULE_TEMPERATURE_MAX_C: i32 = 30;
+pub const SCHEDULE_TEMPERATURE_DEFAULT_C: i32 = 16;
 
 /// Global weather schedule entry interpreted by domain logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScheduleEntry {
     pub starts_at_ms: i64,
     pub weather_type: WeatherType,
+    pub temperature_c: i32,
 }
 
 /// Forecast point produced by domain projection.
@@ -78,6 +82,16 @@ pub fn temperature_c_for_weather_type(weather_type: WeatherType) -> i32 {
     engine_params_for_weather_type(weather_type)
         .temperature_c
         .round() as i32
+}
+
+#[must_use]
+pub fn is_valid_schedule_temperature_c(temperature_c: i32) -> bool {
+    (SCHEDULE_TEMPERATURE_MIN_C..=SCHEDULE_TEMPERATURE_MAX_C).contains(&temperature_c)
+}
+
+#[must_use]
+pub fn clamp_schedule_temperature_c(temperature_c: i32) -> i32 {
+    temperature_c.clamp(SCHEDULE_TEMPERATURE_MIN_C, SCHEDULE_TEMPERATURE_MAX_C)
 }
 
 /// Computes rain probability for a `[start_ms, end_ms)` bucket.
@@ -180,6 +194,58 @@ pub fn dominant_weather_type_for_window(
         .unwrap_or(WeatherType::Unspecified)
 }
 
+/// Computes weighted average temperature for `[start_ms, end_ms)` bucket.
+///
+/// Returns `None` when effective weather segment is unavailable at `start_ms`.
+#[must_use]
+pub fn average_temperature_c_for_window(
+    entries: &[ScheduleEntry],
+    start_ms: i64,
+    end_ms: i64,
+) -> Option<i32> {
+    if end_ms <= start_ms || entries.is_empty() {
+        return None;
+    }
+
+    let mut cursor = start_ms;
+    let mut next_idx = entries.partition_point(|entry| entry.starts_at_ms <= start_ms);
+    if next_idx == 0 {
+        return None;
+    }
+    let mut current_temp = entries[next_idx - 1].temperature_c;
+    let mut total_weighted_temp: i64 = 0;
+    let mut total_duration_ms: i64 = 0;
+
+    while cursor < end_ms {
+        let next_change = if next_idx < entries.len() {
+            entries[next_idx].starts_at_ms.min(end_ms)
+        } else {
+            end_ms
+        };
+
+        if next_change > cursor {
+            let duration_ms = next_change - cursor;
+            total_duration_ms += duration_ms;
+            total_weighted_temp += i64::from(current_temp) * duration_ms;
+        }
+
+        if next_change >= end_ms {
+            break;
+        }
+
+        cursor = next_change;
+        current_temp = entries[next_idx].temperature_c;
+        next_idx += 1;
+    }
+
+    if total_duration_ms <= 0 {
+        return None;
+    }
+
+    let average = (total_weighted_temp as f64 / total_duration_ms as f64).round() as i32;
+    Some(clamp_schedule_temperature_c(average))
+}
+
 #[derive(Debug, Error)]
 pub enum WeatherDomainError {
     #[error("forecast preset must be specified")]
@@ -245,6 +311,12 @@ pub fn validate_schedule(
 
 /// Returns effective weather type at a given timestamp.
 pub fn weather_type_at(entries: &[ScheduleEntry], time_ms: i64) -> Option<WeatherType> {
+    weather_at(entries, time_ms).map(|entry| entry.weather_type)
+}
+
+/// Returns effective weather schedule entry at a given timestamp.
+#[must_use]
+pub fn weather_at(entries: &[ScheduleEntry], time_ms: i64) -> Option<ScheduleEntry> {
     if entries.is_empty() {
         return None;
     }
@@ -253,7 +325,7 @@ pub fn weather_type_at(entries: &[ScheduleEntry], time_ms: i64) -> Option<Weathe
     if idx == 0 {
         None
     } else {
-        Some(entries[idx - 1].weather_type)
+        Some(entries[idx - 1])
     }
 }
 
