@@ -10,8 +10,9 @@ use hash_cache::HashCache;
 use proto::race::v1::asset_service_server::AssetService;
 use proto::race::v1::{
     GetMapAssetBundleMetaRequest, GetMapAssetBundleMetaResponse, GetMapAssetRequest,
-    GetMapAssetResponse, ListMapsRequest, ListMapsResponse, MapAssetBundleMeta, MapAssetKind,
-    MapAssetMeta, MapCatalogEntry, MapMetadata, MimeType, MinimapMetadata,
+    GetMapAssetResponse, HelicopterViewMetadata, ListMapsRequest, ListMapsResponse,
+    MapAssetBundleMeta, MapAssetKind, MapAssetMeta, MapCatalogEntry, MapMetadata, MimeType,
+    MinimapMetadata, Vector3,
 };
 use serde::Deserialize;
 use tokio::fs::{self, File};
@@ -49,6 +50,56 @@ struct MapMetadataJson {
     name: String,
     #[serde(alias = "lapLengthMeters")]
     lap_length_meters: f32,
+    #[serde(default, alias = "followCameraAnchorPositions")]
+    follow_camera_anchor_positions: Vec<Vector3Json>,
+    #[serde(default, alias = "helicopterView")]
+    helicopter_view: Option<HelicopterViewMetadataJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Vector3Json {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+#[derive(Debug, Deserialize)]
+struct HelicopterViewMetadataJson {
+    #[serde(alias = "ellipseCenterWorld")]
+    ellipse_center_world: Option<Vector3Json>,
+    #[serde(alias = "ellipseSemiAxisXM", alias = "ellipseSemiAxisXm")]
+    ellipse_semi_axis_x_m: f32,
+    #[serde(alias = "ellipseSemiAxisZM", alias = "ellipseSemiAxisZm")]
+    ellipse_semi_axis_z_m: f32,
+    #[serde(alias = "ellipseRotationRad")]
+    ellipse_rotation_rad: f32,
+    #[serde(alias = "desiredArcOffsetTowardsM")]
+    desired_arc_offset_towards_m: f32,
+    #[serde(alias = "desiredArcOffsetAwayM")]
+    desired_arc_offset_away_m: f32,
+}
+
+impl From<Vector3Json> for Vector3 {
+    fn from(value: Vector3Json) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            z: value.z,
+        }
+    }
+}
+
+impl From<HelicopterViewMetadataJson> for HelicopterViewMetadata {
+    fn from(value: HelicopterViewMetadataJson) -> Self {
+        Self {
+            ellipse_center_world: value.ellipse_center_world.map(Into::into),
+            ellipse_semi_axis_x_m: value.ellipse_semi_axis_x_m,
+            ellipse_semi_axis_z_m: value.ellipse_semi_axis_z_m,
+            ellipse_rotation_rad: value.ellipse_rotation_rad,
+            desired_arc_offset_towards_m: value.desired_arc_offset_towards_m,
+            desired_arc_offset_away_m: value.desired_arc_offset_away_m,
+        }
+    }
 }
 
 impl From<MinimapMetadataJson> for MinimapMetadata {
@@ -72,6 +123,12 @@ impl From<MapMetadataJson> for MapMetadata {
             map_id: value.id,
             map_name: value.name,
             total_length_m: value.lap_length_meters,
+            follow_camera_anchor_positions: value
+                .follow_camera_anchor_positions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            helicopter_view: value.helicopter_view.map(Into::into),
         }
     }
 }
