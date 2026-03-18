@@ -5,23 +5,30 @@ use std::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
-    let proto_root = resolve_proto_root()?;
-    println!("cargo:rerun-if-changed={}", proto_root.display());
+    let (ha3_proto_root, hackarena_proto_root) = resolve_proto_roots()?;
+    println!("cargo:rerun-if-changed={}", ha3_proto_root.display());
+    println!("cargo:rerun-if-changed={}", hackarena_proto_root.display());
 
-    let race_v1_dir = proto_root.join("race").join("v1");
-    let weather_v1_dir = proto_root.join("weather").join("v1");
-    let achievement_v1_dir = proto_root.join("achievement").join("v1");
+    let race_v1_dir = ha3_proto_root.join("race").join("v1");
+    let weather_v1_dir = ha3_proto_root.join("weather").join("v1");
+    let achievement_v1_dir = ha3_proto_root.join("achievement").join("v1");
+    let build_v1_dir = hackarena_proto_root
+        .join("hackarena")
+        .join("build")
+        .join("v1");
     ensure_proto_dir(&race_v1_dir, "race/v1")?;
     ensure_proto_dir(&weather_v1_dir, "weather/v1")?;
     ensure_proto_dir(&achievement_v1_dir, "achievement/v1")?;
+    ensure_proto_dir(&build_v1_dir, "hackarena/build/v1")?;
 
     let mut protos = Vec::new();
     protos.extend(collect_proto_files_in_dir(&race_v1_dir)?);
     protos.extend(collect_proto_files_in_dir(&weather_v1_dir)?);
     protos.extend(collect_proto_files_in_dir(&achievement_v1_dir)?);
+    protos.extend(collect_proto_files_in_dir(&build_v1_dir)?);
     if protos.is_empty() {
         return Err(
-            "No .proto files found in third_party/HackArean3.0-Proto/proto/{race,weather,achievement}/v1".into(),
+            "No .proto files found in configured proto roots (HA3 + HackArena build)".into(),
         );
     }
     for proto_file in &protos {
@@ -34,7 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(true)
         .bytes(".")
-        .compile_protos(&protos, &[proto_root.clone()])?;
+        .compile_protos(
+            &protos,
+            &[ha3_proto_root.clone(), hackarena_proto_root.clone()],
+        )?;
 
     copy_generated_rs_to_gen_dir()?;
 
@@ -43,25 +53,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn resolve_proto_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn resolve_proto_roots() -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let proto_root = manifest_dir
+    let ha3_proto_root = manifest_dir
         .join("..")
         .join("third_party")
         .join("HackArean3.0-Proto")
         .join("proto");
 
-    if !proto_root.exists() {
-        return Err(
-            "Proto submodule missing at `third_party/HackArean3.0-Proto/proto`. Run: git submodule update --init --recursive"
-                .into(),
-        );
-    }
-    if !proto_root.is_dir() {
-        return Err("Expected `third_party/HackArean3.0-Proto/proto` to be a directory".into());
-    }
+    let hackarena_proto_root = manifest_dir
+        .join("..")
+        .join("third_party")
+        .join("HackArena-Proto")
+        .join("proto");
 
-    Ok(proto_root)
+    ensure_proto_root(&ha3_proto_root, "third_party/HackArean3.0-Proto/proto")?;
+    ensure_proto_root(&hackarena_proto_root, "third_party/HackArena-Proto/proto")?;
+
+    Ok((ha3_proto_root, hackarena_proto_root))
+}
+
+fn ensure_proto_root(path: &Path, logical_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Err(format!(
+            "Proto submodule missing at `{logical_path}`. Run: git submodule update --init --recursive"
+        )
+        .into());
+    }
+    if !path.is_dir() {
+        return Err(format!("Expected `{logical_path}` to be a directory").into());
+    }
+    Ok(())
 }
 
 fn ensure_proto_dir(path: &Path, logical_name: &str) -> Result<(), Box<dyn std::error::Error>> {

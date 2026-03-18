@@ -18,3 +18,14 @@ pub mod achievement {
         ));
     }
 }
+
+pub mod hackarena {
+    pub mod build {
+        pub mod v1 {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/gen/hackarena.build.v1.rs"
+            ));
+        }
+    }
+}
