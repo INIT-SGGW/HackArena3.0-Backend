@@ -16,19 +16,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("hackarena")
         .join("build")
         .join("v1");
+    let submission_v1_dir = hackarena_proto_root
+        .join("hackarena")
+        .join("submission")
+        .join("v1");
+    let platform_common_v1_dir = hackarena_proto_root
+        .join("hackarena")
+        .join("platform")
+        .join("common")
+        .join("v1");
+    let platform_teams_v1_dir = hackarena_proto_root
+        .join("hackarena")
+        .join("platform")
+        .join("teams")
+        .join("v1");
     ensure_proto_dir(&race_v1_dir, "race/v1")?;
     ensure_proto_dir(&weather_v1_dir, "weather/v1")?;
     ensure_proto_dir(&achievement_v1_dir, "achievement/v1")?;
     ensure_proto_dir(&build_v1_dir, "hackarena/build/v1")?;
+    ensure_proto_dir(&submission_v1_dir, "hackarena/submission/v1")?;
+    ensure_proto_dir(&platform_common_v1_dir, "hackarena/platform/common/v1")?;
+    ensure_proto_dir(&platform_teams_v1_dir, "hackarena/platform/teams/v1")?;
 
     let mut protos = Vec::new();
     protos.extend(collect_proto_files_in_dir(&race_v1_dir)?);
     protos.extend(collect_proto_files_in_dir(&weather_v1_dir)?);
     protos.extend(collect_proto_files_in_dir(&achievement_v1_dir)?);
     protos.extend(collect_proto_files_in_dir(&build_v1_dir)?);
+    protos.extend(collect_proto_files_in_dir(&submission_v1_dir)?);
+    protos.extend(collect_proto_files_in_dir(&platform_common_v1_dir)?);
+    protos.extend(collect_proto_files_in_dir(&platform_teams_v1_dir)?);
     if protos.is_empty() {
         return Err(
-            "No .proto files found in configured proto roots (HA3 + HackArena build)".into(),
+            "No .proto files found in configured proto roots (HA3 + HackArena APIs)".into(),
         );
     }
     for proto_file in &protos {

@@ -28,4 +28,33 @@ pub mod hackarena {
             ));
         }
     }
+
+    pub mod submission {
+        pub mod v1 {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/gen/hackarena.submission.v1.rs"
+            ));
+        }
+    }
+
+    pub mod platform {
+        pub mod common {
+            pub mod v1 {
+                include!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/gen/hackarena.platform.common.v1.rs"
+                ));
+            }
+        }
+
+        pub mod teams {
+            pub mod v1 {
+                include!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/gen/hackarena.platform.teams.v1.rs"
+                ));
+            }
+        }
+    }
 }
