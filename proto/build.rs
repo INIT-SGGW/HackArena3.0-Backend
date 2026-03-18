@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     protos.extend(collect_proto_files_in_dir(&achievement_v1_dir)?);
     if protos.is_empty() {
         return Err(
-            "No .proto files found in third_party/proto/proto/{race,weather,achievement}/v1".into(),
+            "No .proto files found in third_party/HackArean3.0-Proto/proto/{race,weather,achievement}/v1".into(),
         );
     }
     for proto_file in &protos {
@@ -48,17 +48,17 @@ fn resolve_proto_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let proto_root = manifest_dir
         .join("..")
         .join("third_party")
-        .join("proto")
+        .join("HackArean3.0-Proto")
         .join("proto");
 
     if !proto_root.exists() {
         return Err(
-            "Proto submodule missing at `third_party/proto/proto`. Run: git submodule update --init --recursive"
+            "Proto submodule missing at `third_party/HackArean3.0-Proto/proto`. Run: git submodule update --init --recursive"
                 .into(),
         );
     }
     if !proto_root.is_dir() {
-        return Err("Expected `third_party/proto/proto` to be a directory".into());
+        return Err("Expected `third_party/HackArean3.0-Proto/proto` to be a directory".into());
     }
 
     Ok(proto_root)
