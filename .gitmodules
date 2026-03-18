@@ -1,3 +1,6 @@
 [submodule "third_party/HackArean3.0-Proto"]
 	path = third_party/HackArean3.0-Proto
 	url = https://github.com/INIT-SGGW/HackArena3.0-Proto.git
+[submodule "third_party/HackArena-Proto"]
+	path = third_party/HackArena-Proto
+	url = https://github.com/INIT-SGGW/HackArena-Proto.git
