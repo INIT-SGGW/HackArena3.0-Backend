@@ -12,7 +12,15 @@ const LOCAL_SANDBOX_STORE_RELATIVE_PATH: &str = "local/sandbox-configs.json";
 #[cfg(feature = "official")]
 const DEFAULT_BUILD_SERVICE_GRPC_ENDPOINT: &str = "http://127.0.0.1:56051";
 #[cfg(feature = "official")]
+const DEFAULT_HPS_ENDPOINT: &str = "https://platform.hackarena.pl";
+#[cfg(feature = "official")]
 const DEFAULT_BUILD_SERVICE_TIMEOUT_MS: u64 = 5_000;
+#[cfg(feature = "official")]
+const DEFAULT_HPS_GET_TIMEOUT_MS: u64 = 5_000;
+#[cfg(feature = "official")]
+const DEFAULT_HPS_CACHE_TTL_MS: u64 = 3_600_000;
+#[cfg(feature = "official")]
+const DEFAULT_HPS_EDITION: &str = "3";
 #[cfg(feature = "official")]
 const DEFAULT_BUILD_UPLOADS_RELATIVE_PATH: &str = "uploads/build";
 #[cfg(feature = "official")]
@@ -79,6 +87,14 @@ pub struct Config {
     pub build_uploads_root: PathBuf,
     #[cfg(feature = "official")]
     pub build_upload_max_size_bytes: u64,
+    #[cfg(feature = "official")]
+    pub hps_endpoint: String,
+    #[cfg(feature = "official")]
+    pub hps_get_timeout_ms: u64,
+    #[cfg(feature = "official")]
+    pub hps_cache_ttl_ms: u64,
+    #[cfg(feature = "official")]
+    pub hps_edition: String,
 }
 
 impl Config {
@@ -245,6 +261,18 @@ impl Config {
         let build_upload_max_size_bytes = parse_u64_env("BUILD_UPLOAD_MAX_SIZE_BYTES")?
             .unwrap_or(DEFAULT_BUILD_UPLOAD_MAX_SIZE_BYTES);
         #[cfg(feature = "official")]
+        let hps_endpoint =
+            read_env_string("HPS_ENDPOINT").unwrap_or_else(|| DEFAULT_HPS_ENDPOINT.to_string());
+        #[cfg(feature = "official")]
+        let hps_get_timeout_ms =
+            parse_u64_env("HPS_GET_TIMEOUT_MS")?.unwrap_or(DEFAULT_HPS_GET_TIMEOUT_MS);
+        #[cfg(feature = "official")]
+        let hps_cache_ttl_ms =
+            parse_u64_env("HPS_CACHE_TTL_MS")?.unwrap_or(DEFAULT_HPS_CACHE_TTL_MS);
+        #[cfg(feature = "official")]
+        let hps_edition =
+            read_env_string("HPS_EDITION").unwrap_or_else(|| DEFAULT_HPS_EDITION.to_string());
+        #[cfg(feature = "official")]
         for (name, value) in [
             (
                 "BUILD_SERVICE_SUBMIT_TIMEOUT_MS",
@@ -260,10 +288,16 @@ impl Config {
                 build_service_cancel_timeout_ms,
             ),
             ("BUILD_UPLOAD_MAX_SIZE_BYTES", build_upload_max_size_bytes),
+            ("HPS_GET_TIMEOUT_MS", hps_get_timeout_ms),
+            ("HPS_CACHE_TTL_MS", hps_cache_ttl_ms),
         ] {
             if value == 0 {
                 return Err(format!("{name} must be >= 1"));
             }
+        }
+        #[cfg(feature = "official")]
+        if hps_edition.trim().is_empty() {
+            return Err("HPS_EDITION must be non-empty".into());
         }
 
         Ok(Self {
@@ -300,6 +334,14 @@ impl Config {
             build_uploads_root,
             #[cfg(feature = "official")]
             build_upload_max_size_bytes,
+            #[cfg(feature = "official")]
+            hps_endpoint,
+            #[cfg(feature = "official")]
+            hps_get_timeout_ms,
+            #[cfg(feature = "official")]
+            hps_cache_ttl_ms,
+            #[cfg(feature = "official")]
+            hps_edition,
         })
     }
 }

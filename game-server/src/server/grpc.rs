@@ -55,6 +55,8 @@ use crate::services::build::BuildGrpcClient;
 #[cfg(feature = "official")]
 use crate::services::build::BuildSubmissionService;
 #[cfg(feature = "official")]
+use crate::services::build::BuildTeamResolver;
+#[cfg(feature = "official")]
 use crate::services::build::FsUploadStager;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
@@ -136,6 +138,8 @@ pub async fn serve_grpc(
     let token_validator = std::sync::Arc::new(TokenValidator::new());
     #[cfg(feature = "official")]
     let build_grpc_client = BuildGrpcClient::from_config(&cfg)?;
+    #[cfg(feature = "official")]
+    let _build_team_resolver = BuildTeamResolver::from_config(&cfg)?;
     #[cfg(feature = "official")]
     let build_upload_stager = {
         let stager = FsUploadStager::from_config(&cfg);
