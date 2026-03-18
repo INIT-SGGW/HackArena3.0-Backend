@@ -37,6 +37,8 @@ use tower_http::trace::TraceLayer;
 use crate::auth::auth_claims::TokenValidator;
 use crate::config::Config;
 #[cfg(feature = "official")]
+use crate::db::repos::build_submission::BuildSubmissionRepo;
+#[cfg(feature = "official")]
 use crate::db::repos::race_config::RaceConfigRepo;
 #[cfg(feature = "official")]
 use crate::db::repos::sandbox_config::SandboxConfigRepo;
@@ -50,6 +52,8 @@ use crate::services::achievement_stream::AchievementStreamServiceImpl;
 use crate::services::asset::AssetServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::build::BuildGrpcClient;
+#[cfg(feature = "official")]
+use crate::services::build::BuildSubmissionService;
 #[cfg(feature = "official")]
 use crate::services::build::FsUploadStager;
 #[cfg(feature = "local")]
@@ -131,9 +135,9 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let token_validator = std::sync::Arc::new(TokenValidator::new());
     #[cfg(feature = "official")]
-    let _build_grpc_client = BuildGrpcClient::from_config(&cfg)?;
+    let build_grpc_client = BuildGrpcClient::from_config(&cfg)?;
     #[cfg(feature = "official")]
-    let _build_upload_stager = {
+    let build_upload_stager = {
         let stager = FsUploadStager::from_config(&cfg);
         stager.ensure_root_dir().await?;
         tracing::info!(
@@ -143,6 +147,12 @@ pub async fn serve_grpc(
         );
         stager
     };
+    #[cfg(feature = "official")]
+    let _build_submission_service = BuildSubmissionService::new(
+        BuildSubmissionRepo::new(official_db_pool.clone()),
+        build_upload_stager,
+        build_grpc_client,
+    );
 
     let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
     let race_runtime_store = Arc::new(RaceRuntimeStore::new());
