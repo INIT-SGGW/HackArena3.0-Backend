@@ -48,6 +48,10 @@ use crate::runtime::engine_worker::EngineClient;
 #[cfg(feature = "official")]
 use crate::services::achievement_stream::AchievementStreamServiceImpl;
 use crate::services::asset::AssetServiceImpl;
+#[cfg(feature = "official")]
+use crate::services::build::BuildGrpcClient;
+#[cfg(feature = "official")]
+use crate::services::build::FsUploadStager;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
 #[cfg(feature = "official")]
@@ -126,6 +130,19 @@ pub async fn serve_grpc(
 
     #[cfg(feature = "official")]
     let token_validator = std::sync::Arc::new(TokenValidator::new());
+    #[cfg(feature = "official")]
+    let _build_grpc_client = BuildGrpcClient::from_config(&cfg)?;
+    #[cfg(feature = "official")]
+    let _build_upload_stager = {
+        let stager = FsUploadStager::from_config(&cfg);
+        stager.ensure_root_dir().await?;
+        tracing::info!(
+            path = %stager.root_dir().display(),
+            max_upload_size_bytes = stager.max_upload_size_bytes(),
+            "build upload staging ready"
+        );
+        stager
+    };
 
     let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
     let race_runtime_store = Arc::new(RaceRuntimeStore::new());

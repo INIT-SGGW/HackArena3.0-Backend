@@ -9,6 +9,14 @@ const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
 const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
 #[cfg(feature = "local")]
 const LOCAL_SANDBOX_STORE_RELATIVE_PATH: &str = "local/sandbox-configs.json";
+#[cfg(feature = "official")]
+const DEFAULT_BUILD_SERVICE_GRPC_ENDPOINT: &str = "http://127.0.0.1:56051";
+#[cfg(feature = "official")]
+const DEFAULT_BUILD_SERVICE_TIMEOUT_MS: u64 = 5_000;
+#[cfg(feature = "official")]
+const DEFAULT_BUILD_UPLOADS_RELATIVE_PATH: &str = "uploads/build";
+#[cfg(feature = "official")]
+const DEFAULT_BUILD_UPLOAD_MAX_SIZE_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEnv {
@@ -57,6 +65,20 @@ pub struct Config {
     pub official_database_url: String,
     #[cfg(feature = "official")]
     pub official_db_max_connections: u32,
+    #[cfg(feature = "official")]
+    pub build_service_grpc_endpoint: String,
+    #[cfg(feature = "official")]
+    pub build_service_submit_timeout_ms: u64,
+    #[cfg(feature = "official")]
+    pub build_service_get_timeout_ms: u64,
+    #[cfg(feature = "official")]
+    pub build_service_list_timeout_ms: u64,
+    #[cfg(feature = "official")]
+    pub build_service_cancel_timeout_ms: u64,
+    #[cfg(feature = "official")]
+    pub build_uploads_root: PathBuf,
+    #[cfg(feature = "official")]
+    pub build_upload_max_size_bytes: u64,
 }
 
 impl Config {
@@ -193,6 +215,57 @@ impl Config {
         let official_db_max_connections =
             parse_u32_env("OFFICIAL_DB_MAX_CONNECTIONS")?.unwrap_or(8);
 
+        #[cfg(feature = "official")]
+        let build_service_grpc_endpoint = read_env_string("BUILD_SERVICE_GRPC_ENDPOINT")
+            .unwrap_or_else(|| DEFAULT_BUILD_SERVICE_GRPC_ENDPOINT.to_string());
+        #[cfg(feature = "official")]
+        let build_service_submit_timeout_ms = parse_u64_env("BUILD_SERVICE_SUBMIT_TIMEOUT_MS")?
+            .unwrap_or(DEFAULT_BUILD_SERVICE_TIMEOUT_MS);
+        #[cfg(feature = "official")]
+        let build_service_get_timeout_ms = parse_u64_env("BUILD_SERVICE_GET_TIMEOUT_MS")?
+            .unwrap_or(DEFAULT_BUILD_SERVICE_TIMEOUT_MS);
+        #[cfg(feature = "official")]
+        let build_service_list_timeout_ms = parse_u64_env("BUILD_SERVICE_LIST_TIMEOUT_MS")?
+            .unwrap_or(DEFAULT_BUILD_SERVICE_TIMEOUT_MS);
+        #[cfg(feature = "official")]
+        let build_service_cancel_timeout_ms = parse_u64_env("BUILD_SERVICE_CANCEL_TIMEOUT_MS")?
+            .unwrap_or(DEFAULT_BUILD_SERVICE_TIMEOUT_MS);
+        #[cfg(feature = "official")]
+        let build_uploads_root = read_env_string("BUILD_UPLOADS_ROOT")
+            .and_then(|raw| {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(trimmed))
+                }
+            })
+            .unwrap_or_else(default_build_uploads_root);
+        #[cfg(feature = "official")]
+        let build_upload_max_size_bytes = parse_u64_env("BUILD_UPLOAD_MAX_SIZE_BYTES")?
+            .unwrap_or(DEFAULT_BUILD_UPLOAD_MAX_SIZE_BYTES);
+        #[cfg(feature = "official")]
+        for (name, value) in [
+            (
+                "BUILD_SERVICE_SUBMIT_TIMEOUT_MS",
+                build_service_submit_timeout_ms,
+            ),
+            ("BUILD_SERVICE_GET_TIMEOUT_MS", build_service_get_timeout_ms),
+            (
+                "BUILD_SERVICE_LIST_TIMEOUT_MS",
+                build_service_list_timeout_ms,
+            ),
+            (
+                "BUILD_SERVICE_CANCEL_TIMEOUT_MS",
+                build_service_cancel_timeout_ms,
+            ),
+            ("BUILD_UPLOAD_MAX_SIZE_BYTES", build_upload_max_size_bytes),
+        ] {
+            if value == 0 {
+                return Err(format!("{name} must be >= 1"));
+            }
+        }
+
         Ok(Self {
             env: app_env,
             listen_addr,
@@ -213,6 +286,20 @@ impl Config {
             official_database_url,
             #[cfg(feature = "official")]
             official_db_max_connections,
+            #[cfg(feature = "official")]
+            build_service_grpc_endpoint,
+            #[cfg(feature = "official")]
+            build_service_submit_timeout_ms,
+            #[cfg(feature = "official")]
+            build_service_get_timeout_ms,
+            #[cfg(feature = "official")]
+            build_service_list_timeout_ms,
+            #[cfg(feature = "official")]
+            build_service_cancel_timeout_ms,
+            #[cfg(feature = "official")]
+            build_uploads_root,
+            #[cfg(feature = "official")]
+            build_upload_max_size_bytes,
         })
     }
 }
@@ -223,6 +310,14 @@ fn default_local_sandbox_store_path() -> PathBuf {
         return dir.join(LOCAL_SANDBOX_STORE_RELATIVE_PATH);
     }
     PathBuf::from(LOCAL_SANDBOX_STORE_RELATIVE_PATH)
+}
+
+#[cfg(feature = "official")]
+fn default_build_uploads_root() -> PathBuf {
+    if let Some(dir) = exe_dir() {
+        return dir.join(DEFAULT_BUILD_UPLOADS_RELATIVE_PATH);
+    }
+    PathBuf::from(DEFAULT_BUILD_UPLOADS_RELATIVE_PATH)
 }
 
 fn exe_dir() -> Option<PathBuf> {
@@ -389,6 +484,17 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>, String> {
     match read_env_string(name) {
         Some(value) => value
             .parse::<u32>()
+            .map(Some)
+            .map_err(|e| format!("Invalid {name}: {e}")),
+        None => Ok(None),
+    }
+}
+
+#[cfg(feature = "official")]
+fn parse_u64_env(name: &str) -> Result<Option<u64>, String> {
+    match read_env_string(name) {
+        Some(value) => value
+            .parse::<u64>()
             .map(Some)
             .map_err(|e| format!("Invalid {name}: {e}")),
         None => Ok(None),
