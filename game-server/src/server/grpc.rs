@@ -145,7 +145,8 @@ pub async fn serve_grpc(
         race_runtime_store.clone(),
         frame_hub.clone(),
     );
-    let race_table_impl = RaceTableQueryServiceImpl::new(race_runtime_store, frame_hub.clone());
+    let race_table_impl =
+        RaceTableQueryServiceImpl::new(race_runtime_store.clone(), frame_hub.clone());
     #[cfg(feature = "official")]
     let achievement_stream_impl =
         AchievementStreamServiceImpl::new(engine.clone(), frame_hub, cfg.simulation_hz);
@@ -188,6 +189,7 @@ pub async fn serve_grpc(
                 sandbox_config_repo,
                 race_config_repo,
                 public_menu_engine,
+                race_runtime_store.clone(),
                 upcoming_races_invalidation,
                 sandbox_config_invalidation,
             ),
@@ -215,6 +217,7 @@ pub async fn serve_grpc(
         LocalSandboxAdminServiceImpl::new(
             store,
             local_sandbox_engine,
+            race_runtime_store.clone(),
             cfg.local_max_active_sandboxes,
             cfg.tracks_dir.clone(),
             local_weather_events,

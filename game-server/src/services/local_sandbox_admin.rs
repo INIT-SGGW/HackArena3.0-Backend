@@ -14,6 +14,7 @@ use crate::local::sandbox_config_store::{
 };
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
+use crate::services::race::RaceRuntimeStore;
 use crate::services::weather::{LocalWeatherEvent, LocalWeatherEventHub, LocalWeatherEventKind};
 use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminService;
 use proto::race::v1::{
@@ -44,6 +45,7 @@ use self::validation::{ensure_supported_spawn_mode, validate_map_id_track_exists
 pub struct LocalSandboxAdminServiceImpl {
     store: LocalSandboxConfigStore,
     engine: EngineClient,
+    runtime_store: Arc<RaceRuntimeStore>,
     max_active_sandboxes: u32,
     tracks_dir: PathBuf,
     started_at_utc: Arc<RwLock<HashMap<String, prost_types::Timestamp>>>,
@@ -54,6 +56,7 @@ impl LocalSandboxAdminServiceImpl {
     pub fn new(
         store: LocalSandboxConfigStore,
         engine: EngineClient,
+        runtime_store: Arc<RaceRuntimeStore>,
         max_active_sandboxes: u32,
         tracks_dir: PathBuf,
         weather_events: LocalWeatherEventHub,
@@ -61,6 +64,7 @@ impl LocalSandboxAdminServiceImpl {
         Self {
             store,
             engine,
+            runtime_store,
             max_active_sandboxes,
             tracks_dir,
             started_at_utc: Arc::new(RwLock::new(HashMap::new())),
@@ -499,6 +503,7 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
         let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
         let snapshot = self.store.get_snapshot().await;
         let started_at = self.started_at_utc.read().await.clone();
+        let active_car_counts = self.runtime_store.active_car_counts_by_sandbox();
 
         let mut active_sandboxes = Vec::with_capacity(runtime.active_sandboxes.len());
         for active in &runtime.active_sandboxes {
@@ -526,7 +531,10 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
                 weather: Some(local_weather_to_proto(record.config.weather)),
                 spawn_mode: local_spawn_mode_to_proto(record.config.spawn_mode) as i32,
                 started_at_utc: started_at.get(&record.sandbox_id).cloned(),
-                active_player_count: 0,
+                active_player_count: active_car_counts
+                    .get(&record.sandbox_id)
+                    .copied()
+                    .unwrap_or(0),
             });
         }
 

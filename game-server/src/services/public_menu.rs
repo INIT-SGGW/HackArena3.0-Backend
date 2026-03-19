@@ -18,6 +18,7 @@ use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 use crate::db::repos::sandbox_config::{SandboxConfigRecord, SandboxConfigRepo};
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
+use crate::services::race::RaceRuntimeStore;
 #[cfg(feature = "official")]
 use crate::services::sandbox_admin::mappers::{
     find_sandbox_by_id, public_sandbox_runtime_info_from_record,
@@ -127,6 +128,7 @@ pub struct PublicMenuServiceImpl {
     sandbox_repo: SandboxConfigRepo,
     race_repo: RaceConfigRepo,
     engine: EngineClient,
+    runtime_store: Arc<RaceRuntimeStore>,
     upcoming_invalidation: UpcomingRacesCacheInvalidation,
     sandbox_invalidation: SandboxConfigCacheInvalidation,
     upcoming_cache: Arc<RwLock<UpcomingRacesCacheState>>,
@@ -138,6 +140,7 @@ impl PublicMenuServiceImpl {
         sandbox_repo: SandboxConfigRepo,
         race_repo: RaceConfigRepo,
         engine: EngineClient,
+        runtime_store: Arc<RaceRuntimeStore>,
         upcoming_invalidation: UpcomingRacesCacheInvalidation,
         sandbox_invalidation: SandboxConfigCacheInvalidation,
     ) -> Self {
@@ -145,6 +148,7 @@ impl PublicMenuServiceImpl {
             sandbox_repo,
             race_repo,
             engine,
+            runtime_store,
             upcoming_invalidation,
             sandbox_invalidation,
             upcoming_cache: Arc::new(RwLock::new(UpcomingRacesCacheState::default())),
@@ -155,6 +159,7 @@ impl PublicMenuServiceImpl {
     async fn build_menu_state(&self) -> Result<PublicMenuState, Status> {
         let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
         let sandbox_configs = self.get_sandbox_configs().await?;
+        let active_car_counts = self.runtime_store.active_car_counts_by_sandbox();
         let runtime_state = PublicRuntimeState {
             server_time_utc: Some(utc_now_timestamp()),
             active_mode: match runtime.activity_kind {
@@ -171,7 +176,10 @@ impl PublicMenuServiceImpl {
                                             runtime_time_of_day_preset_to_proto(
                                                 active.time_of_day_preset,
                                             ),
-                                            0,
+                                            active_car_counts
+                                                .get(&active.sandbox_id)
+                                                .copied()
+                                                .unwrap_or(0),
                                         )
                                     },
                                 )

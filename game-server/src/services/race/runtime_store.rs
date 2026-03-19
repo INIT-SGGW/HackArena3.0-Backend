@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -84,6 +85,17 @@ impl RaceRuntimeStore {
         let mut car_ids: Vec<u64> = self.known_cars.iter().map(|entry| *entry.key()).collect();
         car_ids.sort_unstable();
         car_ids
+    }
+
+    pub fn active_car_counts_by_sandbox(&self) -> HashMap<String, u32> {
+        let mut counts = HashMap::new();
+        for entry in self.car_targets.iter() {
+            if let EngineCommandTarget::Sandbox { sandbox_id } = entry.value() {
+                let counter = counts.entry(sandbox_id.clone()).or_insert(0u32);
+                *counter = (*counter).saturating_add(1);
+            }
+        }
+        counts
     }
 
     pub fn remove_car(&self, car_id: u64) {
