@@ -5,6 +5,7 @@ use http::{HeaderName, HeaderValue};
 use tower_http::cors::{AllowOrigin, ExposeHeaders};
 
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
+const DEFAULT_HPS_ENDPOINT: &str = "http://127.0.0.1:50052";
 #[cfg(feature = "local")]
 const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
 #[cfg(feature = "local")]
@@ -46,7 +47,7 @@ pub struct Config {
     pub bolids_dir: PathBuf,
     pub simulation_hz: u32,
     pub debug_drawer_enabled: bool,
-    pub jwks_url: String,
+    pub hps_endpoint: String,
     pub jwt_audience: Vec<String>,
     pub jwt_issuers: Vec<String>,
     #[cfg(feature = "local")]
@@ -73,7 +74,8 @@ impl Config {
     fn load() -> Result<Self, String> {
         let app_env = AppEnv::from_env();
         tracing::debug!(app_env = ?app_env, "resolved APP_ENV");
-        let jwks_url = read_env_string("GAME_JWKS_URL").ok_or("GAME_JWKS_URL must be set")?;
+        let hps_endpoint =
+            read_env_string("HPS_ENDPOINT").unwrap_or_else(|| DEFAULT_HPS_ENDPOINT.to_string());
 
         #[cfg(feature = "official")]
         let audience_env = "GAME_JWT_OFFICIAL_AUDIENCE";
@@ -202,7 +204,7 @@ impl Config {
             bolids_dir,
             simulation_hz,
             debug_drawer_enabled,
-            jwks_url,
+            hps_endpoint,
             jwt_audience,
             jwt_issuers,
             #[cfg(feature = "local")]

@@ -139,7 +139,7 @@ pub async fn serve_grpc(
         engine.clone(),
         cfg.simulation_hz,
         cfg.env,
-        &cfg.jwks_url,
+        &cfg.hps_endpoint,
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
         race_runtime_store.clone(),

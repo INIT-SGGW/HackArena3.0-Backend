@@ -11,17 +11,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let race_v1_dir = proto_root.join("race").join("v1");
     let weather_v1_dir = proto_root.join("weather").join("v1");
     let achievement_v1_dir = proto_root.join("achievement").join("v1");
+    let auth_v1_dir = proto_root.join("auth").join("v1");
     ensure_proto_dir(&race_v1_dir, "race/v1")?;
     ensure_proto_dir(&weather_v1_dir, "weather/v1")?;
     ensure_proto_dir(&achievement_v1_dir, "achievement/v1")?;
+    ensure_proto_dir(&auth_v1_dir, "auth/v1")?;
 
     let mut protos = Vec::new();
     protos.extend(collect_proto_files_in_dir(&race_v1_dir)?);
     protos.extend(collect_proto_files_in_dir(&weather_v1_dir)?);
     protos.extend(collect_proto_files_in_dir(&achievement_v1_dir)?);
+    protos.extend(collect_proto_files_in_dir(&auth_v1_dir)?);
     if protos.is_empty() {
         return Err(
-            "No .proto files found in third_party/HackArean3.0-Proto/proto/{race,weather,achievement}/v1".into(),
+            "No .proto files found in third_party/HackArean3.0-Proto/proto/{race,weather,achievement,auth}/v1".into(),
         );
     }
     for proto_file in &protos {

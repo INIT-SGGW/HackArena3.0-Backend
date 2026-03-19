@@ -23,10 +23,14 @@ pub struct GameTokenValidator {
 }
 
 impl GameTokenValidator {
-    /// Create a new game-token validator with explicit audience and issuer configuration.
-    pub fn new_with_config(jwks_url: &str, audience: Vec<String>, issuers: Vec<String>) -> Self {
+    /// Create a new game-token validator with explicit endpoint, audience and issuer configuration.
+    pub fn new_with_config(
+        hps_endpoint: &str,
+        audience: Vec<String>,
+        issuers: Vec<String>,
+    ) -> Self {
         Self {
-            validator: JwksValidator::new(jwks_url, audience, issuers),
+            validator: JwksValidator::new(hps_endpoint, audience, issuers),
         }
     }
 

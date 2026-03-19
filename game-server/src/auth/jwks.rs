@@ -3,11 +3,13 @@
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-use reqwest::Client;
+use proto::auth::v1::game_token_jwks_service_client::GameTokenJwksServiceClient;
+use proto::auth::v1::{GetGameTokenJwksRequest, JwkEcCurve, JwkKeyType, JwtAlgorithm};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
+use tonic::transport::{Channel, Endpoint};
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,8 +36,8 @@ struct JwksCache {
 
 /// Shared validator for ES256 JWTs signed by keys from a JWKS endpoint.
 pub struct JwksValidator {
-    jwks_url: String,
-    client: Client,
+    hps_endpoint: String,
+    channel: Channel,
     cache: RwLock<JwksCache>,
     fetch_lock: Mutex<()>,
     audience: Vec<String>,
@@ -43,15 +45,17 @@ pub struct JwksValidator {
 }
 
 impl JwksValidator {
-    /// Create a new validator with explicit JWKS URL, audience and issuer constraints.
-    pub fn new(jwks_url: &str, audience: Vec<String>, issuers: Vec<String>) -> Self {
+    /// Create a new validator with explicit HPS endpoint, audience and issuer constraints.
+    pub fn new(hps_endpoint: &str, audience: Vec<String>, issuers: Vec<String>) -> Self {
+        let endpoint = Endpoint::from_shared(hps_endpoint.to_string())
+            .expect("GAME TOKEN JWKS gRPC endpoint must be a valid URI");
+        let channel = endpoint
+            .connect_timeout(JWKS_CONNECT_TIMEOUT)
+            .connect_lazy();
+
         Self {
-            jwks_url: jwks_url.to_string(),
-            client: Client::builder()
-                .timeout(JWKS_FETCH_TIMEOUT)
-                .connect_timeout(JWKS_CONNECT_TIMEOUT)
-                .build()
-                .expect("jwt jwks client must build"),
+            hps_endpoint: hps_endpoint.to_string(),
+            channel,
             cache: RwLock::new(JwksCache {
                 jwks: None,
                 fetched_at: None,
@@ -129,45 +133,103 @@ impl JwksValidator {
             }
         }
 
-        let jwks = self.fetch_jwks().await?;
-        let mut cache = self.cache.write().await;
-        cache.jwks = Some(jwks.clone());
-        cache.fetched_at = Some(Instant::now());
-        Ok(jwks)
+        match self.fetch_jwks().await {
+            Ok(jwks) => {
+                let mut cache = self.cache.write().await;
+                cache.jwks = Some(jwks.clone());
+                cache.fetched_at = Some(Instant::now());
+                Ok(jwks)
+            }
+            Err(err) => {
+                let cache = self.cache.read().await;
+                if let Some(jwks) = &cache.jwks {
+                    tracing::warn!(
+                        error = %err,
+                        endpoint = %self.hps_endpoint,
+                        "jwks refresh failed; using stale cached keys"
+                    );
+                    return Ok(jwks.clone());
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn fetch_jwks(&self) -> Result<Jwks, Status> {
-        let resp = self
-            .client
-            .get(&self.jwks_url)
-            .send()
-            .await
-            .map_err(map_jwks_fetch_error)?;
-        let status = resp.status();
-        if !status.is_success() {
-            if status.is_client_error() {
-                return Err(Status::failed_precondition(format!(
-                    "jwks endpoint rejected request ({status})"
-                )));
-            }
-            return Err(Status::unavailable(format!(
-                "jwks endpoint error ({status})"
-            )));
+        let mut client = GameTokenJwksServiceClient::new(self.channel.clone());
+        let response = tokio::time::timeout(
+            JWKS_FETCH_TIMEOUT,
+            client.get_game_token_jwks(GetGameTokenJwksRequest {}),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("jwks fetch timed out"))?
+        .map_err(map_jwks_fetch_error)?
+        .into_inner();
+
+        let mut keys = Vec::new();
+        for entry in response.keys {
+            let Some(mapped) = map_proto_jwk(entry) else {
+                continue;
+            };
+            keys.push(mapped);
         }
-        resp.json::<Jwks>()
-            .await
-            .map_err(|_| Status::internal("invalid jwks response"))
+
+        if keys.is_empty() {
+            return Err(Status::unavailable(
+                "jwks response did not contain usable keys",
+            ));
+        }
+
+        Ok(Jwks { keys })
     }
 }
 
-fn map_jwks_fetch_error(err: reqwest::Error) -> Status {
-    if err.is_timeout() {
+fn map_jwks_fetch_error(status: tonic::Status) -> Status {
+    if status.code() == tonic::Code::DeadlineExceeded {
         return Status::deadline_exceeded("jwks fetch timed out");
     }
-    if err.is_connect() {
-        return Status::unavailable("jwks connect failed");
+    if status.code() == tonic::Code::Unavailable {
+        return Status::unavailable("jwks fetch unavailable");
     }
-    Status::unavailable("jwks fetch failed")
+    Status::unavailable(format!("jwks fetch failed: {status}"))
+}
+
+fn map_proto_jwk(entry: proto::auth::v1::GameTokenJwk) -> Option<Jwk> {
+    let key_type = JwkKeyType::try_from(entry.kty).ok()?;
+    if key_type != JwkKeyType::Ec {
+        return None;
+    }
+
+    let curve = JwkEcCurve::try_from(entry.crv).ok()?;
+    if curve != JwkEcCurve::P256 {
+        return None;
+    }
+
+    let alg = JwtAlgorithm::try_from(entry.alg).ok()?;
+    if alg != JwtAlgorithm::Es256 {
+        return None;
+    }
+
+    let x = entry.x.trim();
+    let y = entry.y.trim();
+    if x.is_empty() || y.is_empty() {
+        return None;
+    }
+
+    let kid = entry.kid.trim();
+    let kid = if kid.is_empty() {
+        None
+    } else {
+        Some(kid.to_string())
+    };
+
+    Some(Jwk {
+        kty: "EC".to_string(),
+        kid,
+        crv: Some("P-256".to_string()),
+        x: Some(x.to_string()),
+        y: Some(y.to_string()),
+    })
 }
 
 fn jwk_to_key(jwk: &Jwk) -> Result<DecodingKey, Status> {

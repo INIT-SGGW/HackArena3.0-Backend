@@ -18,3 +18,9 @@ pub mod achievement {
         ));
     }
 }
+
+pub mod auth {
+    pub mod v1 {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/gen/auth.v1.rs"));
+    }
+}

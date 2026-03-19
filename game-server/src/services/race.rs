@@ -66,7 +66,7 @@ impl RaceServiceImpl {
         engine: EngineClient,
         simulation_hz: u32,
         app_env: AppEnv,
-        jwks_url: &str,
+        hps_endpoint: &str,
         jwt_audience: Vec<String>,
         jwt_issuers: Vec<String>,
         runtime_store: Arc<RaceRuntimeStore>,
@@ -86,7 +86,7 @@ impl RaceServiceImpl {
             car_engine_ids: runtime_store.car_engine_ids(),
             car_targets: runtime_store.car_targets(),
             token_validator: Arc::new(GameTokenValidator::new_with_config(
-                jwks_url,
+                hps_endpoint,
                 jwt_audience,
                 jwt_issuers,
             )),
