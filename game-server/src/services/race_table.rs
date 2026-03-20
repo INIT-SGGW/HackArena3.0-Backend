@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use boink::model::VehicleRaceMetrics;
+use boink::model::{PitstopZone, VehicleRaceMetrics};
 use proto::race::v1::race_table_query_service_server::RaceTableQueryService;
 use proto::race::v1::{
     GetRaceTableRequest, GetRaceTableResponse, LocalBotIdentity, OfficialRaceTableEntry,
@@ -213,6 +213,7 @@ impl RaceTableQueryServiceImpl {
                 metrics,
                 lap_length_m,
                 car.identity.clone(),
+                car.state.pitstop_state.has_zone(PitstopZone::Fix),
             ));
         }
         entries
@@ -325,12 +326,14 @@ impl RaceTableQueryServiceImpl {
 
         for (idx, row) in rows.iter_mut().enumerate() {
             row.position = (idx + 1) as u32;
-            row.in_pit = false;
             row.status = if idx < active_count {
                 RaceTableEntryStatus::Active as i32
             } else {
                 RaceTableEntryStatus::Dnf as i32
             };
+            if idx >= active_count {
+                row.in_pit = false;
+            }
         }
 
         rows
@@ -514,6 +517,7 @@ fn sample_to_official_entry(
     metrics: VehicleRaceMetrics,
     lap_length_m: f64,
     identity: Option<RuntimeCarIdentity>,
+    in_pit: bool,
 ) -> ActiveEntrySample {
     let lap_progress_m = metrics.lap_progress_m.max(0.0);
     let progress_total_m = metrics.completed_laps as f64 * lap_length_m + f64::from(lap_progress_m);
@@ -523,7 +527,7 @@ fn sample_to_official_entry(
         position: 0,
         gap_to_leader_ms: None,
         laps_behind: 0,
-        in_pit: false,
+        in_pit,
         status: RaceTableEntryStatus::Active as i32,
     };
 

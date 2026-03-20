@@ -11,8 +11,8 @@ use proto::race::v1::{
     CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, FrontendCarFullState,
     GearShift as ProtoGearShift, GhostModeBlocker as ProtoGhostModeBlocker,
     GhostModePhase as ProtoGhostModePhase, GhostModeState, ParticipantOpponentState,
-    ParticipantSelfState, Quaternion, SetControlsDevRequest, SetControlsRequest,
-    TrackData as ProtoTrackData, Vector3, WheelAngles, WheelSpeeds,
+    ParticipantSelfState, PitstopData as ProtoPitstopData, Quaternion, SetControlsDevRequest,
+    SetControlsRequest, TrackData as ProtoTrackData, Vector3, WheelSpeeds,
 };
 use tonic::Status;
 
@@ -75,13 +75,6 @@ fn wheel_speeds_from_state(state: &VehicleState) -> WheelSpeeds {
         front_right_radps: state.wheel_speeds[1],
         rear_left_radps: state.wheel_speeds[2],
         rear_right_radps: state.wheel_speeds[3],
-    }
-}
-
-fn wheel_angles_from_state(_state: &VehicleState) -> WheelAngles {
-    WheelAngles {
-        front_left_rad: 0.0,
-        front_right_rad: 0.0,
     }
 }
 
@@ -153,14 +146,17 @@ pub(crate) fn participant_telemetry_from_state(
         },
         throttle_applied: state.throttle_applied,
         brake_applied: state.brake_applied,
-        wheel_angles: Some(wheel_angles_from_state(state)),
         ghost_mode: Some(ghost_mode_state_from_runtime(&state.ghost_mode_runtime)),
+        pitstop_zone_flags: state.pitstop_state.zone_mask,
+        wheels_in_pitstop: state.pitstop_state.wheels_in_pitstop as u32,
     }
 }
 
 fn render_state_from_state(state: &VehicleState) -> CarRenderState {
     CarRenderState {
         wheel_speeds: Some(wheel_speeds_from_state(state)),
+        front_left_wheel_orientation_rad: 0.0,
+        front_right_wheel_orientation_rad: 0.0,
     }
 }
 
@@ -214,23 +210,47 @@ pub(crate) fn track_data_to_proto(track: EngineTrackData) -> ProtoTrackData {
     let centerline_samples = track
         .centerline_samples
         .into_iter()
-        .map(|sample| CenterlineSample {
-            s_m: sample.s_m,
-            position: Some(vec3_to_proto(sample.position)),
-            tangent: Some(vec3_to_proto(sample.tangent)),
-            normal: Some(vec3_to_proto(sample.normal)),
-            right: Some(vec3_to_proto(sample.right)),
-            left_width_m: sample.left_width_m,
-            right_width_m: sample.right_width_m,
-            curvature_1pm: sample.curvature_1pm,
-            grade_rad: sample.grade_rad,
-            bank_rad: sample.bank_rad,
-        })
+        .map(centerline_sample_to_proto)
         .collect();
+    let pitstop_data = track.pitstop_data;
+    let pitstop_data = Some(ProtoPitstopData {
+        enter_centerline_samples: pitstop_data
+            .enter_centerline_samples
+            .into_iter()
+            .map(centerline_sample_to_proto)
+            .collect(),
+        fix_centerline_samples: pitstop_data
+            .fix_centerline_samples
+            .into_iter()
+            .map(centerline_sample_to_proto)
+            .collect(),
+        exit_centerline_samples: pitstop_data
+            .exit_centerline_samples
+            .into_iter()
+            .map(centerline_sample_to_proto)
+            .collect(),
+        length_m: pitstop_data.length_m,
+    });
 
     ProtoTrackData {
         map_id: track.map_id,
         lap_length_m: track.lap_length_m,
         centerline_samples,
+        pitstop_data,
+    }
+}
+
+fn centerline_sample_to_proto(sample: boink::model::CenterlineSample) -> CenterlineSample {
+    CenterlineSample {
+        s_m: sample.s_m,
+        position: Some(vec3_to_proto(sample.position)),
+        tangent: Some(vec3_to_proto(sample.tangent)),
+        normal: Some(vec3_to_proto(sample.normal)),
+        right: Some(vec3_to_proto(sample.right)),
+        left_width_m: sample.left_width_m,
+        right_width_m: sample.right_width_m,
+        curvature_1pm: sample.curvature_1pm,
+        grade_rad: sample.grade_rad,
+        bank_rad: sample.bank_rad,
     }
 }
