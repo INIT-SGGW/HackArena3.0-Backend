@@ -9,10 +9,17 @@ use tonic::metadata::MetadataMap;
 use super::jwks::JwksValidator;
 
 #[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum ScopeClaim {
+    Single(String),
+    Many(Vec<String>),
+}
+
+#[derive(Clone, Deserialize)]
 struct GameTokenClaims {
     sub: String,
-    scope: Option<String>,
-    scp: Option<Vec<String>>,
+    scope: Option<ScopeClaim>,
+    scp: Option<ScopeClaim>,
     instance_uuid: Option<String>,
     team_id: Option<String>,
 }
@@ -25,12 +32,12 @@ pub struct GameTokenValidator {
 impl GameTokenValidator {
     /// Create a new game-token validator with explicit endpoint, audience and issuer configuration.
     pub fn new_with_config(
-        hps_endpoint: &str,
+        game_token_jwks_endpoint: &str,
         audience: Vec<String>,
         issuers: Vec<String>,
     ) -> Self {
         Self {
-            validator: JwksValidator::new(hps_endpoint, audience, issuers),
+            validator: JwksValidator::new(game_token_jwks_endpoint, audience, issuers),
         }
     }
 
@@ -65,21 +72,32 @@ impl GameTokenValidator {
 
 fn extract_scopes(claims: &GameTokenClaims) -> Vec<String> {
     let mut scopes = HashSet::new();
-    if let Some(scope) = &claims.scope {
-        for entry in scope.split_whitespace() {
-            if !entry.is_empty() {
-                scopes.insert(entry.to_string());
-            }
-        }
-    }
-    if let Some(list) = &claims.scp {
-        for entry in list {
-            if !entry.is_empty() {
-                scopes.insert(entry.clone());
-            }
-        }
-    }
+    collect_scope_claim(&mut scopes, claims.scope.as_ref());
+    collect_scope_claim(&mut scopes, claims.scp.as_ref());
     scopes.into_iter().collect()
+}
+
+fn collect_scope_claim(scopes: &mut HashSet<String>, claim: Option<&ScopeClaim>) {
+    let Some(claim) = claim else {
+        return;
+    };
+
+    match claim {
+        ScopeClaim::Single(value) => {
+            for entry in value.split_whitespace() {
+                if !entry.is_empty() {
+                    scopes.insert(entry.to_string());
+                }
+            }
+        }
+        ScopeClaim::Many(values) => {
+            for entry in values {
+                if !entry.is_empty() {
+                    scopes.insert(entry.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Parse the `x-ha3-game-token` metadata entry and return a token if present.

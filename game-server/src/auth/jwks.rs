@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use http::Uri;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use proto::auth::v1::game_token_jwks_service_client::GameTokenJwksServiceClient;
 use proto::auth::v1::{GetGameTokenJwksRequest, JwkEcCurve, JwkKeyType, JwtAlgorithm};
@@ -10,6 +11,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tracing::{debug, info, warn};
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -36,8 +38,9 @@ struct JwksCache {
 
 /// Shared validator for ES256 JWTs signed by keys from a JWKS endpoint.
 pub struct JwksValidator {
-    hps_endpoint: String,
+    jwks_endpoint: String,
     channel: Channel,
+    origin: Uri,
     cache: RwLock<JwksCache>,
     fetch_lock: Mutex<()>,
     audience: Vec<String>,
@@ -45,11 +48,14 @@ pub struct JwksValidator {
 }
 
 impl JwksValidator {
-    /// Create a new validator with explicit HPS endpoint, audience and issuer constraints.
-    pub fn new(hps_endpoint: &str, audience: Vec<String>, issuers: Vec<String>) -> Self {
-        let endpoint = Endpoint::from_shared(hps_endpoint.to_string())
+    /// Create a new validator with explicit JWKS gRPC endpoint, audience and issuer constraints.
+    pub fn new(jwks_endpoint: &str, audience: Vec<String>, issuers: Vec<String>) -> Self {
+        let origin: Uri = jwks_endpoint
+            .parse()
+            .expect("GAME TOKEN JWKS endpoint must be a valid URI");
+        let endpoint = Endpoint::from_shared(jwks_endpoint.to_string())
             .expect("GAME TOKEN JWKS gRPC endpoint must be a valid URI");
-        let endpoint = if hps_endpoint.starts_with("https://") {
+        let endpoint = if jwks_endpoint.starts_with("https://") {
             endpoint
                 .tls_config(ClientTlsConfig::new().with_enabled_roots())
                 .expect("GAME TOKEN JWKS endpoint TLS config failed")
@@ -61,8 +67,9 @@ impl JwksValidator {
             .connect_lazy();
 
         Self {
-            hps_endpoint: hps_endpoint.to_string(),
+            jwks_endpoint: jwks_endpoint.to_string(),
             channel,
+            origin,
             cache: RwLock::new(JwksCache {
                 jwks: None,
                 fetched_at: None,
@@ -81,9 +88,18 @@ impl JwksValidator {
         let header = decode_header(token).map_err(|_| Status::unauthenticated("invalid jwt"))?;
         let alg = header.alg;
         if alg != Algorithm::ES256 {
+            warn!(jwt_alg = ?alg, "game-token rejected due to unsupported jwt algorithm");
             return Err(Status::unauthenticated("unsupported jwt algorithm"));
         }
         let jwks = self.jwks().await?;
+        debug!(
+            jwks_keys = jwks.keys.len(),
+            token_kid = ?header.kid,
+            jwt_alg = ?alg,
+            audiences = ?self.audience,
+            issuers = ?self.issuers,
+            "validating game-token against cached jwks"
+        );
         let mut candidates: Vec<&Jwk> = if let Some(kid) = header.kid.as_deref() {
             jwks.keys
                 .iter()
@@ -99,10 +115,19 @@ impl JwksValidator {
             return Err(Status::unauthenticated("no jwk keys available"));
         }
 
+        let mut last_decode_error: Option<String> = None;
         for jwk in candidates {
             let key = match jwk_to_key(jwk) {
                 Ok(key) => key,
-                Err(_) => continue,
+                Err(err) => {
+                    debug!(
+                        token_kid = ?header.kid,
+                        jwk_kid = ?jwk.kid,
+                        error = %err,
+                        "skipping unusable jwk while validating game-token"
+                    );
+                    continue;
+                }
             };
             let mut validation = Validation::new(alg);
             let audience: Vec<&str> = self.audience.iter().map(String::as_str).collect();
@@ -113,10 +138,26 @@ impl JwksValidator {
             validation.required_spec_claims.insert("exp".to_string());
             match decode::<T>(token, &key, &validation) {
                 Ok(data) => return Ok(data.claims),
-                Err(err) => tracing::debug!("jwt decode error: {err}"),
+                Err(err) => {
+                    last_decode_error = Some(err.to_string());
+                    debug!(
+                        token_kid = ?header.kid,
+                        jwk_kid = ?jwk.kid,
+                        error = %err,
+                        "jwt decode failed for jwk candidate"
+                    );
+                }
             }
         }
 
+        warn!(
+            token_kid = ?header.kid,
+            jwt_alg = ?alg,
+            audiences = ?self.audience,
+            issuers = ?self.issuers,
+            last_decode_error = ?last_decode_error,
+            "game-token validation failed for all jwk candidates"
+        );
         Err(Status::unauthenticated("invalid jwt"))
     }
 
@@ -152,7 +193,7 @@ impl JwksValidator {
                 if let Some(jwks) = &cache.jwks {
                     tracing::warn!(
                         error = %err,
-                        endpoint = %self.hps_endpoint,
+                        endpoint = %self.jwks_endpoint,
                         "jwks refresh failed; using stale cached keys"
                     );
                     return Ok(jwks.clone());
@@ -163,7 +204,8 @@ impl JwksValidator {
     }
 
     async fn fetch_jwks(&self) -> Result<Jwks, Status> {
-        let mut client = GameTokenJwksServiceClient::new(self.channel.clone());
+        let mut client =
+            GameTokenJwksServiceClient::with_origin(self.channel.clone(), self.origin.clone());
         let response = tokio::time::timeout(
             JWKS_FETCH_TIMEOUT,
             client.get_game_token_jwks(GetGameTokenJwksRequest {}),
@@ -187,6 +229,11 @@ impl JwksValidator {
             ));
         }
 
+        info!(
+            endpoint = %self.jwks_endpoint,
+            keys = keys.len(),
+            "refreshed game-token jwks cache"
+        );
         Ok(Jwks { keys })
     }
 }
