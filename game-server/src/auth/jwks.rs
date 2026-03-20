@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex, RwLock};
 use tonic::Status;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -49,6 +49,13 @@ impl JwksValidator {
     pub fn new(hps_endpoint: &str, audience: Vec<String>, issuers: Vec<String>) -> Self {
         let endpoint = Endpoint::from_shared(hps_endpoint.to_string())
             .expect("GAME TOKEN JWKS gRPC endpoint must be a valid URI");
+        let endpoint = if hps_endpoint.starts_with("https://") {
+            endpoint
+                .tls_config(ClientTlsConfig::new().with_enabled_roots())
+                .expect("GAME TOKEN JWKS endpoint TLS config failed")
+        } else {
+            endpoint
+        };
         let channel = endpoint
             .connect_timeout(JWKS_CONNECT_TIMEOUT)
             .connect_lazy();
