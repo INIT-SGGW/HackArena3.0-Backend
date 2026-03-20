@@ -11,11 +11,11 @@ use tracing::trace;
 use crate::native::error::NativeLoadError;
 use crate::native::loader::{
     LegacyDisableGhostModeFn, LegacyGetBestLapFn, LegacyGetNumberOfStartPosFn,
-    LegacyGetTrackDataFn, LegacyGetVehiclePersonalBestLapFn, LegacyReadVehicleGhostModeStateFn,
-    LegacyReadVehicleRaceMetricsFn, LegacySetGhostModeSettingsFn, LegacySetVehicleAtStartPosFn,
-    LegacySetVehicleBeforeFinishLineFn, LegacySetVehicleBeforePointFn,
-    LegacySetVehicleOrientationFn, LegacySetVehicleRandomPosFn, LegacySetWeatherFn, LegacyStringFn,
-    LegacyVersionFn, load_native_library, resolve_optional,
+    LegacyGetTrackDataFn, LegacyGetVehiclePersonalBestLapFn, LegacyGetVehiclePitstopZoneFn,
+    LegacyReadVehicleGhostModeStateFn, LegacyReadVehicleRaceMetricsFn,
+    LegacySetGhostModeSettingsFn, LegacySetVehicleAtStartPosFn, LegacySetVehicleBeforeFinishLineFn,
+    LegacySetVehicleBeforePointFn, LegacySetVehicleOrientationFn, LegacySetVehicleRandomPosFn,
+    LegacySetWeatherFn, LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
 };
 
 /// Lazily resolved optional symbols exposed by a potentially old native library.
@@ -36,6 +36,7 @@ pub struct NativeApi {
     get_number_of_start_pos: Option<LegacyGetNumberOfStartPosFn>,
     read_vehicle_ghost_mode_state: Option<LegacyReadVehicleGhostModeStateFn>,
     read_vehicle_race_metrics: Option<LegacyReadVehicleRaceMetricsFn>,
+    get_vehicle_pitstop_zone: Option<LegacyGetVehiclePitstopZoneFn>,
     get_vehicle_personal_best_lap: Option<LegacyGetVehiclePersonalBestLapFn>,
     get_best_lap: Option<LegacyGetBestLapFn>,
 }
@@ -148,6 +149,12 @@ impl NativeApi {
         self.read_vehicle_race_metrics
     }
 
+    /// Returns the function pointer for `boink_get_vehicle_pitstop_zone`, when exported.
+    #[must_use]
+    pub fn boink_get_vehicle_pitstop_zone(&self) -> Option<LegacyGetVehiclePitstopZoneFn> {
+        self.get_vehicle_pitstop_zone
+    }
+
     /// Returns the function pointer for `boink_get_vehicle_personal_best_lap`, when exported.
     #[must_use]
     pub fn boink_get_vehicle_personal_best_lap(&self) -> Option<LegacyGetVehiclePersonalBestLapFn> {
@@ -181,12 +188,13 @@ impl NativeApi {
         let read_vehicle_ghost_mode_state =
             resolve_optional(lib, b"boink_read_vehicle_ghost_mode_state\0");
         let read_vehicle_race_metrics = resolve_optional(lib, b"boink_read_vehicle_race_metrics\0");
+        let get_vehicle_pitstop_zone = resolve_optional(lib, b"boink_get_vehicle_pitstop_zone\0");
         let get_vehicle_personal_best_lap =
             resolve_optional(lib, b"boink_get_vehicle_personal_best_lap\0");
         let get_best_lap = resolve_optional(lib, b"boink_get_best_lap\0");
 
         trace!(
-            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}, set_vehicle_orientation={}, set_vehicle_before_point={}, set_vehicle_before_finish_line={}, set_vehicle_random_pos={}, set_vehicle_at_start_pos={}, get_number_of_start_pos={}, read_vehicle_ghost_mode_state={}, read_vehicle_race_metrics={}, get_vehicle_personal_best_lap={}, get_best_lap={}",
+            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}, set_vehicle_orientation={}, set_vehicle_before_point={}, set_vehicle_before_finish_line={}, set_vehicle_random_pos={}, set_vehicle_at_start_pos={}, get_number_of_start_pos={}, read_vehicle_ghost_mode_state={}, read_vehicle_race_metrics={}, get_vehicle_pitstop_zone={}, get_vehicle_personal_best_lap={}, get_best_lap={}",
             get_c_api_version.is_some(),
             get_engine_version.is_some(),
             get_engine_profile.is_some(),
@@ -203,6 +211,7 @@ impl NativeApi {
             get_number_of_start_pos.is_some(),
             read_vehicle_ghost_mode_state.is_some(),
             read_vehicle_race_metrics.is_some(),
+            get_vehicle_pitstop_zone.is_some(),
             get_vehicle_personal_best_lap.is_some(),
             get_best_lap.is_some()
         );
@@ -224,6 +233,7 @@ impl NativeApi {
             get_number_of_start_pos,
             read_vehicle_ghost_mode_state,
             read_vehicle_race_metrics,
+            get_vehicle_pitstop_zone,
             get_vehicle_personal_best_lap,
             get_best_lap,
         })

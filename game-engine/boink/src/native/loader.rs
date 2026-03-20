@@ -54,6 +54,13 @@ pub type LegacyReadVehicleRaceMetricsFn = unsafe extern "C" fn(
     u64,
     *mut boink_sys::BoinkVehicleRaceMetrics,
 ) -> i32;
+/// Legacy counterpart of per-vehicle pitstop-zone query.
+pub type LegacyGetVehiclePitstopZoneFn = unsafe extern "C" fn(
+    boink_sys::BoinkHandle,
+    u64,
+    *mut boink_sys::BoinkPitstopZone,
+    *mut i32,
+) -> i32;
 /// Legacy counterpart of per-vehicle personal-best-lap query.
 pub type LegacyGetVehiclePersonalBestLapFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, u64, *mut u32, *mut u32) -> i32;

@@ -62,6 +62,21 @@ pub struct TrackData {
     pub lap_length_m: f64,
     /// Ordered centerline samples for one lap.
     pub centerline_samples: Vec<CenterlineSample>,
+    /// Static pitstop geometry for one lap.
+    pub pitstop_data: PitstopData,
+}
+
+/// Static pitstop geometry for one lap.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PitstopData {
+    /// Ordered centerline samples for pit entry zone.
+    pub enter_centerline_samples: Vec<CenterlineSample>,
+    /// Ordered centerline samples for pit repair zone.
+    pub fix_centerline_samples: Vec<CenterlineSample>,
+    /// Ordered centerline samples for pit exit zone.
+    pub exit_centerline_samples: Vec<CenterlineSample>,
+    /// Pitstop length along centerline in meters.
+    pub length_m: f32,
 }
 
 impl TrackData {
@@ -69,13 +84,6 @@ impl TrackData {
         if raw.map_id.is_null() {
             return Err(Error::Internal(
                 "boink_get_track_data returned null map_id".to_string(),
-            ));
-        }
-
-        let count = raw.centerline_sample_count as usize;
-        if count > 0 && raw.centerline_samples.is_null() {
-            return Err(Error::Internal(
-                "boink_get_track_data returned null centerline_samples".to_string(),
             ));
         }
 
@@ -93,15 +101,39 @@ impl TrackData {
             }
         };
 
-        let centerline_samples = if count == 0 {
-            Vec::new()
-        } else {
-            let raw_samples = unsafe { slice::from_raw_parts(raw.centerline_samples, count) };
-            raw_samples
-                .iter()
-                .copied()
-                .map(CenterlineSample::from)
-                .collect()
+        let centerline_samples = unsafe {
+            collect_centerline_samples(
+                raw.centerline_samples,
+                raw.centerline_sample_count,
+                "centerline_samples",
+            )?
+        };
+        let pitstop_data = {
+            let raw_pitstop = raw.pitstop_data;
+            PitstopData {
+                enter_centerline_samples: unsafe {
+                    collect_centerline_samples(
+                        raw_pitstop.enter_centerline_samples,
+                        raw_pitstop.enter_centerline_sample_count,
+                        "pitstop_data.enter_centerline_samples",
+                    )?
+                },
+                fix_centerline_samples: unsafe {
+                    collect_centerline_samples(
+                        raw_pitstop.fix_centerline_samples,
+                        raw_pitstop.fix_centerline_sample_count,
+                        "pitstop_data.fix_centerline_samples",
+                    )?
+                },
+                exit_centerline_samples: unsafe {
+                    collect_centerline_samples(
+                        raw_pitstop.exit_centerline_samples,
+                        raw_pitstop.exit_centerline_sample_count,
+                        "pitstop_data.exit_centerline_samples",
+                    )?
+                },
+                length_m: raw_pitstop.length_m,
+            }
         };
 
         Ok(Self {
@@ -109,6 +141,30 @@ impl TrackData {
             version: raw.version,
             lap_length_m: raw.lap_length_m,
             centerline_samples,
+            pitstop_data,
         })
     }
+}
+
+unsafe fn collect_centerline_samples(
+    ptr: *const sys::BoinkCenterlineSample,
+    count: u32,
+    field_name: &'static str,
+) -> Result<Vec<CenterlineSample>> {
+    let count = count as usize;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if ptr.is_null() {
+        return Err(Error::Internal(format!(
+            "boink_get_track_data returned null {field_name}"
+        )));
+    }
+
+    let raw_samples = unsafe { slice::from_raw_parts(ptr, count) };
+    Ok(raw_samples
+        .iter()
+        .copied()
+        .map(CenterlineSample::from)
+        .collect())
 }

@@ -90,6 +90,61 @@ impl TryFrom<sys::BoinkVehicleState> for VehicleState {
     }
 }
 
+/// High-level pitstop zone marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PitstopZone {
+    /// Vehicle is not in any pitstop zone.
+    None = 0,
+    /// Vehicle is in the pit entry zone.
+    Enter = 1 << 0,
+    /// Vehicle is in the pit repair zone.
+    Fix = 1 << 1,
+    /// Vehicle is in the pit exit zone.
+    Exit = 1 << 2,
+}
+
+/// Bitmask of currently active pitstop zones.
+pub type PitstopZoneMask = u32;
+
+/// Runtime pitstop-zone state for a single vehicle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct VehiclePitstopState {
+    /// Bitmask of active pitstop zones.
+    pub zone_mask: PitstopZoneMask,
+    /// Number of wheels currently inside pitstop zones.
+    pub wheels_in_pitstop: u8,
+}
+
+impl VehiclePitstopState {
+    /// Returns true if the given pitstop zone bit is active.
+    #[must_use]
+    pub fn has_zone(self, zone: PitstopZone) -> bool {
+        (self.zone_mask & (zone as PitstopZoneMask)) != 0
+    }
+
+    /// Returns true when at least one pitstop-zone bit is active.
+    #[must_use]
+    pub fn is_in_any_zone(self) -> bool {
+        self.zone_mask != 0
+    }
+
+    pub(crate) fn try_from_ffi(zone_mask: u32, wheels_num: i32) -> Result<Self> {
+        let wheels_in_pitstop = u8::try_from(wheels_num)
+            .map_err(|_| Error::Internal(format!("invalid pitstop wheels count: {wheels_num}")))?;
+        if wheels_in_pitstop > 4 {
+            return Err(Error::Internal(format!(
+                "invalid pitstop wheels count out of range 0..=4: {wheels_num}"
+            )));
+        }
+
+        Ok(Self {
+            zone_mask,
+            wheels_in_pitstop,
+        })
+    }
+}
+
 /// Race-progress metrics of a vehicle at a single simulation instant.
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct VehicleRaceMetrics {

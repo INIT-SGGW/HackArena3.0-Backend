@@ -15,7 +15,8 @@ use crate::error::{Error, Result};
 use crate::model::math::Vec3;
 use crate::model::{
     AcceptedControls, Controls, GhostModeRuntimeState, GhostModeSettings, Quaternion, RaceBestLap,
-    TrackData, VehicleBestLap, VehicleRaceMetrics, VehicleState, WeatherParams,
+    TrackData, VehicleBestLap, VehiclePitstopState, VehicleRaceMetrics, VehicleState,
+    WeatherParams,
 };
 #[cfg(feature = "legacy-native-lib")]
 use crate::native::api::NativeApi;
@@ -960,6 +961,70 @@ impl Engine {
                 Err(Error::from_ffi_status(
                     code,
                     "boink_read_vehicle_race_metrics",
+                ))
+            }
+        }
+    }
+
+    /// Reads runtime pitstop-zone state for the specified vehicle.
+    #[instrument(skip(self))]
+    pub fn read_vehicle_pitstop_state(&self, vehicle_id: u64) -> Result<VehiclePitstopState> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(get_vehicle_pitstop_zone) = api.boink_get_vehicle_pitstop_zone() else {
+                static WARNED_MISSING_GET_VEHICLE_PITSTOP_ZONE: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_GET_VEHICLE_PITSTOP_ZONE.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_get_vehicle_pitstop_zone symbol not found in native library; returning default pitstop state"
+                    );
+                }
+                return Ok(VehiclePitstopState::default());
+            };
+
+            let mut raw_zone: std::os::raw::c_int = 0;
+            let mut wheels_num: i32 = 0;
+            tracing::debug!(
+                vehicle_id,
+                "boink_get_vehicle_pitstop_zone (legacy dynamic symbol)"
+            );
+            let code = unsafe {
+                get_vehicle_pitstop_zone(
+                    self.handle,
+                    vehicle_id,
+                    (&mut raw_zone as *mut std::os::raw::c_int).cast::<sys::BoinkPitstopZone>(),
+                    &mut wheels_num as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                return VehiclePitstopState::try_from_ffi(raw_zone as u32, wheels_num);
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_get_vehicle_pitstop_zone",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            let mut raw_zone: std::os::raw::c_int = 0;
+            let mut wheels_num: i32 = 0;
+            tracing::debug!(vehicle_id, "boink_get_vehicle_pitstop_zone");
+            let code = unsafe {
+                sys::boink_get_vehicle_pitstop_zone(
+                    self.handle,
+                    vehicle_id,
+                    (&mut raw_zone as *mut std::os::raw::c_int).cast::<sys::BoinkPitstopZone>(),
+                    &mut wheels_num as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                VehiclePitstopState::try_from_ffi(raw_zone as u32, wheels_num)
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_get_vehicle_pitstop_zone",
                 ))
             }
         }
