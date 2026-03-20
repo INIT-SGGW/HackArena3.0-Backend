@@ -6,7 +6,6 @@ use tower_http::cors::{AllowOrigin, ExposeHeaders};
 
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
 const DEFAULT_HPS_ENDPOINT: &str = "http://127.0.0.1:50052";
-#[cfg(feature = "local")]
 const DEFAULT_API_URL: &str = "https://ha3-api.hackarena.pl";
 #[cfg(feature = "local")]
 const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
@@ -50,9 +49,9 @@ pub struct Config {
     pub simulation_hz: u32,
     pub debug_drawer_enabled: bool,
     pub hps_endpoint: String,
+    pub game_token_jwks_endpoint: String,
     pub jwt_audience: Vec<String>,
     pub jwt_issuers: Vec<String>,
-    #[cfg(feature = "local")]
     pub api_url: String,
     #[cfg(feature = "local")]
     pub broker_endpoint: String,
@@ -188,8 +187,8 @@ impl Config {
             tracing::info!("debug drawer enabled");
         }
 
-        #[cfg(feature = "local")]
         let api_url = read_env_string("API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        let game_token_jwks_endpoint = to_game_token_jwks_endpoint(&api_url)?;
         #[cfg(feature = "local")]
         let broker_endpoint = to_broker_endpoint(&api_url)?;
 
@@ -216,9 +215,9 @@ impl Config {
             simulation_hz,
             debug_drawer_enabled,
             hps_endpoint,
+            game_token_jwks_endpoint,
             jwt_audience,
             jwt_issuers,
-            #[cfg(feature = "local")]
             api_url,
             #[cfg(feature = "local")]
             broker_endpoint,
@@ -244,6 +243,16 @@ fn default_local_sandbox_store_path() -> PathBuf {
 
 #[cfg(feature = "local")]
 fn to_broker_endpoint(api_url: &str) -> Result<String, String> {
+    let trimmed = validate_api_url(api_url)?;
+    Ok(format!("{trimmed}/broker"))
+}
+
+fn to_game_token_jwks_endpoint(api_url: &str) -> Result<String, String> {
+    let trimmed = validate_api_url(api_url)?;
+    Ok(format!("{trimmed}/gametoken"))
+}
+
+fn validate_api_url(api_url: &str) -> Result<&str, String> {
     let trimmed = api_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("API_URL cannot be empty".into());
@@ -253,7 +262,7 @@ fn to_broker_endpoint(api_url: &str) -> Result<String, String> {
         return Err("API_URL must start with http:// or https://".into());
     }
 
-    Ok(format!("{trimmed}/broker"))
+    Ok(trimmed)
 }
 
 fn exe_dir() -> Option<PathBuf> {
