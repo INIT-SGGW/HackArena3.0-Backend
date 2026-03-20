@@ -66,8 +66,12 @@ pub struct VehicleState {
     pub wheel_position: [Vec3; 4],
     /// Wheel angular speeds in RPM: [FL, FR, RL, RR].
     pub wheel_speeds: [f32; 4],
+    /// Front wheel orientations as quaternions: [FL, FR].
+    pub front_wheel_orientation: [Quaternion; 2],
     /// Runtime ghost mode state for this vehicle.
     pub ghost_mode_runtime: GhostModeRuntimeState,
+    /// Runtime pitstop-zone state for this vehicle.
+    pub pitstop_state: VehiclePitstopState,
 }
 
 impl TryFrom<sys::BoinkVehicleState> for VehicleState {
@@ -85,7 +89,9 @@ impl TryFrom<sys::BoinkVehicleState> for VehicleState {
             brake_applied: raw.brake_applied,
             wheel_position: raw.wheel_position.map(Into::into),
             wheel_speeds: raw.wheel_speeds,
+            front_wheel_orientation: raw.front_wheel_orientation.map(Into::into),
             ghost_mode_runtime: GhostModeRuntimeState::default(),
+            pitstop_state: VehiclePitstopState::default(),
         })
     }
 }

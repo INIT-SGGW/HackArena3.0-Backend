@@ -908,6 +908,7 @@ impl Engine {
         if code == sys::BOINK_OK {
             let mut state = VehicleState::try_from(raw)?;
             state.ghost_mode_runtime = self.read_vehicle_ghost_mode_runtime_state(vehicle_id);
+            state.pitstop_state = self.read_vehicle_pitstop_state_with_fallback(vehicle_id);
             Ok(state)
         } else {
             tracing::debug!(code = code, "boink_read_vehicle_state failed");
@@ -1238,6 +1239,20 @@ impl Engine {
                     "boink_read_vehicle_ghost_mode_state failed; falling back to inactive ghost mode state"
                 );
                 GhostModeRuntimeState::default()
+            }
+        }
+    }
+
+    fn read_vehicle_pitstop_state_with_fallback(&self, vehicle_id: u64) -> VehiclePitstopState {
+        match self.read_vehicle_pitstop_state(vehicle_id) {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::warn!(
+                    vehicle_id,
+                    error = %err,
+                    "boink_get_vehicle_pitstop_zone failed; falling back to default pitstop state"
+                );
+                VehiclePitstopState::default()
             }
         }
     }
