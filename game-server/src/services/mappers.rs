@@ -155,8 +155,8 @@ pub(crate) fn participant_telemetry_from_state(
 fn render_state_from_state(state: &VehicleState) -> CarRenderState {
     CarRenderState {
         wheel_speeds: Some(wheel_speeds_from_state(state)),
-        front_left_wheel_orientation_rad: 0.0,
-        front_right_wheel_orientation_rad: 0.0,
+        front_left_wheel_orientation_rad: state.front_wheel_orientation_rad[0],
+        front_right_wheel_orientation_rad: state.front_wheel_orientation_rad[1],
     }
 }
 
