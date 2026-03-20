@@ -65,6 +65,23 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
     )
     .await?;
 
+    #[cfg(feature = "local")]
+    let (broker_registration_state, broker_task): (
+        crate::local::broker::BrokerRegistrationState,
+        Option<JoinHandle<()>>,
+    ) = {
+        let (state, handle) = crate::local::broker::start_registration_manager(
+            cfg.clone(),
+            grpc_shutdown_tx.subscribe(),
+        )
+        .await
+        .map_err(|err| -> Box<dyn Error> {
+            let _ = engine_shutdown_tx.send(());
+            Box::new(std::io::Error::other(err.to_string()))
+        })?;
+        (state, Some(handle))
+    };
+
     // Run gRPC server until shutdown.
     let active_connections = Arc::new(AtomicUsize::new(0));
     let shutdown_tx_grpc = grpc_shutdown_tx.clone();
@@ -80,6 +97,8 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
                 db_pool.clone(),
                 grpc_shutdown_rx,
                 active_connections,
+                #[cfg(feature = "local")]
+                broker_registration_state.clone(),
             )
             .await
             {
@@ -96,6 +115,11 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
         active_connections,
     )
     .await;
+
+    #[cfg(feature = "local")]
+    if let Some(task) = broker_task {
+        let _ = task.await;
+    }
 
     Ok(())
 }

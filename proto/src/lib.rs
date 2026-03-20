@@ -24,3 +24,23 @@ pub mod auth {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/gen/auth.v1.rs"));
     }
 }
+
+pub mod hackarena {
+    pub mod broker {
+        pub mod v1 {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/gen/hackarena.broker.v1.rs"
+            ));
+        }
+    }
+
+    pub mod connect {
+        pub mod v1 {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/gen/hackarena.connect.v1.rs"
+            ));
+        }
+    }
+}

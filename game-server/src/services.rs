@@ -3,6 +3,8 @@
 #[cfg(feature = "official")]
 pub mod achievement_stream;
 pub mod asset;
+#[cfg(feature = "local")]
+pub mod connect;
 mod error_map;
 #[cfg(feature = "local")]
 pub mod local_sandbox_admin;

@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "official")]
 use proto::achievement::v1::achievement_stream_service_server::AchievementStreamServiceServer;
+#[cfg(feature = "local")]
+use proto::hackarena::connect::v1::connect_service_server::ConnectServiceServer;
 use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "local")]
 use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminServiceServer;
@@ -43,11 +45,15 @@ use crate::db::repos::sandbox_config::SandboxConfigRepo;
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
 #[cfg(feature = "local")]
+use crate::local::broker::BrokerRegistrationState;
+#[cfg(feature = "local")]
 use crate::local::sandbox_config_store::LocalSandboxConfigStore;
 use crate::runtime::engine_worker::EngineClient;
 #[cfg(feature = "official")]
 use crate::services::achievement_stream::AchievementStreamServiceImpl;
 use crate::services::asset::AssetServiceImpl;
+#[cfg(feature = "local")]
+use crate::services::connect::ConnectServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
 #[cfg(feature = "official")]
@@ -77,6 +83,7 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")] official_db_pool: sqlx::PgPool,
     mut shutdown_rx: broadcast::Receiver<()>,
     active_connections: Arc<AtomicUsize>,
+    #[cfg(feature = "local")] broker_registration_state: BrokerRegistrationState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (health_reporter, health_service) = health_reporter();
 
@@ -102,6 +109,10 @@ pub async fn serve_grpc(
     #[cfg(feature = "local")]
     health_reporter
         .set_serving::<LocalSandboxAdminServiceServer<LocalSandboxAdminServiceImpl>>()
+        .await;
+    #[cfg(feature = "local")]
+    health_reporter
+        .set_serving::<ConnectServiceServer<ConnectServiceImpl>>()
         .await;
     #[cfg(feature = "official")]
     health_reporter
@@ -223,6 +234,8 @@ pub async fn serve_grpc(
             local_weather_events,
         )
     };
+    #[cfg(feature = "local")]
+    let connect_impl = ConnectServiceImpl::new(broker_registration_state);
 
     let cors = cors_layer(&cfg);
 
@@ -286,6 +299,8 @@ pub async fn serve_grpc(
     let server = server.add_service(LocalSandboxAdminServiceServer::new(
         local_sandbox_admin_impl,
     ));
+    #[cfg(feature = "local")]
+    let server = server.add_service(ConnectServiceServer::new(connect_impl));
 
     let serve_result = server
         .serve_with_incoming_shutdown(incoming, shutdown_signal(&mut shutdown_rx))

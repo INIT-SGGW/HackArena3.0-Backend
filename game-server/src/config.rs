@@ -7,6 +7,8 @@ use tower_http::cors::{AllowOrigin, ExposeHeaders};
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
 const DEFAULT_HPS_ENDPOINT: &str = "http://127.0.0.1:50052";
 #[cfg(feature = "local")]
+const DEFAULT_API_URL: &str = "https://ha3-api.hackarena.pl";
+#[cfg(feature = "local")]
 const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
 #[cfg(feature = "local")]
 const LOCAL_SANDBOX_STORE_RELATIVE_PATH: &str = "local/sandbox-configs.json";
@@ -50,6 +52,10 @@ pub struct Config {
     pub hps_endpoint: String,
     pub jwt_audience: Vec<String>,
     pub jwt_issuers: Vec<String>,
+    #[cfg(feature = "local")]
+    pub api_url: String,
+    #[cfg(feature = "local")]
+    pub broker_endpoint: String,
     #[cfg(feature = "local")]
     pub local_sandbox_store_path: PathBuf,
     #[cfg(feature = "local")]
@@ -183,6 +189,11 @@ impl Config {
         }
 
         #[cfg(feature = "local")]
+        let api_url = read_env_string("API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        #[cfg(feature = "local")]
+        let broker_endpoint = to_broker_endpoint(&api_url)?;
+
+        #[cfg(feature = "local")]
         let local_sandbox_store_path = default_local_sandbox_store_path();
         #[cfg(feature = "local")]
         let local_max_active_sandboxes = LOCAL_MAX_ACTIVE_SANDBOXES;
@@ -208,6 +219,10 @@ impl Config {
             jwt_audience,
             jwt_issuers,
             #[cfg(feature = "local")]
+            api_url,
+            #[cfg(feature = "local")]
+            broker_endpoint,
+            #[cfg(feature = "local")]
             local_sandbox_store_path,
             #[cfg(feature = "local")]
             local_max_active_sandboxes,
@@ -225,6 +240,20 @@ fn default_local_sandbox_store_path() -> PathBuf {
         return dir.join(LOCAL_SANDBOX_STORE_RELATIVE_PATH);
     }
     PathBuf::from(LOCAL_SANDBOX_STORE_RELATIVE_PATH)
+}
+
+#[cfg(feature = "local")]
+fn to_broker_endpoint(api_url: &str) -> Result<String, String> {
+    let trimmed = api_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("API_URL cannot be empty".into());
+    }
+
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return Err("API_URL must start with http:// or https://".into());
+    }
+
+    Ok(format!("{trimmed}/broker"))
 }
 
 fn exe_dir() -> Option<PathBuf> {
