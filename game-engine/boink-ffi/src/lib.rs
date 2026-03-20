@@ -13,7 +13,7 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 13;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 14;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -214,6 +214,23 @@ pub struct BoinkGhostModeRuntimeState {
     pub exit_delay_remaining_ms: c_uint,
 }
 
+/// Active pitstop zones the vehicle can be in.
+///
+/// Values are intended to represent the current pitstop phase.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BoinkPitstopZone {
+    /// Vehicle is not in any pitstop zone.
+    #[default]
+    BOINK_PITSTOP_ZONE_NONE = 0,
+    /// Vehicle is in the pit entry zone.
+    BOINK_PITSTOP_ZONE_ENTER = 1 << 0,
+    /// Vehicle is in the pit repair zone.
+    BOINK_PITSTOP_ZONE_FIX = 1 << 1,
+    /// Vehicle is in the pit exit zone.
+    BOINK_PITSTOP_ZONE_EXIT = 1 << 2,
+}
+
 /// Represents one static centerline sample of a race track.
 ///
 /// Returned as part of `BoinkTrackData` by `boink_get_track_data`.
@@ -242,10 +259,40 @@ pub struct BoinkCenterlineSample {
     pub bank_rad: Real,
 }
 
+/// Represents static pitstop geometry for one lap.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkPitstopData {
+    /// Number of elements at `enter_centerline_samples`.
+    pub enter_centerline_sample_count: c_uint,
+    /// Pointer to `enter_centerline_sample_count` elements.
+    ///
+    /// Can be null only when `enter_centerline_sample_count == 0`.
+    pub enter_centerline_samples: *const BoinkCenterlineSample,
+    /// Number of elements at `fix_centerline_samples`.
+    pub fix_centerline_sample_count: c_uint,
+    /// Pointer to `fix_centerline_sample_count` elements.
+    ///
+    /// Can be null only when `fix_centerline_sample_count == 0`.
+    pub fix_centerline_samples: *const BoinkCenterlineSample,
+    /// Number of elements at `exit_centerline_samples`.
+    pub exit_centerline_sample_count: c_uint,
+    /// Pointer to `exit_centerline_sample_count` elements.
+    ///
+    /// Can be null only when `exit_centerline_sample_count == 0`.
+    pub exit_centerline_samples: *const BoinkCenterlineSample,
+    /// Pitstop length along centerline in meters.
+    pub length_m: Real,
+}
+
 /// Represents static track geometry for one lap.
 ///
 /// The `map_id` and `centerline_samples` pointers are owned by the engine
 /// and must not be freed or modified by the caller.
+///
+/// The pointers contained within `pitstop_data` are also owned by the engine
+/// and must not be freed or modified by the caller.
+///
 /// These pointers remain valid until `boink_destroy_race(h)` is called.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -262,6 +309,8 @@ pub struct BoinkTrackData {
     ///
     /// Can be null only when `centerline_sample_count == 0`.
     pub centerline_samples: *const BoinkCenterlineSample,
+    /// Static pitstop geometry data for the track.
+    pub pitstop_data: BoinkPitstopData,
 }
 
 /// Represents a quaternion rotation (x, y, z, w).
@@ -318,6 +367,12 @@ pub struct BoinkVehicleState {
     ///   [2] = rear-left
     ///   [3] = rear-right
     pub wheel_speeds: [Real; 4],
+    /// Orientation of the vehicle wheels as a quaternion (x, y, z, w).
+    ///
+    /// Index mapping:
+    ///   [0] = front-left
+    ///   [1] = front-right
+    pub front_wheel_orientation: [BoinkQuaternion; 2],
 }
 
 /// Represents race-progress metrics of a vehicle at a specific simulation instant.
@@ -516,6 +571,29 @@ unsafe extern "C" {
     /// - `BOINK_ERR_INVALID_ARG` if `out_track_data` is null.
     /// - Another error code for other failures.
     pub fn boink_get_track_data(h: BoinkHandle, out_track_data: *mut BoinkTrackData) -> c_int;
+
+    /// Reads current pitstop zones and wheel count in pitstop for the specified vehicle.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle whose pitstop zone is requested.
+    /// - `out_zone` - non-null pointer that receives the current pitstop zone.
+    /// - `out_wheels_num` - non-null pointer that receives number of wheels in pitstop zones.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success and writes the zone to `*out_zone`.
+    /// - `BOINK_ERR_INVALID_ARG` if `out_zone` or `out_wheels_num` is null.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - Another error code for other failures.
+    ///
+    /// Notes:
+    /// - `*out_wheels_num` is expected to be in range `0..=4`.
+    pub fn boink_get_vehicle_pitstop_zone(
+        h: BoinkHandle,
+        vehicle_id: u64,
+        out_zone: *mut BoinkPitstopZone,
+        out_wheels_num: *mut c_int,
+    ) -> c_int;
 
     /// Updates the debug drawer for the current frame.
     ///
