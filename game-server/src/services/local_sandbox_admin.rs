@@ -22,13 +22,17 @@ use proto::race::v1::{
     DeleteLocalSandboxConfigRequest, DeleteLocalSandboxConfigResponse, GetLocalRuntimeStateRequest,
     GetLocalRuntimeStateResponse, GetLocalSandboxConfigsRequest, GetLocalSandboxConfigsResponse,
     LocalActiveSandboxRuntimeInfo, LocalRuntimeState, SetLocalSandboxActivationRequest,
-    SetLocalSandboxActivationResponse, UpdateLocalSandboxConfigRequest,
+    SetLocalSandboxActivationResponse, StreamLocalRuntimeStateRequest,
+    StreamLocalRuntimeStateResponse, UpdateLocalSandboxConfigRequest,
     UpdateLocalSandboxConfigResponse, UpdateLocalSandboxSpawnModeRequest,
     UpdateLocalSandboxSpawnModeResponse, UpdateLocalSandboxTimeOfDayRequest,
     UpdateLocalSandboxTimeOfDayResponse, UpdateLocalSandboxWeatherRequest,
     UpdateLocalSandboxWeatherResponse,
 };
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
+use tokio::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use self::helpers::{find_local_sandbox_by_id, local_sandbox_id_v5, map_store_err};
@@ -53,6 +57,9 @@ pub struct LocalSandboxAdminServiceImpl {
 }
 
 impl LocalSandboxAdminServiceImpl {
+    const RUNTIME_STREAM_CHANNEL_CAPACITY: usize = 16;
+    const RUNTIME_STREAM_POLL_INTERVAL_MS: u64 = 500;
+
     pub fn new(
         store: LocalSandboxConfigStore,
         engine: EngineClient,
@@ -182,10 +189,59 @@ impl LocalSandboxAdminServiceImpl {
             kind: LocalWeatherEventKind::Deactivated,
         });
     }
+
+    async fn build_runtime_state(&self) -> Result<LocalRuntimeState, Status> {
+        let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
+        let snapshot = self.store.get_snapshot().await;
+        let started_at = self.started_at_utc.read().await.clone();
+        let active_car_counts = self.runtime_store.active_car_counts_by_sandbox();
+
+        let mut active_sandboxes = Vec::with_capacity(runtime.active_sandboxes.len());
+        for active in &runtime.active_sandboxes {
+            let Some(record) = snapshot
+                .sandboxes
+                .iter()
+                .find(|entry| entry.sandbox_id == active.sandbox_id)
+            else {
+                tracing::warn!(
+                    sandbox_id = %active.sandbox_id,
+                    "active local sandbox is missing persisted config; omitting from runtime state response"
+                );
+                continue;
+            };
+
+            active_sandboxes.push(LocalActiveSandboxRuntimeInfo {
+                sandbox_id: record.sandbox_id.clone(),
+                sandbox_name: record.config.sandbox_name.clone(),
+                map_id: record.config.map_id.clone(),
+                active_time_of_day_preset: runtime_time_of_day_preset_to_proto(
+                    active.time_of_day_preset,
+                ) as i32,
+                time_of_day: Some(local_time_of_day_to_proto(record.config.time_of_day)),
+                ghost_mode: record.config.ghost_mode.map(local_ghost_mode_to_proto),
+                weather: Some(local_weather_to_proto(record.config.weather)),
+                spawn_mode: local_spawn_mode_to_proto(record.config.spawn_mode) as i32,
+                started_at_utc: started_at.get(&record.sandbox_id).cloned(),
+                active_player_count: active_car_counts
+                    .get(&record.sandbox_id)
+                    .copied()
+                    .unwrap_or(0),
+            });
+        }
+
+        Ok(LocalRuntimeState {
+            revision: runtime.revision,
+            server_time_utc: Some(utc_now_timestamp()),
+            active_sandboxes,
+        })
+    }
 }
 
 #[tonic::async_trait]
 impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
+    type StreamLocalRuntimeStateStream =
+        ReceiverStream<Result<StreamLocalRuntimeStateResponse, Status>>;
+
     async fn get_local_sandbox_configs(
         &self,
         request: Request<GetLocalSandboxConfigsRequest>,
@@ -500,50 +556,61 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
         request: Request<GetLocalRuntimeStateRequest>,
     ) -> Result<Response<GetLocalRuntimeStateResponse>, Status> {
         let _ = request.into_inner();
-        let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
-        let snapshot = self.store.get_snapshot().await;
-        let started_at = self.started_at_utc.read().await.clone();
-        let active_car_counts = self.runtime_store.active_car_counts_by_sandbox();
-
-        let mut active_sandboxes = Vec::with_capacity(runtime.active_sandboxes.len());
-        for active in &runtime.active_sandboxes {
-            let Some(record) = snapshot
-                .sandboxes
-                .iter()
-                .find(|entry| entry.sandbox_id == active.sandbox_id)
-            else {
-                tracing::warn!(
-                    sandbox_id = %active.sandbox_id,
-                    "active local sandbox is missing persisted config; omitting from runtime state response"
-                );
-                continue;
-            };
-
-            active_sandboxes.push(LocalActiveSandboxRuntimeInfo {
-                sandbox_id: record.sandbox_id.clone(),
-                sandbox_name: record.config.sandbox_name.clone(),
-                map_id: record.config.map_id.clone(),
-                active_time_of_day_preset: runtime_time_of_day_preset_to_proto(
-                    active.time_of_day_preset,
-                ) as i32,
-                time_of_day: Some(local_time_of_day_to_proto(record.config.time_of_day)),
-                ghost_mode: record.config.ghost_mode.map(local_ghost_mode_to_proto),
-                weather: Some(local_weather_to_proto(record.config.weather)),
-                spawn_mode: local_spawn_mode_to_proto(record.config.spawn_mode) as i32,
-                started_at_utc: started_at.get(&record.sandbox_id).cloned(),
-                active_player_count: active_car_counts
-                    .get(&record.sandbox_id)
-                    .copied()
-                    .unwrap_or(0),
-            });
-        }
+        let state = self.build_runtime_state().await?;
 
         Ok(Response::new(GetLocalRuntimeStateResponse {
-            state: Some(LocalRuntimeState {
-                revision: runtime.revision,
-                server_time_utc: Some(utc_now_timestamp()),
-                active_sandboxes,
-            }),
+            state: Some(state),
         }))
+    }
+
+    async fn stream_local_runtime_state(
+        &self,
+        request: Request<StreamLocalRuntimeStateRequest>,
+    ) -> Result<Response<Self::StreamLocalRuntimeStateStream>, Status> {
+        let _ = request.into_inner();
+        let service = self.clone();
+        let (tx, rx) = mpsc::channel(Self::RUNTIME_STREAM_CHANNEL_CAPACITY);
+
+        tokio::spawn(async move {
+            let mut last_state_without_time: Option<LocalRuntimeState> = None;
+            let mut ticker =
+                tokio::time::interval(Duration::from_millis(Self::RUNTIME_STREAM_POLL_INTERVAL_MS));
+
+            loop {
+                if tx.is_closed() {
+                    break;
+                }
+                ticker.tick().await;
+
+                let state = match service.build_runtime_state().await {
+                    Ok(state) => state,
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                        break;
+                    }
+                };
+
+                let mut comparable = state.clone();
+                comparable.server_time_utc = None;
+                let changed = last_state_without_time
+                    .as_ref()
+                    .map(|last| last != &comparable)
+                    .unwrap_or(true);
+                if !changed {
+                    continue;
+                }
+
+                last_state_without_time = Some(comparable);
+                if tx
+                    .send(Ok(StreamLocalRuntimeStateResponse { state: Some(state) }))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
