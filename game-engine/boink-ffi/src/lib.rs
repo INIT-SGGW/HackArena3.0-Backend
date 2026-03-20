@@ -13,7 +13,7 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 14;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 15;
 pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
@@ -367,12 +367,12 @@ pub struct BoinkVehicleState {
     ///   [2] = rear-left
     ///   [3] = rear-right
     pub wheel_speeds: [Real; 4],
-    /// Orientation of the vehicle wheels as a quaternion (x, y, z, w).
+    /// Front-wheel steering orientation in radians.
     ///
     /// Index mapping:
     ///   [0] = front-left
     ///   [1] = front-right
-    pub front_wheel_orientation: [BoinkQuaternion; 2],
+    pub front_wheel_orientation_rad: [Real; 2],
 }
 
 /// Represents race-progress metrics of a vehicle at a specific simulation instant.

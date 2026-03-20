@@ -32,7 +32,7 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 14
+#define BOINK_C_API_VERSION_MINOR 15
 
 #define BOINK_C_API_VERSION_PATCH 0
 
@@ -492,13 +492,13 @@ typedef struct BoinkVehicleState {
    */
   Real wheel_speeds[4];
   /**
-   * Orientation of the vehicle wheels as a quaternion (x, y, z, w).
+   * Front-wheel steering orientation in radians.
    *
    * Index mapping:
    *   [0] = front-left
    *   [1] = front-right
    */
-  struct BoinkQuaternion front_wheel_orientation[2];
+  Real front_wheel_orientation_rad[2];
 } BoinkVehicleState;
 
 /**
