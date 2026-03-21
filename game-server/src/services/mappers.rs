@@ -12,7 +12,8 @@ use proto::race::v1::{
     GearShift as ProtoGearShift, GhostModeBlocker as ProtoGhostModeBlocker,
     GhostModePhase as ProtoGhostModePhase, GhostModeState, ParticipantOpponentState,
     ParticipantSelfState, PitstopData as ProtoPitstopData, Quaternion, SetControlsDevRequest,
-    SetControlsRequest, TrackData as ProtoTrackData, Vector3, WheelSpeeds,
+    TrackData as ProtoTrackData, Vector3, WheelSpeeds,
+    participant_client_message::Payload as ParticipantClientPayload,
 };
 use tonic::Status;
 
@@ -25,14 +26,27 @@ pub(crate) fn vec3_to_proto(v: boink::model::Vec3) -> Vector3 {
     }
 }
 
-/// Convert gRPC controls request into engine controls.
-pub(crate) fn proto_to_controls(req: &SetControlsRequest) -> Result<Controls, Status> {
-    controls_from_proto(req.throttle, req.brake, req.steering, req.gear_shift)
-}
-
 /// Convert gRPC dev-controls request into engine controls.
 pub(crate) fn proto_dev_to_controls(req: &SetControlsDevRequest) -> Result<Controls, Status> {
     controls_from_proto(req.throttle, req.brake, req.steering, req.gear_shift)
+}
+
+/// Convert participant bidi controls payload into engine controls.
+pub(crate) fn proto_participant_controls_to_controls(
+    payload: &ParticipantClientPayload,
+) -> Result<Option<(u64, Controls)>, Status> {
+    match payload {
+        ParticipantClientPayload::Controls(value) => Ok(Some((
+            value.client_seq,
+            controls_from_proto(
+                value.throttle,
+                value.brake,
+                value.steering,
+                value.gear_shift,
+            )?,
+        ))),
+        ParticipantClientPayload::Init(_) => Ok(None),
+    }
 }
 
 /// Convert engine gear-shift response into protobuf enum value.

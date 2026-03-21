@@ -14,6 +14,7 @@ pub mod public_menu;
 pub mod race;
 #[cfg(feature = "official")]
 pub mod race_config_admin;
+pub mod race_participant;
 pub mod race_table;
 #[cfg(feature = "official")]
 pub mod sandbox_admin;

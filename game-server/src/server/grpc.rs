@@ -14,6 +14,7 @@ use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminServic
 use proto::race::v1::public_menu_service_server::PublicMenuServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::race_config_admin_service_server::RaceConfigAdminServiceServer;
+use proto::race::v1::race_participant_service_server::RaceParticipantServiceServer;
 use proto::race::v1::race_service_server::RaceServiceServer;
 use proto::race::v1::race_table_query_service_server::RaceTableQueryServiceServer;
 #[cfg(feature = "official")]
@@ -63,6 +64,7 @@ use crate::services::public_menu::{
 use crate::services::race::{RaceRuntimeStore, RaceServiceImpl, spawn_frame_hub};
 #[cfg(feature = "official")]
 use crate::services::race_config_admin::RaceConfigAdminServiceImpl;
+use crate::services::race_participant::RaceParticipantServiceImpl;
 use crate::services::race_table::RaceTableQueryServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::sandbox_admin::SandboxAdminServiceImpl;
@@ -92,6 +94,9 @@ pub async fn serve_grpc(
         .await;
     health_reporter
         .set_serving::<RaceServiceServer<RaceServiceImpl>>()
+        .await;
+    health_reporter
+        .set_serving::<RaceParticipantServiceServer<RaceParticipantServiceImpl>>()
         .await;
     health_reporter
         .set_serving::<RaceTableQueryServiceServer<RaceTableQueryServiceImpl>>()
@@ -150,6 +155,15 @@ pub async fn serve_grpc(
         engine.clone(),
         cfg.simulation_hz,
         cfg.env,
+        &cfg.game_token_jwks_endpoint,
+        cfg.jwt_audience.clone(),
+        cfg.jwt_issuers.clone(),
+        race_runtime_store.clone(),
+        frame_hub.clone(),
+    );
+    let race_participant_impl = RaceParticipantServiceImpl::new(
+        engine.clone(),
+        cfg.simulation_hz,
         &cfg.game_token_jwks_endpoint,
         cfg.jwt_audience.clone(),
         cfg.jwt_issuers.clone(),
@@ -277,6 +291,7 @@ pub async fn serve_grpc(
         .add_service(health_service)
         .add_service(AssetServiceServer::new(asset_impl))
         .add_service(RaceServiceServer::new(race_impl))
+        .add_service(RaceParticipantServiceServer::new(race_participant_impl))
         .add_service(RaceTableQueryServiceServer::new(race_table_impl))
         .add_service(TrackServiceServer::new(track_impl))
         .add_service(WeatherQueryServiceServer::new(weather_query_impl));

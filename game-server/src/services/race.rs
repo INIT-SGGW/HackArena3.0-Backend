@@ -6,12 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use proto::race::v1::{
     FrontendSpectatorDebugInfo, FrontendSpectatorEvent, FrontendSpectatorSnapshot,
-    GetFrontendSpectatorRequest, GetParticipantRaceRequest, ParticipantRaceEvent,
-    ParticipantRaceSnapshot, QuickJoinDevRequest, QuickJoinDevResponse, SetControlsDevRequest,
-    SetControlsRequest, SetControlsResponse, SpectatorView, StreamClampReason, StreamSettings,
-    ViewDowngradeReason, frontend_spectator_event::Payload as FrontendSpectatorPayload,
+    GetFrontendSpectatorRequest, QuickJoinDevRequest, QuickJoinDevResponse, SetControlsDevRequest,
+    SetControlsResponse, SpectatorView, StreamClampReason, StreamSettings, ViewDowngradeReason,
+    frontend_spectator_event::Payload as FrontendSpectatorPayload,
     get_frontend_spectator_request::Target as FrontendSpectatorTarget,
-    participant_race_event::Payload as ParticipantRacePayload, race_service_server::RaceService,
+    race_service_server::RaceService,
 };
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -31,16 +30,12 @@ pub use frame_hub::{FrameHub, RuntimeFrame, spawn_frame_hub};
 pub use runtime_store::{RaceRuntimeStore, RuntimeCarIdentity};
 
 use super::error_map::map_worker_err;
-use super::mappers::{
-    engine_gear_shift_to_proto, frontend_full_state, participant_opponent_state,
-    participant_self_state, proto_dev_to_controls, proto_to_controls,
-};
+use super::mappers::{engine_gear_shift_to_proto, frontend_full_state, proto_dev_to_controls};
 
 const DEFAULT_STREAM_HZ: u32 = 20;
 const MIN_STREAM_HZ: u32 = 1;
 const MAX_STREAM_HZ: u32 = 120;
 const FRONTEND_STREAM_CHANNEL_CAPACITY: usize = 4;
-const PARTICIPANT_STREAM_CHANNEL_CAPACITY: usize = 1;
 
 /// gRPC RaceService implementation backed by a single engine world.
 #[derive(Clone)]
@@ -101,7 +96,6 @@ impl NamedService for RaceServiceImpl {
 #[tonic::async_trait]
 impl RaceService for RaceServiceImpl {
     type StreamFrontendSpectatorStream = ReceiverStream<Result<FrontendSpectatorEvent, Status>>;
-    type StreamParticipantRaceStream = ReceiverStream<Result<ParticipantRaceEvent, Status>>;
 
     async fn quick_join_dev(
         &self,
@@ -156,51 +150,6 @@ impl RaceService for RaceServiceImpl {
         self.car_engine_ids.insert(public_car_id, engine_car_id);
         self.car_targets
             .insert(public_car_id, EngineCommandTarget::Sandbox { sandbox_id });
-
-        Ok(Response::new(resp))
-    }
-
-    async fn set_controls(
-        &self,
-        request: Request<SetControlsRequest>,
-    ) -> Result<Response<SetControlsResponse>, Status> {
-        let auth = parse_game_token(request.metadata())?;
-        let req = request.into_inner();
-        let car_id = match auth {
-            Some(token) => {
-                let instance_uuid = self
-                    .token_validator
-                    .instance_uuid_from_token(&token)
-                    .await?
-                    .ok_or_else(|| Status::unauthenticated("missing instance_uuid claim"))?;
-                let car_id = self
-                    .instance_cars
-                    .get(&instance_uuid)
-                    .map(|entry| *entry.value())
-                    .ok_or_else(|| Status::not_found("unknown instance_uuid"))?;
-                car_id
-            }
-            None => self.resolve_single_car_id()?,
-        };
-        let controls = proto_to_controls(&req)?;
-        let target = self.target_for_car(car_id)?;
-        let engine_car_id = self.engine_car_id_for(car_id)?;
-
-        let accepted_controls = self
-            .engine
-            .set_controls_in(target, engine_car_id, controls)
-            .await
-            .map_err(map_worker_err)?;
-
-        self.last_client_seq.insert(car_id, req.client_seq);
-        let resp = SetControlsResponse {
-            client_seq: req.client_seq,
-            accepted_throttle: req.throttle,
-            accepted_brake: req.brake,
-            accepted_steering: req.steering,
-            applies_from_tick: 0,
-            accepted_shift: engine_gear_shift_to_proto(accepted_controls.accepted_shift),
-        };
 
         Ok(Response::new(resp))
     }
@@ -292,85 +241,9 @@ impl RaceService for RaceServiceImpl {
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
-
-    async fn stream_participant_race(
-        &self,
-        request: Request<GetParticipantRaceRequest>,
-    ) -> Result<Response<Self::StreamParticipantRaceStream>, Status> {
-        let token = parse_game_token(request.metadata())?
-            .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
-        let req = request.into_inner();
-        let scopes = self.token_validator.scopes_from_token(&token).await?;
-        let instance_uuid = self
-            .token_validator
-            .instance_uuid_from_token(&token)
-            .await?
-            .ok_or_else(|| Status::unauthenticated("missing instance_uuid claim"))?;
-        let self_public_car_id = self
-            .instance_cars
-            .get(&instance_uuid)
-            .map(|entry| *entry.value())
-            .ok_or_else(|| Status::not_found("unknown instance_uuid"))?;
-        let self_target = self.target_for_car(self_public_car_id)?;
-        let self_engine_car_id = self.engine_car_id_for(self_public_car_id)?;
-
-        let requested_view = SpectatorView::Team;
-        let (resolved_view, view_downgrade_reason) = resolve_view(requested_view, &scopes);
-
-        let engine = self.engine.clone();
-        let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
-        let runtime_map_id = resolve_runtime_map_id(&runtime_state, Some(&self_target));
-        let simulation_hz = self.simulation_hz;
-        let frame_hub = self.frame_hub.clone();
-        let active_streams = self.active_streams.clone();
-        let known_cars = self.known_cars.clone();
-        let last_client_seq = self.last_client_seq.clone();
-        let instance_cars = self.instance_cars.clone();
-        let car_owners = self.car_owners.clone();
-        let car_engine_ids = self.car_engine_ids.clone();
-        let car_targets = self.car_targets.clone();
-        let (tx, rx) = mpsc::channel(PARTICIPANT_STREAM_CHANNEL_CAPACITY);
-
-        tokio::spawn(run_participant_race_stream(
-            engine,
-            frame_hub,
-            simulation_hz,
-            active_streams,
-            known_cars,
-            last_client_seq,
-            instance_cars,
-            car_owners,
-            car_engine_ids,
-            car_targets,
-            req,
-            requested_view,
-            resolved_view,
-            view_downgrade_reason,
-            runtime_map_id,
-            self_public_car_id,
-            self_engine_car_id,
-            self_target,
-            tx,
-        ));
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
 }
 
 impl RaceServiceImpl {
-    fn resolve_single_car_id(&self) -> Result<u64, Status> {
-        let mut iter = self.known_cars.iter();
-        let Some(first) = iter.next() else {
-            return Err(Status::not_found("no car assigned to this client"));
-        };
-        if iter.next().is_some() {
-            return Err(Status::failed_precondition(
-                "multiple cars active; use dev controls",
-            ));
-        }
-        Ok(*first.key())
-    }
-
     fn target_for_car(&self, car_id: u64) -> Result<EngineCommandTarget, Status> {
         self.car_targets
             .get(&car_id)
@@ -559,27 +432,6 @@ fn build_frontend_settings_event(
     }
 }
 
-fn build_participant_settings_event(
-    requested_hz: u32,
-    effective_hz: u32,
-    clamp_reason: StreamClampReason,
-    resolved_view: SpectatorView,
-    view_downgrade_reason: ViewDowngradeReason,
-    map_id: &str,
-) -> ParticipantRaceEvent {
-    let settings = build_stream_settings(
-        requested_hz,
-        effective_hz,
-        clamp_reason,
-        resolved_view,
-        view_downgrade_reason,
-        map_id,
-    );
-    ParticipantRaceEvent {
-        payload: Some(ParticipantRacePayload::Settings(settings)),
-    }
-}
-
 async fn run_frontend_spectator_stream(
     engine: EngineClient,
     frame_hub: FrameHub,
@@ -709,207 +561,6 @@ async fn run_frontend_spectator_stream(
     active_streams.remove(&stream_id);
 }
 
-fn emit_participant_terminal_error(
-    tx: &mpsc::Sender<Result<ParticipantRaceEvent, Status>>,
-    status: Status,
-) {
-    if tx.try_send(Err(status)).is_err() {
-        tracing::debug!("participant stream terminal status not delivered");
-    }
-}
-
-async fn run_participant_race_stream(
-    engine: EngineClient,
-    frame_hub: FrameHub,
-    simulation_hz: u32,
-    active_streams: Arc<DashMap<u64, ()>>,
-    known_cars: Arc<DashMap<u64, ()>>,
-    last_client_seq: Arc<DashMap<u64, u64>>,
-    instance_cars: Arc<DashMap<String, u64>>,
-    car_owners: Arc<DashMap<u64, String>>,
-    car_engine_ids: Arc<DashMap<u64, u64>>,
-    car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
-    req: GetParticipantRaceRequest,
-    requested_view: SpectatorView,
-    resolved_view: SpectatorView,
-    view_downgrade_reason: ViewDowngradeReason,
-    runtime_map_id: String,
-    self_public_car_id: u64,
-    self_engine_car_id: u64,
-    self_target: EngineCommandTarget,
-    tx: mpsc::Sender<Result<ParticipantRaceEvent, Status>>,
-) {
-    static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(100_000);
-    let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
-    active_streams.insert(stream_id, ());
-
-    let (requested_hz, effective_hz, clamp_reason, period) =
-        resolve_stream_rate(req.requested_hz, simulation_hz);
-    let mut ticker = tokio::time::interval(period);
-    let frame_rx = frame_hub.subscribe();
-
-    tracing::info!(
-        stream_id,
-        self_public_car_id,
-        self_engine_car_id,
-        requested_hz,
-        effective_hz,
-        clamp_reason = ?clamp_reason,
-        requested_view = ?requested_view,
-        resolved_view = ?resolved_view,
-        view_downgrade_reason = ?view_downgrade_reason,
-        target = ?self_target,
-        "participant race stream started"
-    );
-
-    let settings_msg = build_participant_settings_event(
-        requested_hz,
-        effective_hz,
-        clamp_reason,
-        resolved_view,
-        view_downgrade_reason,
-        &runtime_map_id,
-    );
-    if tx.send(Ok(settings_msg)).await.is_err() {
-        cleanup_participant_car(
-            "initial-send-failed",
-            &engine,
-            self_public_car_id,
-            &self_target,
-            &known_cars,
-            &last_client_seq,
-            &instance_cars,
-            &car_owners,
-            &car_engine_ids,
-            &car_targets,
-        )
-        .await;
-        active_streams.remove(&stream_id);
-        return;
-    }
-
-    loop {
-        ticker.tick().await;
-        let frame = frame_rx.borrow().clone();
-
-        let Some(self_car) = frame.cars.get(&self_public_car_id).cloned() else {
-            emit_participant_terminal_error(
-                &tx,
-                Status::not_found("participant car is no longer active"),
-            );
-            cleanup_participant_car(
-                "self-missing",
-                &engine,
-                self_public_car_id,
-                &self_target,
-                &known_cars,
-                &last_client_seq,
-                &instance_cars,
-                &car_owners,
-                &car_engine_ids,
-                &car_targets,
-            )
-            .await;
-            break;
-        };
-        if self_car.target != self_target {
-            emit_participant_terminal_error(
-                &tx,
-                Status::failed_precondition("participant car target changed"),
-            );
-            cleanup_participant_car(
-                "self-target-changed",
-                &engine,
-                self_public_car_id,
-                &self_target,
-                &known_cars,
-                &last_client_seq,
-                &instance_cars,
-                &car_owners,
-                &car_engine_ids,
-                &car_targets,
-            )
-            .await;
-            break;
-        }
-
-        if self_car.engine_car_id != self_engine_car_id {
-            emit_participant_terminal_error(
-                &tx,
-                Status::failed_precondition("participant car engine mapping changed"),
-            );
-            cleanup_participant_car(
-                "self-engine-id-changed",
-                &engine,
-                self_public_car_id,
-                &self_target,
-                &known_cars,
-                &last_client_seq,
-                &instance_cars,
-                &car_owners,
-                &car_engine_ids,
-                &car_targets,
-            )
-            .await;
-            break;
-        }
-
-        let mut opponents: Vec<_> = frame
-            .cars
-            .values()
-            .filter(|entry| {
-                entry.public_car_id != self_public_car_id && entry.target == self_target
-            })
-            .cloned()
-            .collect();
-        opponents.sort_by_key(|entry| entry.public_car_id);
-
-        let opponents = opponents
-            .into_iter()
-            .map(|entry| participant_opponent_state(entry.public_car_id, entry.state))
-            .collect();
-
-        let snapshot = ParticipantRaceSnapshot {
-            tick: frame.tick,
-            server_time_ms: frame.server_time_ms,
-            self_: Some(participant_self_state(
-                self_public_car_id,
-                self_car.state,
-                self_car.last_client_seq,
-            )),
-            opponents,
-        };
-        let msg = ParticipantRaceEvent {
-            payload: Some(ParticipantRacePayload::Snapshot(snapshot)),
-        };
-        if tx.send(Ok(msg)).await.is_err() {
-            tracing::debug!("participant race stream stopped (client disconnected)");
-            cleanup_participant_car(
-                "disconnect",
-                &engine,
-                self_public_car_id,
-                &self_target,
-                &known_cars,
-                &last_client_seq,
-                &instance_cars,
-                &car_owners,
-                &car_engine_ids,
-                &car_targets,
-            )
-            .await;
-            break;
-        }
-    }
-
-    tracing::info!(
-        stream_id,
-        self_public_car_id,
-        target = ?self_target,
-        "participant race stream ended"
-    );
-    active_streams.remove(&stream_id);
-}
-
 fn remove_instance_mapping_for_car(
     public_car_id: u64,
     instance_cars: &DashMap<String, u64>,
@@ -1028,63 +679,6 @@ async fn cleanup_frontend_cars(
         reason,
         "frontend cleanup: car removed"
     );
-}
-
-async fn cleanup_participant_car(
-    reason: &'static str,
-    engine: &EngineClient,
-    public_car_id: u64,
-    target: &EngineCommandTarget,
-    known_cars: &DashMap<u64, ()>,
-    last_client_seq: &DashMap<u64, u64>,
-    instance_cars: &DashMap<String, u64>,
-    car_owners: &DashMap<u64, String>,
-    car_engine_ids: &DashMap<u64, u64>,
-    car_targets: &DashMap<u64, EngineCommandTarget>,
-) {
-    match target {
-        EngineCommandTarget::Sandbox { .. } => {
-            let engine_car_id = car_engine_ids
-                .get(&public_car_id)
-                .map(|entry| *entry.value());
-            if let Some(engine_car_id) = engine_car_id {
-                if let Err(err) = engine.despawn_car_in(target.clone(), engine_car_id).await {
-                    tracing::warn!(
-                        public_car_id,
-                        engine_car_id,
-                        target = ?target,
-                        error = %err,
-                        "failed to despawn participant car during cleanup"
-                    );
-                }
-            }
-
-            remove_car_state(
-                public_car_id,
-                known_cars,
-                last_client_seq,
-                instance_cars,
-                car_owners,
-                car_engine_ids,
-                car_targets,
-            );
-            tracing::info!(
-                public_car_id,
-                engine_car_id = ?engine_car_id,
-                target = ?target,
-                reason,
-                "participant cleanup: sandbox car removed"
-            );
-        }
-        EngineCommandTarget::OfficialRace => {
-            tracing::info!(
-                public_car_id,
-                target = ?target,
-                reason,
-                "participant cleanup: preserving official race car"
-            );
-        }
-    }
 }
 
 fn resolve_owned_cleanup_car(
