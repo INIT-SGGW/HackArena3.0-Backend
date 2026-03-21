@@ -1837,7 +1837,7 @@ fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError>
         "initializing engine world"
     );
 
-    let mesh_glb = cfg.bolids_dir.join("test.glb");
+    let mesh_glb = cfg.bolids_dir.join("F1_CAR_06.glb");
     let mesh = VehicleMesh::load(&mesh_glb).map_err(EngineWorkerError::Engine)?;
 
     let vehicle_model = VehicleModelConfig {

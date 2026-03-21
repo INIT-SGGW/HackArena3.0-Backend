@@ -21,8 +21,6 @@ use crate::model::{
 #[cfg(feature = "legacy-native-lib")]
 use crate::native::api::NativeApi;
 use crate::version::ensure_c_api_compatible;
-#[cfg(feature = "legacy-native-lib")]
-use crate::version::{Version, query_c_api_version};
 
 /// Domain-level configuration of the vehicle model used by the engine.
 #[derive(Debug, Clone)]
@@ -186,45 +184,17 @@ impl Engine {
             return Err(Error::from_ffi_status(code, "boink_step_race"));
         }
 
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let should_monitor_step_progress = {
-                static STEP_PROGRESS_MONITORING_ENABLED: OnceLock<bool> = OnceLock::new();
-                *STEP_PROGRESS_MONITORING_ENABLED.get_or_init(|| {
-                    let min_supported = Version::new(0, 10, 0);
-                    match query_c_api_version() {
-                        Ok(version) if version >= min_supported => true,
-                        Ok(_) => {
-                            tracing::warn!(
-                                min_supported = %min_supported,
-                                "Boink does not report simulated dt_seconds in boink_step_race; step progress stall detection is disabled"
-                            );
-                            false
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                "Unable to query Boink version; step progress stall detection is disabled"
-                            );
-                            false
-                        }
-                    }
-                })
-            };
-            if should_monitor_step_progress
-                && (simulated_dt_seconds - dt_seconds).abs() > f32::EPSILON
-            {
-                let dt_delta_seconds = simulated_dt_seconds - dt_seconds;
-                let dt_delta_abs_seconds = dt_delta_seconds.abs();
-                tracing::warn!(
-                    requested_dt_seconds = dt_seconds,
-                    simulated_dt_seconds,
-                    delta_dt_seconds = dt_delta_seconds,
-                    delta_dt_abs_seconds = dt_delta_abs_seconds,
-                    delta_dt_ms = dt_delta_seconds * 1000.0,
-                    "Boink simulation advanced by a different dt than requested in step"
-                );
-            }
+        if (simulated_dt_seconds - dt_seconds).abs() > f32::EPSILON {
+            let dt_delta_seconds = simulated_dt_seconds - dt_seconds;
+            let dt_delta_abs_seconds = dt_delta_seconds.abs();
+            tracing::warn!(
+                requested_dt_seconds = dt_seconds,
+                simulated_dt_seconds,
+                delta_dt_seconds = dt_delta_seconds,
+                delta_dt_abs_seconds = dt_delta_abs_seconds,
+                delta_dt_ms = dt_delta_seconds * 1000.0,
+                "Boink simulation advanced by a different dt than requested in step"
+            );
         }
 
         if self.debug_drawer_enabled {
@@ -256,19 +226,8 @@ impl Engine {
     pub fn track_data(&self) -> Result<TrackData> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(get_track_data) = api.boink_get_track_data() else {
-                static WARNED_MISSING_GET_TRACK_DATA: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_GET_TRACK_DATA.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_get_track_data symbol not found in native library; track data queries are unavailable"
-                    );
-                }
-                return Err(Error::Internal(
-                    "boink_get_track_data is unavailable in this native library".to_string(),
-                ));
-            };
+            let api = NativeApi::instance();
+            let get_track_data = api.boink_get_track_data();
 
             let mut raw: sys::BoinkTrackData = unsafe { core::mem::zeroed() };
             tracing::debug!("boink_get_track_data (legacy dynamic symbol)");
@@ -406,17 +365,8 @@ impl Engine {
 
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_weather) = api.boink_set_weather() else {
-                static WARNED_MISSING_SET_WEATHER: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_SET_WEATHER.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_set_weather symbol not found in native library; weather updates are ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let api = NativeApi::instance();
+            let set_weather = api.boink_set_weather();
 
             tracing::debug!(
                 cloudiness = weather.cloudiness,
@@ -452,8 +402,7 @@ impl Engine {
     pub fn set_ghost_mode_settings(&mut self, settings: GhostModeSettings) -> Result<()> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let api = NativeApi::instance();
             if settings.enabled {
                 let ffi_settings = sys::BoinkGhostModeSettings {
                     enter_speed_max_mps: settings.enter_speed_max_mps,
@@ -464,15 +413,7 @@ impl Engine {
                     vehicle_overlap_exit_delay_ms: settings.vehicle_overlap_exit_delay_ms,
                 };
 
-                let Some(set_ghost_mode_settings) = api.boink_set_ghost_mode_settings() else {
-                    static WARNED_MISSING_SET_GHOST_MODE_SETTINGS: OnceLock<()> = OnceLock::new();
-                    if WARNED_MISSING_SET_GHOST_MODE_SETTINGS.set(()).is_ok() {
-                        tracing::warn!(
-                            "boink_set_ghost_mode_settings symbol not found in native library; ghost mode settings updates are ignored"
-                        );
-                    }
-                    return Ok(());
-                };
+                let set_ghost_mode_settings = api.boink_set_ghost_mode_settings();
 
                 tracing::debug!(
                     enter_speed_max_mps = settings.enter_speed_max_mps,
@@ -494,15 +435,7 @@ impl Engine {
                 ));
             }
 
-            let Some(disable_ghost_mode) = api.boink_disable_ghost_mode() else {
-                static WARNED_MISSING_DISABLE_GHOST_MODE: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_DISABLE_GHOST_MODE.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_disable_ghost_mode symbol not found in native library; ghost mode disable request is ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let disable_ghost_mode = api.boink_disable_ghost_mode();
 
             tracing::debug!("boink_disable_ghost_mode (legacy dynamic symbol)");
             let code = unsafe { disable_ghost_mode(self.handle) };
@@ -586,17 +519,8 @@ impl Engine {
 
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_vehicle_before_point) = api.boink_set_vehicle_before_point() else {
-                static WARNED_MISSING_SET_VEHICLE_BEFORE_POINT: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_SET_VEHICLE_BEFORE_POINT.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_set_vehicle_before_point symbol not found in native library; before-point updates are ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let api = NativeApi::instance();
+            let set_vehicle_before_point = api.boink_set_vehicle_before_point();
             tracing::debug!(
                 vehicle_id,
                 x = point.x,
@@ -644,22 +568,8 @@ impl Engine {
     pub fn set_vehicle_before_finish_line(&mut self, vehicle_id: u64) -> Result<()> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_vehicle_before_finish_line) = api.boink_set_vehicle_before_finish_line()
-            else {
-                static WARNED_MISSING_SET_VEHICLE_BEFORE_FINISH_LINE: OnceLock<()> =
-                    OnceLock::new();
-                if WARNED_MISSING_SET_VEHICLE_BEFORE_FINISH_LINE
-                    .set(())
-                    .is_ok()
-                {
-                    tracing::warn!(
-                        "boink_set_vehicle_before_finish_line symbol not found in native library; before-finish-line updates are ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let api = NativeApi::instance();
+            let set_vehicle_before_finish_line = api.boink_set_vehicle_before_finish_line();
             tracing::debug!(
                 vehicle_id,
                 "boink_set_vehicle_before_finish_line (legacy dynamic symbol)"
@@ -695,17 +605,8 @@ impl Engine {
     pub fn set_vehicle_random_pos(&mut self, vehicle_id: u64) -> Result<()> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_vehicle_random_pos) = api.boink_set_vehicle_random_pos() else {
-                static WARNED_MISSING_SET_VEHICLE_RANDOM_POS: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_SET_VEHICLE_RANDOM_POS.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_set_vehicle_random_pos symbol not found in native library; random position updates are ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let api = NativeApi::instance();
+            let set_vehicle_random_pos = api.boink_set_vehicle_random_pos();
             tracing::debug!(
                 vehicle_id,
                 "boink_set_vehicle_random_pos (legacy dynamic symbol)"
@@ -734,17 +635,8 @@ impl Engine {
     pub fn set_vehicle_back_to_track(&mut self, vehicle_id: u64) -> Result<()> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_vehicle_back_to_track) = api.boink_set_vehicle_back_to_track() else {
-                static WARNED_MISSING_SET_VEHICLE_BACK_TO_TRACK: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_SET_VEHICLE_BACK_TO_TRACK.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_set_vehicle_back_to_track symbol not found in native library; closest-track updates are ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let api = NativeApi::instance();
+            let set_vehicle_back_to_track = api.boink_set_vehicle_back_to_track();
             tracing::debug!(
                 vehicle_id,
                 "boink_set_vehicle_back_to_track (legacy dynamic symbol)"
@@ -779,17 +671,8 @@ impl Engine {
     pub fn set_vehicle_to_pitstop(&mut self, vehicle_id: u64) -> Result<()> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_vehicle_to_pitstop) = api.boink_set_vehicle_to_pitstop() else {
-                static WARNED_MISSING_SET_VEHICLE_TO_PITSTOP: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_SET_VEHICLE_TO_PITSTOP.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_set_vehicle_to_pitstop symbol not found in native library; pitstop updates are ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let api = NativeApi::instance();
+            let set_vehicle_to_pitstop = api.boink_set_vehicle_to_pitstop();
             tracing::debug!(
                 vehicle_id,
                 "boink_set_vehicle_to_pitstop (legacy dynamic symbol)"
@@ -818,17 +701,8 @@ impl Engine {
     pub fn set_vehicle_at_start_pos(&mut self, vehicle_id: u64, position_index: u64) -> Result<()> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_vehicle_at_start_pos) = api.boink_set_vehicle_at_start_pos() else {
-                static WARNED_MISSING_SET_VEHICLE_AT_START_POS: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_SET_VEHICLE_AT_START_POS.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_set_vehicle_at_start_pos symbol not found in native library; start-position updates are ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let api = NativeApi::instance();
+            let set_vehicle_at_start_pos = api.boink_set_vehicle_at_start_pos();
             tracing::debug!(
                 vehicle_id,
                 position_index,
@@ -866,20 +740,8 @@ impl Engine {
     pub fn get_number_of_start_pos(&self) -> Result<u64> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(get_number_of_start_pos) = api.boink_get_number_of_start_pos() else {
-                static WARNED_MISSING_GET_NUMBER_OF_START_POS: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_GET_NUMBER_OF_START_POS.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_get_number_of_start_pos symbol not found in native library; start-position count query is unavailable"
-                    );
-                }
-                return Err(Error::Internal(
-                    "boink_get_number_of_start_pos is unavailable in this native library"
-                        .to_string(),
-                ));
-            };
+            let api = NativeApi::instance();
+            let get_number_of_start_pos = api.boink_get_number_of_start_pos();
             let mut out_number_pos: u64 = 0;
             tracing::debug!("boink_get_number_of_start_pos (legacy dynamic symbol)");
             let code =
@@ -922,17 +784,8 @@ impl Engine {
 
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(set_vehicle_orientation) = api.boink_set_vehicle_orientation() else {
-                static WARNED_MISSING_SET_VEHICLE_ORIENTATION: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_SET_VEHICLE_ORIENTATION.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_set_vehicle_orientation symbol not found in native library; orientation updates are ignored"
-                    );
-                }
-                return Ok(());
-            };
+            let api = NativeApi::instance();
+            let set_vehicle_orientation = api.boink_set_vehicle_orientation();
             tracing::debug!(
                 vehicle_id,
                 x = orientation.x,
@@ -1005,17 +858,8 @@ impl Engine {
     pub fn read_vehicle_race_metrics(&self, vehicle_id: u64) -> Result<VehicleRaceMetrics> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(read_vehicle_race_metrics) = api.boink_read_vehicle_race_metrics() else {
-                static WARNED_MISSING_READ_VEHICLE_RACE_METRICS: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_READ_VEHICLE_RACE_METRICS.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_read_vehicle_race_metrics symbol not found in native library; returning default race metrics"
-                    );
-                }
-                return Ok(VehicleRaceMetrics::default());
-            };
+            let api = NativeApi::instance();
+            let read_vehicle_race_metrics = api.boink_read_vehicle_race_metrics();
 
             let mut raw: sys::BoinkVehicleRaceMetrics = unsafe { core::mem::zeroed() };
             tracing::debug!(
@@ -1056,17 +900,8 @@ impl Engine {
     pub fn read_vehicle_pitstop_state(&self, vehicle_id: u64) -> Result<VehiclePitstopState> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(get_vehicle_pitstop_zone) = api.boink_get_vehicle_pitstop_zone() else {
-                static WARNED_MISSING_GET_VEHICLE_PITSTOP_ZONE: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_GET_VEHICLE_PITSTOP_ZONE.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_get_vehicle_pitstop_zone symbol not found in native library; returning default pitstop state"
-                    );
-                }
-                return Ok(VehiclePitstopState::default());
-            };
+            let api = NativeApi::instance();
+            let get_vehicle_pitstop_zone = api.boink_get_vehicle_pitstop_zone();
 
             let mut raw_zone = sys::BoinkPitstopZone::BOINK_PITSTOP_ZONE_NONE;
             let mut wheels_num: i32 = 0;
@@ -1122,18 +957,8 @@ impl Engine {
     pub fn get_vehicle_personal_best_lap(&self, vehicle_id: u64) -> Result<Option<VehicleBestLap>> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(get_vehicle_personal_best_lap) = api.boink_get_vehicle_personal_best_lap()
-            else {
-                static WARNED_MISSING_GET_VEHICLE_PERSONAL_BEST_LAP: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_GET_VEHICLE_PERSONAL_BEST_LAP.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_get_vehicle_personal_best_lap symbol not found in native library; returning no data"
-                    );
-                }
-                return Ok(None);
-            };
+            let api = NativeApi::instance();
+            let get_vehicle_personal_best_lap = api.boink_get_vehicle_personal_best_lap();
 
             let mut lap: u32 = 0;
             let mut lap_time_ms: u32 = 0;
@@ -1194,17 +1019,8 @@ impl Engine {
     pub fn get_best_lap(&self) -> Result<Option<RaceBestLap>> {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = NativeApi::instance()
-                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
-            let Some(get_best_lap) = api.boink_get_best_lap() else {
-                static WARNED_MISSING_GET_BEST_LAP: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_GET_BEST_LAP.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_get_best_lap symbol not found in native library; returning no data"
-                    );
-                }
-                return Ok(None);
-            };
+            let api = NativeApi::instance();
+            let get_best_lap = api.boink_get_best_lap();
 
             let mut vehicle_id: u64 = 0;
             let mut lap: u32 = 0;
@@ -1262,27 +1078,8 @@ impl Engine {
     fn read_vehicle_ghost_mode_runtime_state(&self, vehicle_id: u64) -> GhostModeRuntimeState {
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = match NativeApi::instance() {
-                Ok(api) => api,
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        vehicle_id,
-                        "native api unavailable; falling back to inactive ghost mode state"
-                    );
-                    return GhostModeRuntimeState::default();
-                }
-            };
-            let Some(read_vehicle_ghost_mode_state) = api.boink_read_vehicle_ghost_mode_state()
-            else {
-                static WARNED_MISSING_READ_VEHICLE_GHOST_MODE_STATE: OnceLock<()> = OnceLock::new();
-                if WARNED_MISSING_READ_VEHICLE_GHOST_MODE_STATE.set(()).is_ok() {
-                    tracing::warn!(
-                        "boink_read_vehicle_ghost_mode_state symbol not found in native library; falling back to inactive ghost mode state"
-                    );
-                }
-                return GhostModeRuntimeState::default();
-            };
+            let api = NativeApi::instance();
+            let read_vehicle_ghost_mode_state = api.boink_read_vehicle_ghost_mode_state();
 
             let mut raw: sys::BoinkGhostModeRuntimeState = unsafe { core::mem::zeroed() };
             tracing::debug!(

@@ -1,7 +1,7 @@
 //! Low-level loader for the native Boink dynamic library.
 //!
 //! This module handles locating `boink.dll`/`libboink` (optionally using the
-//! `BOINK_NATIVE_LIB_DIR` override) and exposes helpers to resolve individual symbols.
+//! `BOINK_NATIVE_LIB_DIR` override) and exposes helpers to resolve symbols.
 
 use std::{env, path::PathBuf, sync::OnceLock};
 
@@ -9,68 +9,6 @@ use libloading::{Library, library_filename};
 use tracing::debug;
 
 use super::error::NativeLoadError;
-
-/// Legacy counterpart of the exported version-querying functions.
-pub type LegacyVersionFn = unsafe extern "C" fn(*mut u32, *mut u32, *mut u32) -> i32;
-/// Legacy counterpart of the exported string-querying functions.
-pub type LegacyStringFn = unsafe extern "C" fn(*mut std::os::raw::c_char, *mut u32) -> i32;
-/// Legacy counterpart of weather-setting function.
-pub type LegacySetWeatherFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, *const boink_sys::BoinkWeather) -> i32;
-/// Legacy counterpart of ghost-mode-setting function.
-pub type LegacySetGhostModeSettingsFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, *const boink_sys::BoinkGhostModeSettings) -> i32;
-/// Legacy counterpart of ghost-mode-disable function.
-pub type LegacyDisableGhostModeFn = unsafe extern "C" fn(boink_sys::BoinkHandle) -> i32;
-/// Legacy counterpart of track-data query function.
-pub type LegacyGetTrackDataFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, *mut boink_sys::BoinkTrackData) -> i32;
-/// Legacy counterpart of vehicle-orientation update.
-pub type LegacySetVehicleOrientationFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, u64, *const boink_sys::BoinkQuaternion) -> i32;
-/// Legacy counterpart of vehicle repositioning to a point before the given point.
-pub type LegacySetVehicleBeforePointFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, u64, *const boink_sys::BoinkVec3) -> i32;
-/// Legacy counterpart of vehicle repositioning before finish line.
-pub type LegacySetVehicleBeforeFinishLineFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
-/// Legacy counterpart of vehicle repositioning to a random point.
-pub type LegacySetVehicleRandomPosFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
-/// Legacy counterpart of vehicle repositioning to closest point on track.
-pub type LegacySetVehicleBackToTrackFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
-/// Legacy counterpart of vehicle repositioning to pitstop fix zone.
-pub type LegacySetVehicleToPitstopFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
-/// Legacy counterpart of vehicle repositioning at a selected start position.
-pub type LegacySetVehicleAtStartPosFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, u64, u64) -> i32;
-/// Legacy counterpart of start-position count query.
-pub type LegacyGetNumberOfStartPosFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, *mut u64) -> i32;
-/// Legacy counterpart of vehicle ghost-mode runtime state query.
-pub type LegacyReadVehicleGhostModeStateFn = unsafe extern "C" fn(
-    boink_sys::BoinkHandle,
-    u64,
-    *mut boink_sys::BoinkGhostModeRuntimeState,
-) -> i32;
-/// Legacy counterpart of vehicle race-metrics query.
-pub type LegacyReadVehicleRaceMetricsFn = unsafe extern "C" fn(
-    boink_sys::BoinkHandle,
-    u64,
-    *mut boink_sys::BoinkVehicleRaceMetrics,
-) -> i32;
-/// Legacy counterpart of per-vehicle pitstop-zone query.
-pub type LegacyGetVehiclePitstopZoneFn = unsafe extern "C" fn(
-    boink_sys::BoinkHandle,
-    u64,
-    *mut boink_sys::BoinkPitstopZone,
-    *mut i32,
-) -> i32;
-/// Legacy counterpart of per-vehicle personal-best-lap query.
-pub type LegacyGetVehiclePersonalBestLapFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, u64, *mut u32, *mut u32) -> i32;
-/// Legacy counterpart of race best-lap query.
-pub type LegacyGetBestLapFn =
-    unsafe extern "C" fn(boink_sys::BoinkHandle, *mut u64, *mut u32, *mut u32) -> i32;
 
 /// Loads the Boink native library once and returns a reference to it.
 pub fn load_native_library() -> Result<&'static Library, NativeLoadError> {
@@ -81,11 +19,7 @@ pub fn load_native_library() -> Result<&'static Library, NativeLoadError> {
             .expect("native library loader must yield a result");
 
         match result {
-            Ok(lib) => {
-                // Leak the handle so the library stays loaded for the remainder of the process.
-                // libloading requires the `Library` to outlive any function pointers derived from it.
-                Ok(Box::leak(Box::new(lib)) as &'static Library)
-            }
+            Ok(lib) => Ok(Box::leak(Box::new(lib)) as &'static Library),
             Err(err) => Err(err),
         }
     }) {
@@ -94,23 +28,31 @@ pub fn load_native_library() -> Result<&'static Library, NativeLoadError> {
     }
 }
 
-/// Resolves a symbol from the loaded native library, returning `None` when missing.
-pub fn resolve_optional<T>(lib: &'static Library, symbol: &[u8]) -> Option<T>
+/// Resolves a required symbol from the loaded native library.
+///
+/// Returns an error when the symbol is missing.
+pub fn resolve_required<T>(
+    lib: &'static Library,
+    symbol: &'static [u8],
+) -> Result<T, NativeLoadError>
 where
     T: Copy,
 {
     unsafe {
         match lib.get::<T>(symbol) {
-            Ok(sym) => Some(*sym),
+            Ok(sym) => Ok(*sym),
             Err(err) => {
+                let symbol_name = core::str::from_utf8(symbol)
+                    .unwrap_or("<??>")
+                    .trim_end_matches('\0');
                 debug!(
-                    "Legacy native library does not export {}: {}",
-                    core::str::from_utf8(symbol)
-                        .unwrap_or("<??>")
-                        .trim_end_matches('\0'),
-                    err
+                    "Legacy native library is missing required symbol {}: {}",
+                    symbol_name, err
                 );
-                None
+                Err(NativeLoadError::MissingRequiredSymbol {
+                    symbol: symbol_name,
+                    source: std::sync::Arc::new(err),
+                })
             }
         }
     }

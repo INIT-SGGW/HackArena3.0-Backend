@@ -13,6 +13,11 @@ pub enum NativeLoadError {
     },
     /// Failed to load the library from the default search path.
     LibraryNotFound { source: Arc<libloading::Error> },
+    /// Failed to resolve a required symbol in the loaded library.
+    MissingRequiredSymbol {
+        symbol: &'static str,
+        source: Arc<libloading::Error>,
+    },
 }
 
 impl fmt::Display for NativeLoadError {
@@ -28,6 +33,13 @@ impl fmt::Display for NativeLoadError {
             Self::LibraryNotFound { source } => {
                 write!(f, "native library not found: {}", source)
             }
+            Self::MissingRequiredSymbol { symbol, source } => {
+                write!(
+                    f,
+                    "native library is missing required symbol {}: {}",
+                    symbol, source
+                )
+            }
         }
     }
 }
@@ -37,6 +49,7 @@ impl StdError for NativeLoadError {
         match self {
             Self::EnvPathLoadFailed { source, .. } => Some(source.as_ref()),
             Self::LibraryNotFound { source } => Some(source.as_ref()),
+            Self::MissingRequiredSymbol { source, .. } => Some(source.as_ref()),
         }
     }
 }

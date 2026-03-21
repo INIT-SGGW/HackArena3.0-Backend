@@ -1,27 +1,14 @@
-//! Internal macros for optional legacy symbol handling.
+//! Internal macros for string symbol queries.
 
-/// Queries an optional native string symbol, falling back to `None` if missing.
+/// Queries a native string symbol.
 ///
-/// In legacy mode this resolves symbols dynamically and logs a one-time warning
-/// when a symbol is absent.
-macro_rules! native_optional_string_query {
+/// In legacy mode symbols are resolved from [`NativeApi`] and are required.
+macro_rules! native_string_query {
     ($api_getter:ident, $func:path) => {{
         #[cfg(feature = "legacy-native-lib")]
         {
-            let api = match super::api::NativeApi::instance() {
-                Ok(api) => api,
-                Err(_) => return Ok(None),
-            };
-            let func = match api.$api_getter() {
-                Some(func) => func,
-                None => {
-                    static ONCE: std::sync::Once = std::sync::Once::new();
-                    ONCE.call_once(|| {
-                        tracing::warn!("Boink native symbol missing: {}", stringify!($api_getter));
-                    });
-                    return Ok(None);
-                }
-            };
+            let api = super::api::NativeApi::instance();
+            let func = api.$api_getter();
             super::strings::query_string(func)
         }
 
@@ -32,4 +19,4 @@ macro_rules! native_optional_string_query {
     }};
 }
 
-pub(crate) use native_optional_string_query;
+pub(crate) use native_string_query;

@@ -71,11 +71,9 @@ pub const REQUIRED_C_API_VERSION: Version = Version::new(
 
 /// Minimal C-API version accepted in `legacy-native-lib` mode.
 ///
-/// Legacy mode allows running against older native libraries as long as
-/// the baseline contract is available. Newer symbols may still be resolved
-/// dynamically and treated as optional.
+/// Legacy mode supports only native libraries exposing C API `>= 0.16.0`.
 #[cfg(feature = "legacy-native-lib")]
-pub const MIN_LEGACY_C_API_VERSION: Version = Version::new(0, 3, 0);
+pub const MIN_LEGACY_C_API_VERSION: Version = Version::new(0, 16, 0);
 
 /// Queries the loaded native library for the Boink C-API and engine versions.
 ///
@@ -108,23 +106,8 @@ pub fn query_c_api_version() -> Result<Version> {
 /// Queries the loaded native library for the Boink C-API version.
 #[cfg(feature = "legacy-native-lib")]
 pub fn query_c_api_version() -> Result<Version> {
-    match try_dynamic_version_query(b"boink_get_c_api_version\0")? {
-        Some(version) => Ok(version),
-        None => {
-            static ASSUMED_C_API_WARN_ONCE: Once = Once::new();
-            ASSUMED_C_API_WARN_ONCE.call_once(|| {
-                warn!(
-                    concat!(
-                        "Unable to query legacy Boink C API version; assuming {} ",
-                        "(min required {}). Missing version info may indicate newer APIs ",
-                        "are unavailable."
-                    ),
-                    MIN_LEGACY_C_API_VERSION, MIN_LEGACY_C_API_VERSION
-                );
-            });
-            Ok(MIN_LEGACY_C_API_VERSION)
-        }
-    }
+    let api = NativeApi::instance();
+    query_dynamic_version(api.boink_get_c_api_version(), "boink_get_c_api_version")
 }
 
 /// Queries the loaded native library for the Boink engine library version.
@@ -146,17 +129,8 @@ pub fn query_engine_version() -> Result<Version> {
 /// Queries the loaded native library for the Boink engine library version.
 #[cfg(feature = "legacy-native-lib")]
 pub fn query_engine_version() -> Result<Version> {
-    match try_dynamic_version_query(b"boink_get_engine_version\0")? {
-        Some(version) => Ok(version),
-        None => {
-            let assumed = Version::new(0, 0, 0);
-            warn!(
-                "Unable to query legacy engine implementation version; falling back to {}",
-                assumed
-            );
-            Ok(assumed)
-        }
-    }
+    let api = NativeApi::instance();
+    query_dynamic_version(api.boink_get_engine_version(), "boink_get_engine_version")
 }
 
 /// Checks whether the loaded library's C-API version is compatible with this wrapper.
@@ -214,7 +188,7 @@ pub fn ensure_c_api_compatible() -> Result<()> {
 pub fn ensure_c_api_compatible() -> Result<()> {
     static LEGACY_WARN_ONCE: Once = Once::new();
     LEGACY_WARN_ONCE.call_once(|| {
-        warn!("Legacy compatibility mode enabled; native symbols will be resolved dynamically");
+        warn!("Legacy compatibility mode enabled; minimum supported C API is 0.16.0");
     });
 
     let c_api = match query_c_api_version() {
@@ -247,37 +221,19 @@ pub fn ensure_c_api_compatible() -> Result<()> {
 }
 
 #[cfg(feature = "legacy-native-lib")]
-fn try_dynamic_version_query(symbol: &[u8]) -> Result<Option<Version>> {
-    let api = match NativeApi::instance() {
-        Ok(api) => api,
-        Err(_) => return Ok(None),
-    };
-
-    let func = match symbol {
-        b"boink_get_c_api_version\0" => api.boink_get_c_api_version(),
-        b"boink_get_engine_version\0" => api.boink_get_engine_version(),
-        _ => None,
-    };
-
-    let func = match func {
-        Some(func) => func,
-        None => return Ok(None),
-    };
-
+fn query_dynamic_version(
+    func: unsafe extern "C" fn(*mut u32, *mut u32, *mut u32) -> i32,
+    func_name: &'static str,
+) -> Result<Version> {
     let mut major: u32 = 0;
     let mut minor: u32 = 0;
     let mut patch: u32 = 0;
 
     let code = unsafe { func(&mut major, &mut minor, &mut patch) };
     if code == sys::BOINK_OK {
-        Ok(Some(Version::new(major, minor, patch)))
+        Ok(Version::new(major, minor, patch))
     } else {
-        let func = match symbol {
-            b"boink_get_c_api_version\0" => "boink_get_c_api_version",
-            b"boink_get_engine_version\0" => "boink_get_engine_version",
-            _ => "<unknown>",
-        };
-        Err(Error::from_ffi_status(code, func))
+        Err(Error::from_ffi_status(code, func_name))
     }
 }
 
