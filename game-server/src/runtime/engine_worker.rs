@@ -325,6 +325,48 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Repositions a given vehicle to the closest point on track in target runtime world.
+    pub async fn set_car_back_to_track_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetCarBackToTrack {
+                target,
+                car_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Repositions a given vehicle to pitstop fix zone in target runtime world.
+    pub async fn set_car_to_pitstop_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetCarToPitstop {
+                target,
+                car_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Reads static track geometry from the official-race engine world.
     pub async fn track_data(&self) -> Result<TrackData, EngineWorkerError> {
         self.track_data_in(EngineCommandTarget::OfficialRace).await
@@ -1012,6 +1054,46 @@ async fn handle_command(
                 |slot| {
                     slot.engine
                         .read_vehicle_race_metrics(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetCarBackToTrack {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_vehicle_back_to_track(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetCarToPitstop {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_vehicle_to_pitstop(car_id)
                         .map_err(EngineWorkerError::Engine)
                 },
             )

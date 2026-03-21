@@ -39,6 +39,16 @@ pub enum EngineCommand {
         car_id: u64,
         reply_tx: oneshot::Sender<Result<VehicleRaceMetrics, EngineWorkerError>>,
     },
+    SetCarBackToTrack {
+        target: EngineCommandTarget,
+        car_id: u64,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
+    SetCarToPitstop {
+        target: EngineCommandTarget,
+        car_id: u64,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
     GetTrackData {
         target: EngineCommandTarget,
         reply_tx: oneshot::Sender<Result<TrackData, EngineWorkerError>>,

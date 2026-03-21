@@ -5,14 +5,15 @@ use boink::model::{
     GHOST_MODE_BLOCKER_IN_PIT, GHOST_MODE_BLOCKER_LAPS_REQUIREMENT_NOT_MET,
     GHOST_MODE_BLOCKER_OVERLAP_EXIT_DELAY_RUNNING, GHOST_MODE_BLOCKER_VEHICLE_OVERLAP_ACTIVE, Gear,
     GearShift as EngineGearShift, GhostModePhase as EngineGhostModePhase, GhostModeRuntimeState,
-    TrackData as EngineTrackData, VehicleState,
+    GroundType, TrackData as EngineTrackData, TyreType, VehicleState,
 };
 use proto::race::v1::{
     CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, FrontendCarFullState,
     GearShift as ProtoGearShift, GhostModeBlocker as ProtoGhostModeBlocker,
-    GhostModePhase as ProtoGhostModePhase, GhostModeState, ParticipantOpponentState,
-    ParticipantSelfState, PitstopData as ProtoPitstopData, Quaternion, SetControlsDevRequest,
-    TrackData as ProtoTrackData, Vector3, WheelSpeeds,
+    GhostModePhase as ProtoGhostModePhase, GhostModeState, GroundType as ProtoGroundType,
+    GroundWidth as ProtoGroundWidth, ParticipantOpponentState, ParticipantSelfState,
+    PitstopData as ProtoPitstopData, Quaternion, SetControlsDevRequest, TireTemperaturePerWheel,
+    TireType as ProtoTireType, TireWearPerWheel, TrackData as ProtoTrackData, Vector3, WheelSpeeds,
     participant_client_message::Payload as ParticipantClientPayload,
 };
 use tonic::Status;
@@ -45,7 +46,9 @@ pub(crate) fn proto_participant_controls_to_controls(
                 value.gear_shift,
             )?,
         ))),
-        ParticipantClientPayload::Init(_) => Ok(None),
+        ParticipantClientPayload::Init(_)
+        | ParticipantClientPayload::BackToTrack(_)
+        | ParticipantClientPayload::ToPitstop(_) => Ok(None),
     }
 }
 
@@ -149,6 +152,8 @@ pub(crate) fn participant_telemetry_from_state(
     state: &VehicleState,
     last_applied_client_seq: u64,
 ) -> CarParticipantState {
+    let (tire_type, tire_wear, tire_temperature_celsius) = tire_telemetry_from_state(state);
+
     CarParticipantState {
         last_applied_client_seq,
         speed_mps: state.speed,
@@ -163,6 +168,9 @@ pub(crate) fn participant_telemetry_from_state(
         ghost_mode: Some(ghost_mode_state_from_runtime(&state.ghost_mode_runtime)),
         pitstop_zone_flags: state.pitstop_state.zone_mask,
         wheels_in_pitstop: state.pitstop_state.wheels_in_pitstop as u32,
+        tire_type,
+        tire_wear,
+        tire_temperature_celsius,
     }
 }
 
@@ -266,5 +274,74 @@ fn centerline_sample_to_proto(sample: boink::model::CenterlineSample) -> Centerl
         curvature_1pm: sample.curvature_1pm,
         grade_rad: sample.grade_rad,
         bank_rad: sample.bank_rad,
+        max_left_width_m: sample.max_left_width_m,
+        max_right_width_m: sample.max_right_width_m,
+        left_grounds: sample
+            .left_grounds
+            .into_iter()
+            .map(ground_width_to_proto)
+            .collect(),
+        right_grounds: sample
+            .right_grounds
+            .into_iter()
+            .map(ground_width_to_proto)
+            .collect(),
+    }
+}
+
+fn tire_telemetry_from_state(
+    state: &VehicleState,
+) -> (
+    i32,
+    Option<TireWearPerWheel>,
+    Option<TireTemperaturePerWheel>,
+) {
+    let no_wear_signal = state.tyre_health.iter().all(|v| *v == 0.0);
+    let no_temp_signal = state.tyre_temperature_celsius.iter().all(|v| *v == 0.0);
+    let all_finite = state
+        .tyre_health
+        .iter()
+        .chain(state.tyre_temperature_celsius.iter())
+        .all(|v| v.is_finite());
+
+    if !all_finite || (no_wear_signal && no_temp_signal) {
+        return (ProtoTireType::Unspecified as i32, None, None);
+    }
+
+    let tire_type = match state.tyre_type {
+        TyreType::Hard => ProtoTireType::Hard as i32,
+        TyreType::Soft => ProtoTireType::Soft as i32,
+        TyreType::Wet => ProtoTireType::Wet as i32,
+    };
+    let tire_wear = Some(TireWearPerWheel {
+        front_left: state.tyre_health[0],
+        front_right: state.tyre_health[1],
+        rear_left: state.tyre_health[2],
+        rear_right: state.tyre_health[3],
+    });
+    let tire_temperature = Some(TireTemperaturePerWheel {
+        front_left_celsius: state.tyre_temperature_celsius[0],
+        front_right_celsius: state.tyre_temperature_celsius[1],
+        rear_left_celsius: state.tyre_temperature_celsius[2],
+        rear_right_celsius: state.tyre_temperature_celsius[3],
+    });
+
+    (tire_type, tire_wear, tire_temperature)
+}
+
+fn ground_width_to_proto(ground: boink::model::GroundWidth) -> ProtoGroundWidth {
+    ProtoGroundWidth {
+        width_m: ground.width,
+        ground_type: ground_type_to_proto(ground.ground_type) as i32,
+    }
+}
+
+fn ground_type_to_proto(ground: GroundType) -> ProtoGroundType {
+    match ground {
+        GroundType::Asphalt => ProtoGroundType::Asphalt,
+        GroundType::Grass => ProtoGroundType::Grass,
+        GroundType::Sand | GroundType::Gravel => ProtoGroundType::Gravel,
+        GroundType::Wall => ProtoGroundType::Wall,
+        GroundType::Kerb => ProtoGroundType::Kerb,
     }
 }

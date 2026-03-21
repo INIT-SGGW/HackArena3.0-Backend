@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use boink::model::Controls;
 use proto::race::v1::{
-    ParticipantServerEvent, ParticipantSnapshot, SpectatorView, StreamClampReason, StreamSettings,
-    ViewDowngradeReason, participant_client_message::Payload as ParticipantClientPayload,
+    ParticipantCommandAck, ParticipantCommandRejectReason, ParticipantCommandStatus,
+    ParticipantCommandType, ParticipantServerEvent, ParticipantSnapshot, SpectatorView,
+    StreamClampReason, StreamSettings, ViewDowngradeReason,
+    participant_client_message::Payload as ParticipantClientPayload,
     participant_server_event::Payload as ParticipantServerPayload,
     race_participant_service_server::RaceParticipantService,
 };
@@ -271,6 +273,22 @@ fn participant_ack(
     }
 }
 
+fn participant_command_ack(
+    client_seq: u64,
+    command_type: ParticipantCommandType,
+    status: ParticipantCommandStatus,
+    applies_from_tick: u64,
+    rejected_reason: ParticipantCommandRejectReason,
+) -> ParticipantCommandAck {
+    ParticipantCommandAck {
+        client_seq,
+        command_type: command_type as i32,
+        status: status as i32,
+        applies_from_tick,
+        rejected_reason: rejected_reason as i32,
+    }
+}
+
 async fn run_participant_stream(
     engine: EngineClient,
     frame_hub: FrameHub,
@@ -474,6 +492,140 @@ async fn run_participant_stream(
                                 &self_target,
                                 self_engine_car_id,
                             ).await;
+                            break;
+                        }
+                    }
+                    ParticipantClientPayload::BackToTrack(command) => {
+                        if !initialized {
+                            emit_participant_terminal_error(
+                                &tx,
+                                Status::invalid_argument("first participant message must be init"),
+                            );
+                            cleanup_participant_car(
+                                "command-before-init",
+                                &engine,
+                                runtime_store.as_ref(),
+                                self_public_car_id,
+                                &self_target,
+                                self_engine_car_id,
+                            )
+                            .await;
+                            break;
+                        }
+
+                        let applies_from_tick = frame_hub.latest().tick;
+                        let ack = match engine
+                            .set_car_back_to_track_in(self_target.clone(), self_engine_car_id)
+                            .await
+                        {
+                            Ok(()) => participant_command_ack(
+                                command.client_seq,
+                                ParticipantCommandType::BackToTrack,
+                                ParticipantCommandStatus::Accepted,
+                                applies_from_tick,
+                                ParticipantCommandRejectReason::Unspecified,
+                            ),
+                            Err(err) => {
+                                tracing::warn!(
+                                    stream_id,
+                                    car_id = self_public_car_id,
+                                    target = ?self_target,
+                                    error = %err,
+                                    "participant back_to_track command rejected"
+                                );
+                                participant_command_ack(
+                                    command.client_seq,
+                                    ParticipantCommandType::BackToTrack,
+                                    ParticipantCommandStatus::Rejected,
+                                    applies_from_tick,
+                                    ParticipantCommandRejectReason::NotAllowed,
+                                )
+                            }
+                        };
+
+                        if !send_participant_event(
+                            &tx,
+                            &mut server_seq,
+                            ParticipantServerPayload::CommandAck(ack),
+                        )
+                        .await
+                        {
+                            cleanup_participant_car(
+                                "command-ack-send-failed",
+                                &engine,
+                                runtime_store.as_ref(),
+                                self_public_car_id,
+                                &self_target,
+                                self_engine_car_id,
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                    ParticipantClientPayload::ToPitstop(command) => {
+                        if !initialized {
+                            emit_participant_terminal_error(
+                                &tx,
+                                Status::invalid_argument("first participant message must be init"),
+                            );
+                            cleanup_participant_car(
+                                "command-before-init",
+                                &engine,
+                                runtime_store.as_ref(),
+                                self_public_car_id,
+                                &self_target,
+                                self_engine_car_id,
+                            )
+                            .await;
+                            break;
+                        }
+
+                        let applies_from_tick = frame_hub.latest().tick;
+                        let ack = match engine
+                            .set_car_to_pitstop_in(self_target.clone(), self_engine_car_id)
+                            .await
+                        {
+                            Ok(()) => participant_command_ack(
+                                command.client_seq,
+                                ParticipantCommandType::ToPitstop,
+                                ParticipantCommandStatus::Accepted,
+                                applies_from_tick,
+                                ParticipantCommandRejectReason::Unspecified,
+                            ),
+                            Err(err) => {
+                                tracing::warn!(
+                                    stream_id,
+                                    car_id = self_public_car_id,
+                                    target = ?self_target,
+                                    error = %err,
+                                    "participant to_pitstop command rejected"
+                                );
+                                participant_command_ack(
+                                    command.client_seq,
+                                    ParticipantCommandType::ToPitstop,
+                                    ParticipantCommandStatus::Rejected,
+                                    applies_from_tick,
+                                    ParticipantCommandRejectReason::NotAllowed,
+                                )
+                            }
+                        };
+
+                        if !send_participant_event(
+                            &tx,
+                            &mut server_seq,
+                            ParticipantServerPayload::CommandAck(ack),
+                        )
+                        .await
+                        {
+                            cleanup_participant_car(
+                                "command-ack-send-failed",
+                                &engine,
+                                runtime_store.as_ref(),
+                                self_public_car_id,
+                                &self_target,
+                                self_engine_car_id,
+                            )
+                            .await;
                             break;
                         }
                     }
