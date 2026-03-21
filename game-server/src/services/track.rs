@@ -1,7 +1,10 @@
 //! gRPC TrackService implementation for static centerline geometry.
 
+use std::sync::Arc;
+
+use dashmap::DashMap;
 use proto::race::v1::track_service_server::TrackService;
-use proto::race::v1::{GetTrackDataRequest, GetTrackDataResponse};
+use proto::race::v1::{GetTrackDataRequest, GetTrackDataResponse, TrackData as ProtoTrackData};
 use tonic::{Request, Response, Status};
 
 use crate::runtime::engine_worker::{
@@ -14,12 +17,16 @@ use crate::services::mappers::track_data_to_proto;
 #[derive(Clone)]
 pub struct TrackServiceImpl {
     engine: EngineClient,
+    cache: Arc<DashMap<String, ProtoTrackData>>,
 }
 
 impl TrackServiceImpl {
     /// Builds the service with access to engine worker commands.
     pub fn new(engine: EngineClient) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            cache: Arc::new(DashMap::new()),
+        }
     }
 
     fn resolve_track_target(
@@ -44,13 +51,20 @@ impl TrackServiceImpl {
                     return Err(Status::not_found("track not found"));
                 }
                 if matching.len() > 1 {
-                    return Err(Status::failed_precondition(
-                        "multiple active sandbox sessions match requested map_id",
-                    ));
+                    tracing::warn!(
+                        map_id,
+                        count = matching.len(),
+                        "multiple active sandbox sessions match requested map_id; using deterministic first sandbox"
+                    );
                 }
 
+                let selected = matching
+                    .iter()
+                    .min_by(|a, b| a.sandbox_id.cmp(&b.sandbox_id))
+                    .expect("matching is non-empty");
+
                 Ok(EngineCommandTarget::Sandbox {
-                    sandbox_id: matching[0].sandbox_id.clone(),
+                    sandbox_id: selected.sandbox_id.clone(),
                 })
             }
             EngineActivityKind::None => Err(Status::failed_precondition(
@@ -67,9 +81,16 @@ impl TrackService for TrackServiceImpl {
         request: Request<GetTrackDataRequest>,
     ) -> Result<Response<GetTrackDataResponse>, Status> {
         let GetTrackDataRequest { map_id } = request.into_inner();
+        let map_id: String = map_id.trim().to_string();
 
-        if map_id.trim().is_empty() {
+        if map_id.is_empty() {
             return Err(Status::invalid_argument("map_id is required"));
+        }
+
+        if let Some(cached) = self.cache.get(&map_id) {
+            return Ok(Response::new(GetTrackDataResponse {
+                track: Some(cached.value().clone()),
+            }));
         }
 
         let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
@@ -80,10 +101,10 @@ impl TrackService for TrackServiceImpl {
             .await
             .map_err(map_worker_err)?;
         track.map_id = map_id.clone();
+        let track = track_data_to_proto(track);
+        self.cache.insert(map_id, track.clone());
 
-        let response = GetTrackDataResponse {
-            track: Some(track_data_to_proto(track)),
-        };
+        let response = GetTrackDataResponse { track: Some(track) };
         Ok(Response::new(response))
     }
 }
