@@ -13,8 +13,8 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 15;
-pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 16;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 1;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
@@ -214,6 +214,21 @@ pub struct BoinkGhostModeRuntimeState {
     pub exit_delay_remaining_ms: c_uint,
 }
 
+/// Available tyre types for the vehicle.
+///
+/// Values represent the compound currently in use.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BoinkTyreType {
+    /// Soft compound tyre.
+    #[default]
+    BOINK_TYRE_TYPE_SOFT = 0,
+    /// Hard compound tyre.
+    BOINK_TYRE_TYPE_HARD = 1,
+    /// Wet tyre.
+    BOINK_TYRE_TYPE_WET = 2,
+}
+
 /// Active pitstop zones the vehicle can be in.
 ///
 /// Values are intended to represent the current pitstop phase.
@@ -229,6 +244,35 @@ pub enum BoinkPitstopZone {
     BOINK_PITSTOP_ZONE_FIX = 1 << 1,
     /// Vehicle is in the pit exit zone.
     BOINK_PITSTOP_ZONE_EXIT = 1 << 2,
+}
+
+/// Ground surface type used by side segments around the centerline.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BoinkGroundType {
+    /// Standard asphalt/racing surface.
+    #[default]
+    BOINK_GROUND_TYPE_ASPHALT = 0,
+    /// Grass surface.
+    BOINK_GROUND_TYPE_GRASS = 1,
+    /// Sand trap surface.
+    BOINK_GROUND_TYPE_SAND = 2,
+    /// Gravel trap surface.
+    BOINK_GROUND_TYPE_GRAVEL = 3,
+    /// Solid wall or barrier surface.
+    BOINK_GROUND_TYPE_WALL = 4,
+    /// Kerb/corner stone surface.
+    BOINK_GROUND_TYPE_KERB = 5,
+}
+
+/// Width segment with associated ground type.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoinkGroundWidth {
+    /// Segment width in meters.
+    pub width: Real,
+    /// Ground type for this side segment.
+    pub r#type: BoinkGroundType,
 }
 
 /// Represents one static centerline sample of a race track.
@@ -251,6 +295,22 @@ pub struct BoinkCenterlineSample {
     pub left_width_m: Real,
     /// Drivable half-width to track-right from centerline, meters.
     pub right_width_m: Real,
+    /// Drivable half-width to wall-left from centerline, meters.
+    pub max_left_width_m: Real,
+    /// Number of elements at `left_grounds`.
+    pub left_grounds_count: c_uint,
+    /// Pointer to `left_grounds_count` elements describing ground types and widths on the left side.
+    ///
+    /// Can be null only when `left_grounds_count == 0`.
+    pub left_grounds: *mut BoinkGroundWidth,
+    /// Drivable half-width to wall-right from centerline, meters.
+    pub max_right_width_m: Real,
+    /// Number of elements at `right_grounds`.
+    pub right_grounds_count: c_uint,
+    /// Pointer to `right_grounds_count` elements describing ground types and widths on the right side.
+    ///
+    /// Can be null only when `right_grounds_count == 0`.
+    pub right_grounds: *mut BoinkGroundWidth,
     /// Signed centerline curvature [1/m].
     pub curvature_1pm: Real,
     /// Longitudinal slope angle in radians.
@@ -292,6 +352,9 @@ pub struct BoinkPitstopData {
 ///
 /// The pointers contained within `pitstop_data` are also owned by the engine
 /// and must not be freed or modified by the caller.
+///
+/// The `left_grounds`/`right_grounds` pointers referenced by each centerline sample
+/// are also owned by the engine and must not be freed or modified by the caller.
 ///
 /// These pointers remain valid until `boink_destroy_race(h)` is called.
 #[repr(C)]
@@ -373,6 +436,27 @@ pub struct BoinkVehicleState {
     ///   [0] = front-left
     ///   [1] = front-right
     pub front_wheel_orientation_rad: [Real; 2],
+    /// Current tyre health in the range [0.0, 1.0],
+    /// where 1.0 represents a new tyre and 0.0 a fully worn tyre.
+    ///
+    /// Index mapping:
+    ///   [0] = front-left
+    ///   [1] = front-right
+    ///   [2] = rear-left
+    ///   [3] = rear-right
+    pub tyre_health: [Real; 4],
+    /// Current tyre temperature in degrees Celsius.
+    ///
+    /// Index mapping:
+    ///   [0] = front-left
+    ///   [1] = front-right
+    ///   [2] = rear-left
+    ///   [3] = rear-right
+    pub tyre_temperature_celsius: [Real; 4],
+    /// Currently equipped tyre type.
+    pub tyre_type: BoinkTyreType,
+    /// Indicates whether all four wheels are in contact with the ground.
+    pub are_all_wheels_on_ground: bool,
 }
 
 /// Represents race-progress metrics of a vehicle at a specific simulation instant.
@@ -742,6 +826,34 @@ unsafe extern "C" {
     /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
     /// - Another error code for other failures.
     pub fn boink_set_vehicle_random_pos(h: BoinkHandle, vehicle_id: u64) -> c_int;
+
+    /// Sets the world-space position of a vehicle to the closest point on track.
+    ///
+    /// This immediately updates the specified vehicle's position in the simulation.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle to move.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - Another error code for other failures.
+    pub fn boink_set_vehicle_back_to_track(h: BoinkHandle, vehicle_id: u64) -> c_int;
+
+    /// Sets the world-space position of a vehicle to the pitstop fix zone.
+    ///
+    /// This immediately updates the specified vehicle's position in the simulation.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle to move.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - Another error code for other failures.
+    pub fn boink_set_vehicle_to_pitstop(h: BoinkHandle, vehicle_id: u64) -> c_int;
 
     /// Sets the world-space position of a vehicle at a selected starting position.
     ///
