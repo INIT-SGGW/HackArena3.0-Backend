@@ -13,8 +13,9 @@ use crate::native::loader::{
     LegacyDisableGhostModeFn, LegacyGetBestLapFn, LegacyGetNumberOfStartPosFn,
     LegacyGetTrackDataFn, LegacyGetVehiclePersonalBestLapFn, LegacyGetVehiclePitstopZoneFn,
     LegacyReadVehicleGhostModeStateFn, LegacyReadVehicleRaceMetricsFn,
-    LegacySetGhostModeSettingsFn, LegacySetVehicleAtStartPosFn, LegacySetVehicleBeforeFinishLineFn,
-    LegacySetVehicleBeforePointFn, LegacySetVehicleOrientationFn, LegacySetVehicleRandomPosFn,
+    LegacySetGhostModeSettingsFn, LegacySetVehicleAtStartPosFn, LegacySetVehicleBackToTrackFn,
+    LegacySetVehicleBeforeFinishLineFn, LegacySetVehicleBeforePointFn,
+    LegacySetVehicleOrientationFn, LegacySetVehicleRandomPosFn, LegacySetVehicleToPitstopFn,
     LegacySetWeatherFn, LegacyStringFn, LegacyVersionFn, load_native_library, resolve_optional,
 };
 
@@ -32,6 +33,8 @@ pub struct NativeApi {
     set_vehicle_before_point: Option<LegacySetVehicleBeforePointFn>,
     set_vehicle_before_finish_line: Option<LegacySetVehicleBeforeFinishLineFn>,
     set_vehicle_random_pos: Option<LegacySetVehicleRandomPosFn>,
+    set_vehicle_back_to_track: Option<LegacySetVehicleBackToTrackFn>,
+    set_vehicle_to_pitstop: Option<LegacySetVehicleToPitstopFn>,
     set_vehicle_at_start_pos: Option<LegacySetVehicleAtStartPosFn>,
     get_number_of_start_pos: Option<LegacyGetNumberOfStartPosFn>,
     read_vehicle_ghost_mode_state: Option<LegacyReadVehicleGhostModeStateFn>,
@@ -125,6 +128,18 @@ impl NativeApi {
         self.set_vehicle_random_pos
     }
 
+    /// Returns the function pointer for `boink_set_vehicle_back_to_track`, when exported.
+    #[must_use]
+    pub fn boink_set_vehicle_back_to_track(&self) -> Option<LegacySetVehicleBackToTrackFn> {
+        self.set_vehicle_back_to_track
+    }
+
+    /// Returns the function pointer for `boink_set_vehicle_to_pitstop`, when exported.
+    #[must_use]
+    pub fn boink_set_vehicle_to_pitstop(&self) -> Option<LegacySetVehicleToPitstopFn> {
+        self.set_vehicle_to_pitstop
+    }
+
     /// Returns the function pointer for `boink_set_vehicle_at_start_pos`, when exported.
     #[must_use]
     pub fn boink_set_vehicle_at_start_pos(&self) -> Option<LegacySetVehicleAtStartPosFn> {
@@ -183,6 +198,8 @@ impl NativeApi {
         let set_vehicle_before_finish_line =
             resolve_optional(lib, b"boink_set_vehicle_before_finish_line\0");
         let set_vehicle_random_pos = resolve_optional(lib, b"boink_set_vehicle_random_pos\0");
+        let set_vehicle_back_to_track = resolve_optional(lib, b"boink_set_vehicle_back_to_track\0");
+        let set_vehicle_to_pitstop = resolve_optional(lib, b"boink_set_vehicle_to_pitstop\0");
         let set_vehicle_at_start_pos = resolve_optional(lib, b"boink_set_vehicle_at_start_pos\0");
         let get_number_of_start_pos = resolve_optional(lib, b"boink_get_number_of_start_pos\0");
         let read_vehicle_ghost_mode_state =
@@ -194,7 +211,7 @@ impl NativeApi {
         let get_best_lap = resolve_optional(lib, b"boink_get_best_lap\0");
 
         trace!(
-            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}, set_vehicle_orientation={}, set_vehicle_before_point={}, set_vehicle_before_finish_line={}, set_vehicle_random_pos={}, set_vehicle_at_start_pos={}, get_number_of_start_pos={}, read_vehicle_ghost_mode_state={}, read_vehicle_race_metrics={}, get_vehicle_pitstop_zone={}, get_vehicle_personal_best_lap={}, get_best_lap={}",
+            "Resolved legacy query methods: c_api_version={}, engine_version={}, engine_profile={}, last_error={}, set_weather={}, set_ghost_mode_settings={}, disable_ghost_mode={}, track_data={}, set_vehicle_orientation={}, set_vehicle_before_point={}, set_vehicle_before_finish_line={}, set_vehicle_random_pos={}, set_vehicle_back_to_track={}, set_vehicle_to_pitstop={}, set_vehicle_at_start_pos={}, get_number_of_start_pos={}, read_vehicle_ghost_mode_state={}, read_vehicle_race_metrics={}, get_vehicle_pitstop_zone={}, get_vehicle_personal_best_lap={}, get_best_lap={}",
             get_c_api_version.is_some(),
             get_engine_version.is_some(),
             get_engine_profile.is_some(),
@@ -207,6 +224,8 @@ impl NativeApi {
             set_vehicle_before_point.is_some(),
             set_vehicle_before_finish_line.is_some(),
             set_vehicle_random_pos.is_some(),
+            set_vehicle_back_to_track.is_some(),
+            set_vehicle_to_pitstop.is_some(),
             set_vehicle_at_start_pos.is_some(),
             get_number_of_start_pos.is_some(),
             read_vehicle_ghost_mode_state.is_some(),
@@ -229,6 +248,8 @@ impl NativeApi {
             set_vehicle_before_point,
             set_vehicle_before_finish_line,
             set_vehicle_random_pos,
+            set_vehicle_back_to_track,
+            set_vehicle_to_pitstop,
             set_vehicle_at_start_pos,
             get_number_of_start_pos,
             read_vehicle_ghost_mode_state,

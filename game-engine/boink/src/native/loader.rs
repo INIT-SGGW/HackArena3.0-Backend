@@ -36,6 +36,10 @@ pub type LegacySetVehicleBeforeFinishLineFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
 /// Legacy counterpart of vehicle repositioning to a random point.
 pub type LegacySetVehicleRandomPosFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
+/// Legacy counterpart of vehicle repositioning to closest point on track.
+pub type LegacySetVehicleBackToTrackFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
+/// Legacy counterpart of vehicle repositioning to pitstop fix zone.
+pub type LegacySetVehicleToPitstopFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
 /// Legacy counterpart of vehicle repositioning at a selected start position.
 pub type LegacySetVehicleAtStartPosFn =
     unsafe extern "C" fn(boink_sys::BoinkHandle, u64, u64) -> i32;

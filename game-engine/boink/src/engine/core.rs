@@ -729,6 +729,90 @@ impl Engine {
         }
     }
 
+    /// Sets the world-space position of a vehicle to the closest point on track.
+    #[instrument(skip(self))]
+    pub fn set_vehicle_back_to_track(&mut self, vehicle_id: u64) -> Result<()> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_vehicle_back_to_track) = api.boink_set_vehicle_back_to_track() else {
+                static WARNED_MISSING_SET_VEHICLE_BACK_TO_TRACK: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_SET_VEHICLE_BACK_TO_TRACK.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_set_vehicle_back_to_track symbol not found in native library; closest-track updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+            tracing::debug!(
+                vehicle_id,
+                "boink_set_vehicle_back_to_track (legacy dynamic symbol)"
+            );
+            let code = unsafe { set_vehicle_back_to_track(self.handle, vehicle_id) };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(
+                code,
+                "boink_set_vehicle_back_to_track",
+            ));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(vehicle_id, "boink_set_vehicle_back_to_track");
+            let code = unsafe { sys::boink_set_vehicle_back_to_track(self.handle, vehicle_id) };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(
+                    code,
+                    "boink_set_vehicle_back_to_track",
+                ))
+            }
+        }
+    }
+
+    /// Sets the world-space position of a vehicle to the pitstop fix zone.
+    #[instrument(skip(self))]
+    pub fn set_vehicle_to_pitstop(&mut self, vehicle_id: u64) -> Result<()> {
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance()
+                .map_err(|err| Error::Internal(format!("native api unavailable: {err}")))?;
+            let Some(set_vehicle_to_pitstop) = api.boink_set_vehicle_to_pitstop() else {
+                static WARNED_MISSING_SET_VEHICLE_TO_PITSTOP: OnceLock<()> = OnceLock::new();
+                if WARNED_MISSING_SET_VEHICLE_TO_PITSTOP.set(()).is_ok() {
+                    tracing::warn!(
+                        "boink_set_vehicle_to_pitstop symbol not found in native library; pitstop updates are ignored"
+                    );
+                }
+                return Ok(());
+            };
+            tracing::debug!(
+                vehicle_id,
+                "boink_set_vehicle_to_pitstop (legacy dynamic symbol)"
+            );
+            let code = unsafe { set_vehicle_to_pitstop(self.handle, vehicle_id) };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(code, "boink_set_vehicle_to_pitstop"));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(vehicle_id, "boink_set_vehicle_to_pitstop");
+            let code = unsafe { sys::boink_set_vehicle_to_pitstop(self.handle, vehicle_id) };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(code, "boink_set_vehicle_to_pitstop"))
+            }
+        }
+    }
+
     /// Sets the world-space position of a vehicle at a selected starting position.
     #[instrument(skip(self))]
     pub fn set_vehicle_at_start_pos(&mut self, vehicle_id: u64, position_index: u64) -> Result<()> {
