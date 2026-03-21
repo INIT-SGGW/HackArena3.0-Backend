@@ -984,7 +984,7 @@ impl Engine {
                 return Ok(VehiclePitstopState::default());
             };
 
-            let mut raw_zone: std::os::raw::c_int = 0;
+            let mut raw_zone = sys::BoinkPitstopZone::BOINK_PITSTOP_ZONE_NONE;
             let mut wheels_num: i32 = 0;
             tracing::debug!(
                 vehicle_id,
@@ -994,7 +994,7 @@ impl Engine {
                 get_vehicle_pitstop_zone(
                     self.handle,
                     vehicle_id,
-                    (&mut raw_zone as *mut std::os::raw::c_int).cast::<sys::BoinkPitstopZone>(),
+                    &mut raw_zone as *mut _,
                     &mut wheels_num as *mut _,
                 )
             };
@@ -1009,14 +1009,14 @@ impl Engine {
 
         #[cfg(not(feature = "legacy-native-lib"))]
         {
-            let mut raw_zone: std::os::raw::c_int = 0;
+            let mut raw_zone = sys::BoinkPitstopZone::BOINK_PITSTOP_ZONE_NONE;
             let mut wheels_num: i32 = 0;
             tracing::debug!(vehicle_id, "boink_get_vehicle_pitstop_zone");
             let code = unsafe {
                 sys::boink_get_vehicle_pitstop_zone(
                     self.handle,
                     vehicle_id,
-                    (&mut raw_zone as *mut std::os::raw::c_int).cast::<sys::BoinkPitstopZone>(),
+                    &mut raw_zone as *mut _,
                     &mut wheels_num as *mut _,
                 )
             };

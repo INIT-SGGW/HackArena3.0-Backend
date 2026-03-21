@@ -43,6 +43,29 @@ impl Gear {
     }
 }
 
+/// Tyre compound currently equipped on the vehicle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TyreType {
+    /// Soft compound tyre.
+    Soft,
+    /// Hard compound tyre.
+    Hard,
+    /// Wet compound tyre.
+    Wet,
+}
+
+impl TryFrom<sys::BoinkTyreType> for TyreType {
+    type Error = Error;
+
+    fn try_from(value: sys::BoinkTyreType) -> Result<Self> {
+        match value {
+            sys::BoinkTyreType::BOINK_TYRE_TYPE_SOFT => Ok(Self::Soft),
+            sys::BoinkTyreType::BOINK_TYRE_TYPE_HARD => Ok(Self::Hard),
+            sys::BoinkTyreType::BOINK_TYRE_TYPE_WET => Ok(Self::Wet),
+        }
+    }
+}
+
 /// State of a vehicle at a single simulation instant.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VehicleState {
@@ -64,10 +87,18 @@ pub struct VehicleState {
     pub brake_applied: f32,
     /// World-space wheel positions: [FL, FR, RL, RR].
     pub wheel_position: [Vec3; 4],
-    /// Wheel angular speeds in RPM: [FL, FR, RL, RR].
+    /// Wheel angular speeds in radians per second: [FL, FR, RL, RR].
     pub wheel_speeds: [f32; 4],
     /// Front-wheel steering orientation in radians: [FL, FR].
     pub front_wheel_orientation_rad: [f32; 2],
+    /// Current tyre health in range `[0.0, 1.0]`: [FL, FR, RL, RR].
+    pub tyre_health: [f32; 4],
+    /// Current tyre temperature in Celsius: [FL, FR, RL, RR].
+    pub tyre_temperature_celsius: [f32; 4],
+    /// Currently equipped tyre compound.
+    pub tyre_type: TyreType,
+    /// True when all four wheels are on ground.
+    pub are_all_wheels_on_ground: bool,
     /// Runtime ghost mode state for this vehicle.
     pub ghost_mode_runtime: GhostModeRuntimeState,
     /// Runtime pitstop-zone state for this vehicle.
@@ -90,10 +121,34 @@ impl TryFrom<sys::BoinkVehicleState> for VehicleState {
             wheel_position: raw.wheel_position.map(Into::into),
             wheel_speeds: raw.wheel_speeds,
             front_wheel_orientation_rad: raw.front_wheel_orientation_rad,
+            tyre_health: raw.tyre_health,
+            tyre_temperature_celsius: read_tyre_temperature_celsius_compat(&raw),
+            tyre_type: TyreType::try_from(raw.tyre_type)?,
+            are_all_wheels_on_ground: raw.are_all_wheels_on_ground,
             ghost_mode_runtime: GhostModeRuntimeState::default(),
             pitstop_state: VehiclePitstopState::default(),
         })
     }
+}
+
+impl VehicleState {
+    /// Backward-compat alias kept for integrations that still use the 0.16.0 typo.
+    #[must_use]
+    pub fn tyre_temprature_celsius(&self) -> [f32; 4] {
+        self.tyre_temperature_celsius
+    }
+}
+
+fn read_tyre_temperature_celsius_compat(raw: &sys::BoinkVehicleState) -> [f32; 4] {
+    // ABI-compatible with native 0.16.0 where this field name had a typo
+    // (`tyre_temprature_celsius`). Layout is the same, so we read by offset.
+    let base_ptr = core::ptr::addr_of!(raw.tyre_health).cast::<u8>();
+    let temp_ptr = unsafe {
+        base_ptr
+            .add(core::mem::size_of::<[f32; 4]>())
+            .cast::<[f32; 4]>()
+    };
+    unsafe { *temp_ptr }
 }
 
 /// High-level pitstop zone marker.

@@ -9,8 +9,50 @@ use crate::{
     model::math::Vec3,
 };
 
-/// One static centerline sample in local track frame.
+/// Ground surface type used by side segments around the centerline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroundType {
+    Asphalt,
+    Grass,
+    Sand,
+    Gravel,
+    Wall,
+    Kerb,
+}
+
+impl From<sys::BoinkGroundType> for GroundType {
+    fn from(value: sys::BoinkGroundType) -> Self {
+        match value {
+            sys::BoinkGroundType::BOINK_GROUND_TYPE_ASPHALT => Self::Asphalt,
+            sys::BoinkGroundType::BOINK_GROUND_TYPE_GRASS => Self::Grass,
+            sys::BoinkGroundType::BOINK_GROUND_TYPE_SAND => Self::Sand,
+            sys::BoinkGroundType::BOINK_GROUND_TYPE_GRAVEL => Self::Gravel,
+            sys::BoinkGroundType::BOINK_GROUND_TYPE_WALL => Self::Wall,
+            sys::BoinkGroundType::BOINK_GROUND_TYPE_KERB => Self::Kerb,
+        }
+    }
+}
+
+/// Width segment with associated ground type.
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroundWidth {
+    /// Segment width in meters.
+    pub width: f32,
+    /// Ground type for this side segment.
+    pub ground_type: GroundType,
+}
+
+impl From<sys::BoinkGroundWidth> for GroundWidth {
+    fn from(raw: sys::BoinkGroundWidth) -> Self {
+        Self {
+            width: raw.width,
+            ground_type: raw.r#type.into(),
+        }
+    }
+}
+
+/// One static centerline sample in local track frame.
+#[derive(Clone, Debug, PartialEq)]
 pub struct CenterlineSample {
     /// Arc-length position along the lap in meters.
     pub s_m: f64,
@@ -26,6 +68,14 @@ pub struct CenterlineSample {
     pub left_width_m: f32,
     /// Drivable half-width to track-right from centerline in meters.
     pub right_width_m: f32,
+    /// Drivable half-width to wall-left from centerline in meters.
+    pub max_left_width_m: f32,
+    /// Ground segments on track-left side.
+    pub left_grounds: Vec<GroundWidth>,
+    /// Drivable half-width to wall-right from centerline in meters.
+    pub max_right_width_m: f32,
+    /// Ground segments on track-right side.
+    pub right_grounds: Vec<GroundWidth>,
     /// Signed centerline curvature in 1/m.
     pub curvature_1pm: f32,
     /// Longitudinal slope angle in radians.
@@ -34,9 +84,9 @@ pub struct CenterlineSample {
     pub bank_rad: f32,
 }
 
-impl From<sys::BoinkCenterlineSample> for CenterlineSample {
-    fn from(raw: sys::BoinkCenterlineSample) -> Self {
-        Self {
+impl CenterlineSample {
+    unsafe fn try_from_ffi(raw: sys::BoinkCenterlineSample) -> Result<Self> {
+        Ok(Self {
             s_m: raw.s_m,
             position: raw.position.into(),
             tangent: raw.tangent.into(),
@@ -44,10 +94,26 @@ impl From<sys::BoinkCenterlineSample> for CenterlineSample {
             right: raw.right.into(),
             left_width_m: raw.left_width_m,
             right_width_m: raw.right_width_m,
+            max_left_width_m: raw.max_left_width_m,
+            left_grounds: unsafe {
+                collect_ground_widths(
+                    raw.left_grounds.cast_const(),
+                    raw.left_grounds_count,
+                    "centerline_samples.left_grounds",
+                )?
+            },
+            max_right_width_m: raw.max_right_width_m,
+            right_grounds: unsafe {
+                collect_ground_widths(
+                    raw.right_grounds.cast_const(),
+                    raw.right_grounds_count,
+                    "centerline_samples.right_grounds",
+                )?
+            },
             curvature_1pm: raw.curvature_1pm,
             grade_rad: raw.grade_rad,
             bank_rad: raw.bank_rad,
-        }
+        })
     }
 }
 
@@ -162,9 +228,28 @@ unsafe fn collect_centerline_samples(
     }
 
     let raw_samples = unsafe { slice::from_raw_parts(ptr, count) };
-    Ok(raw_samples
+    raw_samples
         .iter()
         .copied()
-        .map(CenterlineSample::from)
-        .collect())
+        .map(|raw| unsafe { CenterlineSample::try_from_ffi(raw) })
+        .collect()
+}
+
+unsafe fn collect_ground_widths(
+    ptr: *const sys::BoinkGroundWidth,
+    count: u32,
+    field_name: &'static str,
+) -> Result<Vec<GroundWidth>> {
+    let count = count as usize;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if ptr.is_null() {
+        return Err(Error::Internal(format!(
+            "boink_get_track_data returned null {field_name}"
+        )));
+    }
+
+    let raw_grounds = unsafe { slice::from_raw_parts(ptr, count) };
+    Ok(raw_grounds.iter().copied().map(GroundWidth::from).collect())
 }

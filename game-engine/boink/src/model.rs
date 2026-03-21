@@ -18,8 +18,8 @@ pub use ghost::{
 };
 pub use math::{Quaternion, Vec3};
 pub use state::{
-    Gear, PitstopZone, PitstopZoneMask, RaceBestLap, VehicleBestLap, VehiclePitstopState,
+    Gear, PitstopZone, PitstopZoneMask, RaceBestLap, TyreType, VehicleBestLap, VehiclePitstopState,
     VehicleRaceMetrics, VehicleState,
 };
-pub use track::{CenterlineSample, PitstopData, TrackData};
+pub use track::{CenterlineSample, GroundType, GroundWidth, PitstopData, TrackData};
 pub use weather::WeatherParams;
