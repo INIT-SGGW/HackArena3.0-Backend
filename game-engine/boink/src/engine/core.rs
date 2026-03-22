@@ -97,6 +97,17 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Initializes native Boink runtime for operations that require initialized engine state
+    /// (for example loading vehicle meshes).
+    ///
+    /// Calling this function multiple times is safe as long as `debug_drawer_enabled`
+    /// remains consistent across calls.
+    pub fn initialize_runtime(debug_drawer_enabled: bool) -> Result<()> {
+        ensure_c_api_compatible()?;
+        ensure_initialized(debug_drawer_enabled)?;
+        Ok(())
+    }
+
     /// Creates and initializes a new Boink race instance.
     ///
     /// # Errors
@@ -111,8 +122,7 @@ impl Engine {
         debug_drawer_enabled: bool,
     ) -> Result<Self> {
         tracing::debug!(debug_drawer_enabled, "boink debug drawer setting");
-        ensure_c_api_compatible()?;
-        let init = ensure_initialized(debug_drawer_enabled)?;
+        Self::initialize_runtime(debug_drawer_enabled)?;
         Self::validate_vehicle_model(&vehicle_model)?;
 
         let ffi_model = Self::to_ffi_vehicle_model(&vehicle_model);
@@ -133,7 +143,7 @@ impl Engine {
         Ok(Self {
             handle,
             vehicle_model: ffi_model,
-            debug_drawer_enabled: init.debug_drawer_enabled,
+            debug_drawer_enabled,
             _mesh_guard: vehicle_model.mesh,
             _nosend: PhantomData,
         })

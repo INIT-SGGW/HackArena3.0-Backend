@@ -1837,6 +1837,9 @@ fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError>
         "initializing engine world"
     );
 
+    // Boink requires init before creating vehicle meshes.
+    Engine::initialize_runtime(cfg.debug_drawer_enabled).map_err(EngineWorkerError::Engine)?;
+
     let mesh_glb = cfg.bolids_dir.join("F1_CAR_06.glb");
     let mesh = VehicleMesh::load(&mesh_glb).map_err(EngineWorkerError::Engine)?;
 
