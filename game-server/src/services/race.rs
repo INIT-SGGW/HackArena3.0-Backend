@@ -131,10 +131,21 @@ impl RaceService for RaceServiceImpl {
             .spawn_sandbox_car(sandbox_id.clone())
             .await
             .map_err(map_worker_err)?;
-        #[cfg(feature = "local")]
-        if let Err(status) = self
-            .apply_local_spawn_mode(&sandbox_id, target.clone(), engine_car_id)
-            .await
+        let spawn_apply_result = {
+            #[cfg(feature = "local")]
+            {
+                self.apply_local_spawn_mode(&sandbox_id, target.clone(), engine_car_id)
+                    .await
+            }
+            #[cfg(not(feature = "local"))]
+            {
+                self.engine
+                    .set_car_before_finish_line_in(target.clone(), engine_car_id)
+                    .await
+                    .map_err(map_worker_err)
+            }
+        };
+        if let Err(status) = spawn_apply_result
         {
             if let Err(err) = engine.despawn_car_in(target.clone(), engine_car_id).await {
                 tracing::warn!(
