@@ -43,7 +43,7 @@ use self::mappers::{
     resolve_runtime_time_of_day_preset, runtime_time_of_day_preset_to_proto,
     runtime_weather_now_from_local, utc_now_timestamp, weather_params_from_local,
 };
-use self::validation::{ensure_supported_spawn_mode, validate_map_id_track_exists};
+use self::validation::validate_map_id_track_exists;
 
 #[derive(Clone)]
 pub struct LocalSandboxAdminServiceImpl {
@@ -418,7 +418,6 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
         }
 
         let spawn_mode = local_spawn_mode_from_proto_value(request.spawn_mode)?;
-        ensure_supported_spawn_mode(spawn_mode)?;
 
         let revision = self
             .store
@@ -452,7 +451,6 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
                     ))
                 })?;
             validate_map_id_track_exists(&self.tracks_dir, &sandbox.config.map_id).await?;
-            ensure_supported_spawn_mode(sandbox.config.spawn_mode)?;
 
             let runtime_before = self.engine.runtime_state().await.map_err(map_worker_err)?;
             if runtime_before.revision != request.expected_revision {

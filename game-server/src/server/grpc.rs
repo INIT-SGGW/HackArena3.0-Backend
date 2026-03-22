@@ -151,6 +151,15 @@ pub async fn serve_grpc(
         cfg.simulation_hz,
         shutdown_rx.resubscribe(),
     );
+    #[cfg(feature = "local")]
+    let local_sandbox_store =
+        LocalSandboxConfigStore::load_or_create(cfg.local_sandbox_store_path.clone()).await?;
+    #[cfg(feature = "local")]
+    tracing::info!(
+        path = %local_sandbox_store.path().display(),
+        max_active_sandboxes = cfg.local_max_active_sandboxes,
+        "local sandbox config store ready"
+    );
     let race_impl = RaceServiceImpl::new(
         engine.clone(),
         cfg.simulation_hz,
@@ -160,6 +169,8 @@ pub async fn serve_grpc(
         cfg.jwt_issuers.clone(),
         race_runtime_store.clone(),
         frame_hub.clone(),
+        #[cfg(feature = "local")]
+        local_sandbox_store.clone(),
     );
     let race_participant_impl = RaceParticipantServiceImpl::new(
         engine.clone(),
@@ -232,15 +243,8 @@ pub async fn serve_grpc(
     let weather_query_impl = WeatherQueryServiceImpl::default();
     #[cfg(feature = "local")]
     let local_sandbox_admin_impl = {
-        let store =
-            LocalSandboxConfigStore::load_or_create(cfg.local_sandbox_store_path.clone()).await?;
-        tracing::info!(
-            path = %store.path().display(),
-            max_active_sandboxes = cfg.local_max_active_sandboxes,
-            "local sandbox config store ready"
-        );
         LocalSandboxAdminServiceImpl::new(
-            store,
+            local_sandbox_store,
             local_sandbox_engine,
             race_runtime_store.clone(),
             cfg.local_max_active_sandboxes,

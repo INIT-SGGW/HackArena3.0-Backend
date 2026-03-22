@@ -325,6 +325,129 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Repositions a given vehicle to the closest point on track in target runtime world.
+    pub async fn set_car_back_to_track_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetCarBackToTrack {
+                target,
+                car_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Repositions a given vehicle to the start-line position in target runtime world.
+    pub async fn set_car_before_finish_line_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetCarBeforeFinishLine {
+                target,
+                car_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Repositions a given vehicle to a random point on track in target runtime world.
+    pub async fn set_car_random_on_track_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetCarRandomOnTrack {
+                target,
+                car_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Repositions a given vehicle at selected start position in target runtime world.
+    pub async fn set_car_at_start_pos_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+        position_index: u64,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetCarAtStartPos {
+                target,
+                car_id,
+                position_index,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Repositions a given vehicle to pitstop fix zone in target runtime world.
+    pub async fn set_car_to_pitstop_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetCarToPitstop {
+                target,
+                car_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Returns number of available start positions in target runtime world.
+    pub async fn get_number_of_start_pos_in(
+        &self,
+        target: EngineCommandTarget,
+    ) -> Result<u64, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::GetNumberOfStartPos { target, reply_tx })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Reads static track geometry from the official-race engine world.
     pub async fn track_data(&self) -> Result<TrackData, EngineWorkerError> {
         self.track_data_in(EngineCommandTarget::OfficialRace).await
@@ -1012,6 +1135,123 @@ async fn handle_command(
                 |slot| {
                     slot.engine
                         .read_vehicle_race_metrics(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetCarBackToTrack {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_vehicle_back_to_track(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetCarBeforeFinishLine {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_vehicle_before_finish_line(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetCarRandomOnTrack {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_vehicle_random_pos(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetCarAtStartPos {
+            target,
+            car_id,
+            position_index,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_vehicle_at_start_pos(car_id, position_index)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetCarToPitstop {
+            target,
+            car_id,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_vehicle_to_pitstop(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::GetNumberOfStartPos { target, reply_tx } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .get_number_of_start_pos()
                         .map_err(EngineWorkerError::Engine)
                 },
             )
@@ -1765,8 +2005,8 @@ fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError>
             y: -1.0,
             z: 0.0,
         },
-        wheel_radius: 0.36,
-        suspension_rest_length: 0.52,
+        wheel_radius: 0.38,
+        suspension_rest_length: 0.01,
         mass: 800.0,
         max_steer_angle_deg: 30.0,
     };
