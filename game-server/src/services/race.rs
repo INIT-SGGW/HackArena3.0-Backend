@@ -5,12 +5,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use proto::race::v1::{
+    BackToTrackRequest, BackToTrackResponse, EmergencyPitstopRequest, EmergencyPitstopResponse,
     FrontendSpectatorDebugInfo, FrontendSpectatorEvent, FrontendSpectatorSnapshot,
-    GetFrontendSpectatorRequest, QuickJoinDevRequest, QuickJoinDevResponse, SetControlsDevRequest,
-    SetControlsResponse, SpectatorView, StreamClampReason, StreamSettings, ViewDowngradeReason,
-    frontend_spectator_event::Payload as FrontendSpectatorPayload,
+    GetFrontendSpectatorRequest, QuickJoinDevRequest, QuickJoinDevResponse, RequestPitstopRequest,
+    RequestPitstopResponse, SetControlsDevRequest, SetControlsResponse, SetNextPitTireTypeRequest,
+    SetNextPitTireTypeResponse, SpectatorView, StreamClampReason, StreamSettings,
+    ViewDowngradeReason, frontend_spectator_event::Payload as FrontendSpectatorPayload,
     get_frontend_spectator_request::Target as FrontendSpectatorTarget,
     race_service_server::RaceService,
+};
+#[cfg(feature = "official")]
+use proto::race::v1::{
+    ParticipantCommandRejectReason, ParticipantCommandStatus, TireType as ProtoTireType,
 };
 #[cfg(feature = "local")]
 use rand::Rng;
@@ -31,7 +37,10 @@ use crate::runtime::engine_worker::{
 pub mod frame_hub;
 pub mod runtime_store;
 pub use frame_hub::{FrameHub, RuntimeFrame, spawn_frame_hub};
-pub use runtime_store::{RaceRuntimeStore, RuntimeCarIdentity};
+pub use runtime_store::{
+    RaceRuntimeStore, RuntimeCarIdentity, RuntimePitEntrySource, RuntimePitHistoryEntry,
+    RuntimePitStateSnapshot, RuntimePitTireType,
+};
 
 use super::error_map::map_worker_err;
 use super::mappers::{engine_gear_shift_to_proto, frontend_full_state, proto_dev_to_controls};
@@ -150,6 +159,171 @@ impl RaceService for RaceServiceImpl {
         };
 
         Ok(Response::new(resp))
+    }
+
+    async fn back_to_track(
+        &self,
+        request: Request<BackToTrackRequest>,
+    ) -> Result<Response<BackToTrackResponse>, Status> {
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "BackToTrack is supported only in official backend mode",
+            ));
+        }
+        #[cfg(feature = "official")]
+        {
+            let auth = parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            let (public_car_id, engine_car_id) = self.resolve_team_official_car(&auth).await?;
+            let frame = self.frame_hub.latest();
+            let applies_from_tick = frame.tick;
+            let response = match self
+                .engine
+                .set_car_back_to_track_in(EngineCommandTarget::OfficialRace, engine_car_id)
+                .await
+            {
+                Ok(()) => {
+                    self.runtime_store
+                        .mark_back_to_track_applied(public_car_id, frame.server_time_ms);
+                    BackToTrackResponse {
+                        status: ParticipantCommandStatus::Accepted as i32,
+                        applies_from_tick,
+                        rejected_reason: ParticipantCommandRejectReason::Unspecified as i32,
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        engine_car_id,
+                        error = %err,
+                        "BackToTrack command rejected"
+                    );
+                    BackToTrackResponse {
+                        status: ParticipantCommandStatus::Rejected as i32,
+                        applies_from_tick,
+                        rejected_reason: ParticipantCommandRejectReason::NotAllowed as i32,
+                    }
+                }
+            };
+            Ok(Response::new(response))
+        }
+    }
+
+    async fn request_pitstop(
+        &self,
+        request: Request<RequestPitstopRequest>,
+    ) -> Result<Response<RequestPitstopResponse>, Status> {
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "RequestPitstop is supported only in official backend mode",
+            ));
+        }
+        #[cfg(feature = "official")]
+        {
+            let auth = parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            let req = request.into_inner();
+            let (public_car_id, _engine_car_id) = self.resolve_team_official_car(&auth).await?;
+            self.runtime_store
+                .set_pit_request_active(public_car_id, req.request_pitstop);
+            let response = RequestPitstopResponse {
+                status: ParticipantCommandStatus::Accepted as i32,
+                applies_from_tick: self.frame_hub.latest().tick,
+                rejected_reason: ParticipantCommandRejectReason::Unspecified as i32,
+            };
+            Ok(Response::new(response))
+        }
+    }
+
+    async fn emergency_pitstop(
+        &self,
+        request: Request<EmergencyPitstopRequest>,
+    ) -> Result<Response<EmergencyPitstopResponse>, Status> {
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "EmergencyPitstop is supported only in official backend mode",
+            ));
+        }
+        #[cfg(feature = "official")]
+        {
+            let auth = parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            let (public_car_id, engine_car_id) = self.resolve_team_official_car(&auth).await?;
+            let frame = self.frame_hub.latest();
+            let applies_from_tick = frame.tick;
+            let response = match self
+                .engine
+                .set_car_to_pitstop_in(EngineCommandTarget::OfficialRace, engine_car_id)
+                .await
+            {
+                Ok(()) => {
+                    self.runtime_store
+                        .mark_emergency_pitstop_requested(public_car_id, frame.server_time_ms);
+                    EmergencyPitstopResponse {
+                        status: ParticipantCommandStatus::Accepted as i32,
+                        applies_from_tick,
+                        rejected_reason: ParticipantCommandRejectReason::Unspecified as i32,
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        public_car_id,
+                        engine_car_id,
+                        error = %err,
+                        "EmergencyPitstop command rejected"
+                    );
+                    EmergencyPitstopResponse {
+                        status: ParticipantCommandStatus::Rejected as i32,
+                        applies_from_tick,
+                        rejected_reason: ParticipantCommandRejectReason::NotAllowed as i32,
+                    }
+                }
+            };
+            Ok(Response::new(response))
+        }
+    }
+
+    async fn set_next_pit_tire_type(
+        &self,
+        request: Request<SetNextPitTireTypeRequest>,
+    ) -> Result<Response<SetNextPitTireTypeResponse>, Status> {
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "SetNextPitTireType is supported only in official backend mode",
+            ));
+        }
+        #[cfg(feature = "official")]
+        {
+            let auth = parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            let req = request.into_inner();
+            let (public_car_id, _engine_car_id) = self.resolve_team_official_car(&auth).await?;
+            let applies_from_tick = self.frame_hub.latest().tick;
+            let response = match runtime_tire_type_from_proto(req.next_tire_type) {
+                Ok(next_tire_type) => {
+                    self.runtime_store
+                        .set_next_pit_tire_type(public_car_id, next_tire_type);
+                    SetNextPitTireTypeResponse {
+                        status: ParticipantCommandStatus::Accepted as i32,
+                        applies_from_tick,
+                        rejected_reason: ParticipantCommandRejectReason::Unspecified as i32,
+                    }
+                }
+                Err(()) => SetNextPitTireTypeResponse {
+                    status: ParticipantCommandStatus::Rejected as i32,
+                    applies_from_tick,
+                    rejected_reason: ParticipantCommandRejectReason::NotAllowed as i32,
+                },
+            };
+            Ok(Response::new(response))
+        }
     }
 
     async fn stream_frontend_spectator(
@@ -353,6 +527,52 @@ impl RaceServiceImpl {
         }
     }
 
+    #[cfg(feature = "official")]
+    async fn resolve_team_official_car(&self, auth: &str) -> Result<(u64, u64), Status> {
+        let team_id = self
+            .token_validator
+            .team_id_from_token(auth)
+            .await?
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| Status::unauthenticated("missing team_id claim"))?;
+
+        let identity_map = self.runtime_store.car_identity_map();
+        let mut matching_cars = Vec::new();
+        for identity_entry in identity_map.iter() {
+            if identity_entry.value().team_id.as_deref() != Some(team_id.as_str()) {
+                continue;
+            }
+
+            let public_car_id = *identity_entry.key();
+            let is_official = self
+                .car_targets
+                .get(&public_car_id)
+                .map(|entry| matches!(entry.value(), EngineCommandTarget::OfficialRace))
+                .unwrap_or(false);
+            if !is_official {
+                continue;
+            }
+
+            let Some(engine_car_id) = self
+                .car_engine_ids
+                .get(&public_car_id)
+                .map(|entry| *entry.value())
+            else {
+                continue;
+            };
+
+            matching_cars.push((public_car_id, engine_car_id));
+        }
+
+        match matching_cars.len() {
+            0 => Err(Status::not_found("no active official-race car for team")),
+            1 => Ok(matching_cars[0]),
+            _ => Err(Status::failed_precondition(
+                "multiple active official-race cars found for team",
+            )),
+        }
+    }
+
     fn target_for_car(&self, car_id: u64) -> Result<EngineCommandTarget, Status> {
         self.car_targets
             .get(&car_id)
@@ -480,6 +700,17 @@ fn select_quick_join_sandbox<'a>(
     Err(Status::failed_precondition(
         "sandbox_id is required when multiple sandbox sessions are active",
     ))
+}
+
+#[cfg(feature = "official")]
+fn runtime_tire_type_from_proto(raw: i32) -> Result<RuntimePitTireType, ()> {
+    let tire_type = ProtoTireType::try_from(raw).map_err(|_| ())?;
+    Ok(match tire_type {
+        ProtoTireType::Unspecified => RuntimePitTireType::Unspecified,
+        ProtoTireType::Hard => RuntimePitTireType::Hard,
+        ProtoTireType::Soft => RuntimePitTireType::Soft,
+        ProtoTireType::Wet => RuntimePitTireType::Wet,
+    })
 }
 
 fn resolve_stream_rate(
@@ -613,6 +844,7 @@ async fn run_frontend_spectator_stream(
                 entry.public_car_id,
                 entry.state,
                 entry.last_client_seq,
+                &entry.pit_state,
             ));
         }
 

@@ -4,12 +4,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use boink::model::Controls;
+use boink::model::{Controls, GearShift as EngineGearShift};
 use proto::race::v1::{
     LocalSandboxJoinRequest, LocalSandboxJoinResponse, ParticipantCommandAck,
     ParticipantCommandRejectReason, ParticipantCommandStatus, ParticipantCommandType,
     ParticipantServerEvent, ParticipantSnapshot, SpectatorView, StreamClampReason, StreamSettings,
-    ViewDowngradeReason, participant_client_message::Payload as ParticipantClientPayload,
+    TireType as ProtoTireType, ViewDowngradeReason,
+    participant_client_message::Payload as ParticipantClientPayload,
     participant_server_event::Payload as ParticipantServerPayload,
     race_participant_service_server::RaceParticipantService,
 };
@@ -33,6 +34,7 @@ use super::mappers::{
 };
 #[cfg(feature = "local")]
 use super::race::RuntimeCarIdentity;
+use super::race::runtime_store::RuntimePitTireType;
 use super::race::{FrameHub, RaceRuntimeStore};
 
 const PARTICIPANT_REQUESTED_HZ: u32 = 30;
@@ -500,6 +502,16 @@ fn participant_command_ack(
     }
 }
 
+fn runtime_tire_type_from_proto(raw: i32) -> Result<RuntimePitTireType, ()> {
+    let tire_type = ProtoTireType::try_from(raw).map_err(|_| ())?;
+    Ok(match tire_type {
+        ProtoTireType::Unspecified => RuntimePitTireType::Unspecified,
+        ProtoTireType::Hard => RuntimePitTireType::Hard,
+        ProtoTireType::Soft => RuntimePitTireType::Soft,
+        ProtoTireType::Wet => RuntimePitTireType::Wet,
+    })
+}
+
 async fn run_participant_stream(
     engine: EngineClient,
     frame_hub: FrameHub,
@@ -662,6 +674,14 @@ async fn run_participant_stream(
                         };
 
                         let (client_seq, controls) = controls;
+                        let frame = frame_hub.latest();
+                        let pit_state = runtime_store
+                            .pit_state_snapshot(self_public_car_id, frame.server_time_ms);
+                        let controls = if pit_state.emergency_lock_remaining_ms > 0 {
+                            Controls::new(0.0, 1.0, 0.0, EngineGearShift::None)
+                        } else {
+                            controls
+                        };
                         let accepted = match engine
                             .set_controls_in(self_target.clone(), self_engine_car_id, controls)
                             .await
@@ -683,7 +703,7 @@ async fn run_participant_stream(
                         runtime_store
                             .last_client_seq()
                             .insert(self_public_car_id, client_seq);
-                        let applies_from_tick = frame_hub.latest().tick;
+                        let applies_from_tick = frame.tick;
                         let ack = participant_ack(
                             client_seq,
                             controls,
@@ -724,18 +744,25 @@ async fn run_participant_stream(
                             break;
                         }
 
-                        let applies_from_tick = frame_hub.latest().tick;
+                        let frame = frame_hub.latest();
+                        let applies_from_tick = frame.tick;
                         let ack = match engine
                             .set_car_back_to_track_in(self_target.clone(), self_engine_car_id)
                             .await
                         {
-                            Ok(()) => participant_command_ack(
-                                command.client_seq,
-                                ParticipantCommandType::BackToTrack,
-                                ParticipantCommandStatus::Accepted,
-                                applies_from_tick,
-                                ParticipantCommandRejectReason::Unspecified,
-                            ),
+                            Ok(()) => {
+                                runtime_store.mark_back_to_track_applied(
+                                    self_public_car_id,
+                                    frame.server_time_ms,
+                                );
+                                participant_command_ack(
+                                    command.client_seq,
+                                    ParticipantCommandType::BackToTrack,
+                                    ParticipantCommandStatus::Accepted,
+                                    applies_from_tick,
+                                    ParticipantCommandRejectReason::Unspecified,
+                                )
+                            }
                             Err(err) => {
                                 tracing::warn!(
                                     stream_id,
@@ -773,7 +800,81 @@ async fn run_participant_stream(
                             break;
                         }
                     }
-                    ParticipantClientPayload::ToPitstop(command) => {
+                    ParticipantClientPayload::EmergencyPitstop(command) => {
+                        if !initialized {
+                            emit_participant_terminal_error(
+                                &tx,
+                                Status::invalid_argument("first participant message must be init"),
+                            );
+                            cleanup_participant_car(
+                                "command-before-init",
+                                &engine,
+                                runtime_store.as_ref(),
+                                self_public_car_id,
+                                &self_target,
+                                self_engine_car_id,
+                            )
+                            .await;
+                            break;
+                        }
+
+                        let frame = frame_hub.latest();
+                        let applies_from_tick = frame.tick;
+                        let ack = match engine
+                            .set_car_to_pitstop_in(self_target.clone(), self_engine_car_id)
+                            .await
+                        {
+                            Ok(()) => {
+                                runtime_store.mark_emergency_pitstop_requested(
+                                    self_public_car_id,
+                                    frame.server_time_ms,
+                                );
+                                participant_command_ack(
+                                    command.client_seq,
+                                    ParticipantCommandType::EmergencyPitstop,
+                                    ParticipantCommandStatus::Accepted,
+                                    applies_from_tick,
+                                    ParticipantCommandRejectReason::Unspecified,
+                                )
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    stream_id,
+                                    car_id = self_public_car_id,
+                                    target = ?self_target,
+                                    error = %err,
+                                    "participant emergency_pitstop command rejected"
+                                );
+                                participant_command_ack(
+                                    command.client_seq,
+                                    ParticipantCommandType::EmergencyPitstop,
+                                    ParticipantCommandStatus::Rejected,
+                                    applies_from_tick,
+                                    ParticipantCommandRejectReason::NotAllowed,
+                                )
+                            }
+                        };
+
+                        if !send_participant_event(
+                            &tx,
+                            &mut server_seq,
+                            ParticipantServerPayload::CommandAck(ack),
+                        )
+                        .await
+                        {
+                            cleanup_participant_car(
+                                "command-ack-send-failed",
+                                &engine,
+                                runtime_store.as_ref(),
+                                self_public_car_id,
+                                &self_target,
+                                self_engine_car_id,
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                    ParticipantClientPayload::SetNextPitTireType(command) => {
                         if !initialized {
                             emit_participant_terminal_error(
                                 &tx,
@@ -792,33 +893,25 @@ async fn run_participant_stream(
                         }
 
                         let applies_from_tick = frame_hub.latest().tick;
-                        let ack = match engine
-                            .set_car_to_pitstop_in(self_target.clone(), self_engine_car_id)
-                            .await
-                        {
-                            Ok(()) => participant_command_ack(
-                                command.client_seq,
-                                ParticipantCommandType::ToPitstop,
-                                ParticipantCommandStatus::Accepted,
-                                applies_from_tick,
-                                ParticipantCommandRejectReason::Unspecified,
-                            ),
-                            Err(err) => {
-                                tracing::warn!(
-                                    stream_id,
-                                    car_id = self_public_car_id,
-                                    target = ?self_target,
-                                    error = %err,
-                                    "participant to_pitstop command rejected"
-                                );
+                        let ack = match runtime_tire_type_from_proto(command.next_tire_type) {
+                            Ok(next_tire_type) => {
+                                runtime_store
+                                    .set_next_pit_tire_type(self_public_car_id, next_tire_type);
                                 participant_command_ack(
                                     command.client_seq,
-                                    ParticipantCommandType::ToPitstop,
-                                    ParticipantCommandStatus::Rejected,
+                                    ParticipantCommandType::SetNextPitTireType,
+                                    ParticipantCommandStatus::Accepted,
                                     applies_from_tick,
-                                    ParticipantCommandRejectReason::NotAllowed,
+                                    ParticipantCommandRejectReason::Unspecified,
                                 )
                             }
+                            Err(()) => participant_command_ack(
+                                command.client_seq,
+                                ParticipantCommandType::SetNextPitTireType,
+                                ParticipantCommandStatus::Rejected,
+                                applies_from_tick,
+                                ParticipantCommandRejectReason::NotAllowed,
+                            ),
                         };
 
                         if !send_participant_event(
@@ -916,6 +1009,7 @@ async fn run_participant_stream(
                         self_public_car_id,
                         self_car.state,
                         self_car.last_client_seq,
+                        &self_car.pit_state,
                     )),
                     opponents,
                 };

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use boink::error::Error as BoinkError;
-use boink::model::{VehicleRaceMetrics, VehicleState};
+use boink::model::{Controls, Gear, GearShift, VehicleRaceMetrics, VehicleState};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior};
@@ -12,7 +12,7 @@ use crate::runtime::engine_worker::{
     EngineActivityKind, EngineClient, EngineCommandTarget, EngineRuntimeState, EngineWorkerError,
 };
 
-use super::runtime_store::{RaceRuntimeStore, RuntimeCarIdentity};
+use super::runtime_store::{RaceRuntimeStore, RuntimeCarIdentity, RuntimePitStateSnapshot};
 
 #[derive(Clone, Debug)]
 pub struct RuntimeCarFrame {
@@ -23,6 +23,7 @@ pub struct RuntimeCarFrame {
     pub race_metrics: Option<VehicleRaceMetrics>,
     pub last_client_seq: u64,
     pub identity: Option<RuntimeCarIdentity>,
+    pub pit_state: RuntimePitStateSnapshot,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -238,7 +239,7 @@ async fn collect_frame(
             continue;
         };
 
-        let state = match engine
+        let mut state = match engine
             .read_car_state_in(target.clone(), engine_car_id)
             .await
         {
@@ -292,6 +293,40 @@ async fn collect_frame(
             }
         };
 
+        let pit_state = runtime_store.update_pit_state_from_runtime(
+            public_car_id,
+            &state,
+            race_metrics.as_ref(),
+            frame.server_time_ms,
+        );
+
+        if pit_state.force_idle {
+            let brake_hold = pit_state.emergency_lock_remaining_ms > 0;
+            let idle_controls = Controls::new(
+                0.0,
+                if brake_hold { 1.0 } else { 0.0 },
+                0.0,
+                GearShift::None,
+            );
+            if let Err(err) = engine
+                .set_controls_in(target.clone(), engine_car_id, idle_controls)
+                .await
+            {
+                tracing::warn!(
+                    public_car_id,
+                    engine_car_id,
+                    target = ?target,
+                    error = %err,
+                    "frame hub: failed to enforce idle controls after teleport/emergency"
+                );
+            }
+            state.speed = 0.0;
+            state.engine_rpm = 0.0;
+            state.gear = Gear::Neutral;
+            state.throttle_applied = 0.0;
+            state.brake_applied = if brake_hold { 1.0 } else { 0.0 };
+        }
+
         frame.cars.insert(
             public_car_id,
             RuntimeCarFrame {
@@ -302,6 +337,7 @@ async fn collect_frame(
                 race_metrics,
                 last_client_seq: runtime_store.car_last_client_seq(public_car_id),
                 identity: runtime_store.car_identity(public_car_id),
+                pit_state,
             },
         );
     }

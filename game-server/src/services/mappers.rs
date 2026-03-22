@@ -12,11 +12,17 @@ use proto::race::v1::{
     GearShift as ProtoGearShift, GhostModeBlocker as ProtoGhostModeBlocker,
     GhostModePhase as ProtoGhostModePhase, GhostModeState, GroundType as ProtoGroundType,
     GroundWidth as ProtoGroundWidth, ParticipantOpponentState, ParticipantSelfState,
-    PitstopData as ProtoPitstopData, Quaternion, SetControlsDevRequest, TireTemperaturePerWheel,
-    TireType as ProtoTireType, TireWearPerWheel, TrackData as ProtoTrackData, Vector3, WheelSpeeds,
+    PitEntrySource as ProtoPitEntrySource, PitHistoryEntry as ProtoPitHistoryEntry,
+    PitHistoryState as ProtoPitHistoryState, PitRuntimeState, PitstopData as ProtoPitstopData,
+    Quaternion, SetControlsDevRequest, TireTemperaturePerWheel, TireType as ProtoTireType,
+    TireWearPerWheel, TrackData as ProtoTrackData, Vector3, WheelSpeeds,
     participant_client_message::Payload as ParticipantClientPayload,
 };
 use tonic::Status;
+
+use super::race::runtime_store::{
+    RuntimePitEntrySource, RuntimePitStateSnapshot, RuntimePitTireType,
+};
 
 /// Convert engine `Vec3` into proto `Vector3`.
 pub(crate) fn vec3_to_proto(v: boink::model::Vec3) -> Vector3 {
@@ -48,7 +54,8 @@ pub(crate) fn proto_participant_controls_to_controls(
         ))),
         ParticipantClientPayload::Init(_)
         | ParticipantClientPayload::BackToTrack(_)
-        | ParticipantClientPayload::ToPitstop(_) => Ok(None),
+        | ParticipantClientPayload::EmergencyPitstop(_)
+        | ParticipantClientPayload::SetNextPitTireType(_) => Ok(None),
     }
 }
 
@@ -151,6 +158,7 @@ fn ghost_mode_state_from_runtime(runtime: &GhostModeRuntimeState) -> GhostModeSt
 pub(crate) fn participant_telemetry_from_state(
     state: &VehicleState,
     last_applied_client_seq: u64,
+    pit_state: &RuntimePitStateSnapshot,
 ) -> CarParticipantState {
     let (tire_type, tire_wear, tire_temperature_celsius) = tire_telemetry_from_state(state);
 
@@ -171,6 +179,9 @@ pub(crate) fn participant_telemetry_from_state(
         tire_type,
         tire_wear,
         tire_temperature_celsius,
+        pit_runtime: Some(pit_runtime_from_snapshot(pit_state)),
+        pit_history: Some(pit_history_from_snapshot(pit_state)),
+        next_pit_tire_type: runtime_tire_type_to_proto(pit_state.next_pit_tire_type),
     }
 }
 
@@ -187,6 +198,7 @@ pub(crate) fn frontend_full_state(
     car_id: u64,
     state: VehicleState,
     last_applied_client_seq: u64,
+    pit_state: &RuntimePitStateSnapshot,
 ) -> FrontendCarFullState {
     FrontendCarFullState {
         car_id,
@@ -194,6 +206,7 @@ pub(crate) fn frontend_full_state(
         telemetry: Some(participant_telemetry_from_state(
             &state,
             last_applied_client_seq,
+            pit_state,
         )),
         render: Some(render_state_from_state(&state)),
     }
@@ -204,6 +217,7 @@ pub(crate) fn participant_self_state(
     car_id: u64,
     state: VehicleState,
     last_applied_client_seq: u64,
+    pit_state: &RuntimePitStateSnapshot,
 ) -> ParticipantSelfState {
     ParticipantSelfState {
         car_id,
@@ -211,6 +225,7 @@ pub(crate) fn participant_self_state(
         telemetry: Some(participant_telemetry_from_state(
             &state,
             last_applied_client_seq,
+            pit_state,
         )),
     }
 }
@@ -327,6 +342,48 @@ fn tire_telemetry_from_state(
     });
 
     (tire_type, tire_wear, tire_temperature)
+}
+
+fn pit_runtime_from_snapshot(snapshot: &RuntimePitStateSnapshot) -> PitRuntimeState {
+    PitRuntimeState {
+        pit_request_active: snapshot.pit_request_active,
+        emergency_lock_remaining_ms: snapshot.emergency_lock_remaining_ms,
+        last_pit_time_ms: snapshot.last_pit_time_ms,
+        last_pit_source: runtime_pit_source_to_proto(snapshot.last_pit_source),
+        last_pit_lap: snapshot.last_pit_lap,
+    }
+}
+
+fn pit_history_from_snapshot(snapshot: &RuntimePitStateSnapshot) -> ProtoPitHistoryState {
+    ProtoPitHistoryState {
+        entries: snapshot
+            .history
+            .iter()
+            .map(|entry| ProtoPitHistoryEntry {
+                pit_time_ms: entry.pit_time_ms,
+                lap: entry.lap,
+                source: runtime_pit_source_to_proto(entry.source),
+                new_tire_type: runtime_tire_type_to_proto(entry.new_tire_type),
+            })
+            .collect(),
+    }
+}
+
+fn runtime_tire_type_to_proto(tire_type: RuntimePitTireType) -> i32 {
+    match tire_type {
+        RuntimePitTireType::Unspecified => ProtoTireType::Unspecified as i32,
+        RuntimePitTireType::Hard => ProtoTireType::Hard as i32,
+        RuntimePitTireType::Soft => ProtoTireType::Soft as i32,
+        RuntimePitTireType::Wet => ProtoTireType::Wet as i32,
+    }
+}
+
+fn runtime_pit_source_to_proto(source: RuntimePitEntrySource) -> i32 {
+    match source {
+        RuntimePitEntrySource::BotDecision => ProtoPitEntrySource::BotDecision as i32,
+        RuntimePitEntrySource::Requested => ProtoPitEntrySource::Requested as i32,
+        RuntimePitEntrySource::Emergency => ProtoPitEntrySource::Emergency as i32,
+    }
 }
 
 fn ground_width_to_proto(ground: boink::model::GroundWidth) -> ProtoGroundWidth {

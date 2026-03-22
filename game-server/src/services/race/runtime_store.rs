@@ -1,10 +1,16 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use boink::model::{PitstopZone, VehicleRaceMetrics, VehicleState};
 use dashmap::DashMap;
 
 use crate::runtime::engine_worker::EngineCommandTarget;
+
+const PIT_HISTORY_MAX_ENTRIES: usize = 32;
+const EMERGENCY_PIT_LOCK_MS: u64 = 30_000;
+const TELEPORT_IDLE_WINDOW_MS: u64 = 500;
 
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeCarIdentity {
@@ -12,6 +18,78 @@ pub struct RuntimeCarIdentity {
     pub team_id: Option<String>,
     pub instance_uuid: Option<String>,
     pub local_bot_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimePitTireType {
+    #[default]
+    Unspecified,
+    Hard,
+    Soft,
+    Wet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RuntimePitEntrySource {
+    #[default]
+    BotDecision,
+    Requested,
+    Emergency,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimePitHistoryEntry {
+    pub pit_time_ms: u64,
+    pub lap: u32,
+    pub source: RuntimePitEntrySource,
+    pub new_tire_type: RuntimePitTireType,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimePitStateSnapshot {
+    pub pit_request_active: bool,
+    pub emergency_lock_remaining_ms: u32,
+    pub force_idle: bool,
+    pub last_pit_time_ms: u64,
+    pub last_pit_source: RuntimePitEntrySource,
+    pub last_pit_lap: u32,
+    pub next_pit_tire_type: RuntimePitTireType,
+    pub history: Vec<RuntimePitHistoryEntry>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuntimePitState {
+    pit_request_active: bool,
+    emergency_lock_until_ms: u64,
+    force_idle_until_ms: u64,
+    last_pit_time_ms: u64,
+    last_pit_source: RuntimePitEntrySource,
+    last_pit_lap: u32,
+    next_pit_tire_type: RuntimePitTireType,
+    history: VecDeque<RuntimePitHistoryEntry>,
+    was_fix_stationary_full_pit: bool,
+    emergency_intent_pending: bool,
+}
+
+impl RuntimePitState {
+    fn snapshot(&self, now_ms: u64) -> RuntimePitStateSnapshot {
+        let emergency_lock_remaining_ms = if self.emergency_lock_until_ms > now_ms {
+            let remaining = self.emergency_lock_until_ms - now_ms;
+            remaining.min(u64::from(u32::MAX)) as u32
+        } else {
+            0
+        };
+        RuntimePitStateSnapshot {
+            pit_request_active: self.pit_request_active,
+            emergency_lock_remaining_ms,
+            force_idle: self.force_idle_until_ms > now_ms || emergency_lock_remaining_ms > 0,
+            last_pit_time_ms: self.last_pit_time_ms,
+            last_pit_source: self.last_pit_source,
+            last_pit_lap: self.last_pit_lap,
+            next_pit_tire_type: self.next_pit_tire_type,
+            history: self.history.iter().copied().collect(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -24,6 +102,7 @@ pub struct RaceRuntimeStore {
     car_engine_ids: Arc<DashMap<u64, u64>>,
     car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
     car_identity: Arc<DashMap<u64, RuntimeCarIdentity>>,
+    car_pit_state: Arc<DashMap<u64, RuntimePitState>>,
     local_bot_next_index: Arc<DashMap<(String, String), u32>>,
 }
 
@@ -38,6 +117,7 @@ impl RaceRuntimeStore {
             car_engine_ids: Arc::new(DashMap::new()),
             car_targets: Arc::new(DashMap::new()),
             car_identity: Arc::new(DashMap::new()),
+            car_pit_state: Arc::new(DashMap::new()),
             local_bot_next_index: Arc::new(DashMap::new()),
         }
     }
@@ -104,6 +184,7 @@ impl RaceRuntimeStore {
         self.car_engine_ids.remove(&car_id);
         self.car_targets.remove(&car_id);
         self.car_identity.remove(&car_id);
+        self.car_pit_state.remove(&car_id);
 
         let Some((_, owner_instance_uuid)) = self.car_owners.remove(&car_id) else {
             return;
@@ -116,6 +197,90 @@ impl RaceRuntimeStore {
         if should_remove_instance {
             self.instance_cars.remove(&owner_instance_uuid);
         }
+    }
+
+    pub fn set_pit_request_active(&self, car_id: u64, active: bool) {
+        let mut entry = self.car_pit_state.entry(car_id).or_default();
+        entry.pit_request_active = active;
+    }
+
+    pub fn set_next_pit_tire_type(&self, car_id: u64, tire_type: RuntimePitTireType) {
+        let mut entry = self.car_pit_state.entry(car_id).or_default();
+        entry.next_pit_tire_type = tire_type;
+    }
+
+    pub fn mark_back_to_track_applied(&self, car_id: u64, now_ms: u64) {
+        let mut entry = self.car_pit_state.entry(car_id).or_default();
+        entry.force_idle_until_ms = entry
+            .force_idle_until_ms
+            .max(now_ms + TELEPORT_IDLE_WINDOW_MS);
+    }
+
+    pub fn mark_emergency_pitstop_requested(&self, car_id: u64, now_ms: u64) {
+        let mut entry = self.car_pit_state.entry(car_id).or_default();
+        entry.emergency_intent_pending = true;
+        entry.emergency_lock_until_ms = entry
+            .emergency_lock_until_ms
+            .max(now_ms.saturating_add(EMERGENCY_PIT_LOCK_MS));
+        entry.force_idle_until_ms = entry
+            .force_idle_until_ms
+            .max(now_ms + TELEPORT_IDLE_WINDOW_MS);
+    }
+
+    pub fn pit_state_snapshot(&self, car_id: u64, now_ms: u64) -> RuntimePitStateSnapshot {
+        self.car_pit_state
+            .get(&car_id)
+            .map(|entry| entry.snapshot(now_ms))
+            .unwrap_or_default()
+    }
+
+    pub fn update_pit_state_from_runtime(
+        &self,
+        car_id: u64,
+        vehicle_state: &VehicleState,
+        race_metrics: Option<&VehicleRaceMetrics>,
+        now_ms: u64,
+    ) -> RuntimePitStateSnapshot {
+        let mut entry = self.car_pit_state.entry(car_id).or_default();
+        let completed_pit = vehicle_state.pitstop_state.has_zone(PitstopZone::Fix)
+            && vehicle_state.pitstop_state.wheels_in_pitstop == 4
+            && vehicle_state.speed == 0.0;
+
+        if completed_pit && !entry.was_fix_stationary_full_pit {
+            let source = if entry.emergency_intent_pending {
+                RuntimePitEntrySource::Emergency
+            } else if entry.pit_request_active {
+                RuntimePitEntrySource::Requested
+            } else {
+                RuntimePitEntrySource::BotDecision
+            };
+            let lap = race_metrics
+                .map(|metrics| metrics.completed_laps)
+                .unwrap_or(0);
+            let history_entry = RuntimePitHistoryEntry {
+                pit_time_ms: now_ms,
+                lap,
+                source,
+                new_tire_type: entry.next_pit_tire_type,
+            };
+            entry.history.push_front(history_entry);
+            while entry.history.len() > PIT_HISTORY_MAX_ENTRIES {
+                entry.history.pop_back();
+            }
+            entry.last_pit_time_ms = now_ms;
+            entry.last_pit_source = source;
+            entry.last_pit_lap = lap;
+            entry.emergency_intent_pending = false;
+            entry.pit_request_active = false;
+        }
+
+        if !completed_pit {
+            entry.was_fix_stationary_full_pit = false;
+        } else {
+            entry.was_fix_stationary_full_pit = true;
+        }
+
+        entry.snapshot(now_ms)
     }
 
     pub fn known_cars(&self) -> Arc<DashMap<u64, ()>> {
