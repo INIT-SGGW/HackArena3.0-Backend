@@ -85,7 +85,7 @@ impl RaceParticipantServiceImpl {
     async fn local_sandbox_join_impl(
         &self,
         requested_sandbox_id: String,
-        auth: Option<String>,
+        auth: String,
     ) -> Result<LocalSandboxJoinResponse, Status> {
         let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
         let active_sandbox = select_local_join_sandbox(&runtime_state, &requested_sandbox_id)?;
@@ -122,18 +122,16 @@ impl RaceParticipantServiceImpl {
 
         let public_car_id = self.runtime_store.allocate_public_car_id();
         let mut identity = RuntimeCarIdentity::default();
-        if let Some(token) = auth.as_ref() {
-            identity.subject = Some(self.token_validator.subject_from_token(token).await?);
-            identity.team_id = self.token_validator.team_id_from_token(token).await?;
-            identity.instance_uuid = self.token_validator.instance_uuid_from_token(token).await?;
-            if let Some(instance_uuid) = identity.instance_uuid.clone() {
-                self.runtime_store
-                    .instance_cars()
-                    .insert(instance_uuid.clone(), public_car_id);
-                self.runtime_store
-                    .car_owners()
-                    .insert(public_car_id, instance_uuid);
-            }
+        identity.subject = Some(self.token_validator.subject_from_token(&auth).await?);
+        identity.team_id = self.token_validator.team_id_from_token(&auth).await?;
+        identity.instance_uuid = self.token_validator.instance_uuid_from_token(&auth).await?;
+        if let Some(instance_uuid) = identity.instance_uuid.clone() {
+            self.runtime_store
+                .instance_cars()
+                .insert(instance_uuid.clone(), public_car_id);
+            self.runtime_store
+                .car_owners()
+                .insert(public_car_id, instance_uuid);
         }
         let local_user_id = identity
             .subject
@@ -332,7 +330,8 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
         }
         #[cfg(feature = "local")]
         {
-            let auth = parse_game_token(request.metadata())?;
+            let auth = parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
             let req = request.into_inner();
             let joined = self.local_sandbox_join_impl(req.sandbox_id, auth).await?;
             Ok(Response::new(joined))

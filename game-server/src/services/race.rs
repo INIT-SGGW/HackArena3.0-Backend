@@ -116,7 +116,8 @@ impl RaceService for RaceServiceImpl {
             ));
         }
 
-        let auth = parse_game_token(request.metadata())?;
+        let auth = parse_game_token(request.metadata())?
+            .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
         let req = request.into_inner();
         let response = self.join_sandbox(req.sandbox_id, auth).await?;
         Ok(Response::new(response))
@@ -215,7 +216,7 @@ impl RaceServiceImpl {
     async fn join_sandbox(
         &self,
         requested_sandbox_id: String,
-        auth: Option<String>,
+        auth: String,
     ) -> Result<QuickJoinDevResponse, Status> {
         let engine = self.engine.clone();
         let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
@@ -258,15 +259,13 @@ impl RaceServiceImpl {
 
         let public_car_id = self.runtime_store.allocate_public_car_id();
         let mut identity = RuntimeCarIdentity::default();
-        if let Some(token) = auth.as_ref() {
-            identity.subject = Some(self.token_validator.subject_from_token(token).await?);
-            identity.team_id = self.token_validator.team_id_from_token(token).await?;
-            identity.instance_uuid = self.token_validator.instance_uuid_from_token(token).await?;
-            if let Some(instance_uuid) = identity.instance_uuid.clone() {
-                self.instance_cars
-                    .insert(instance_uuid.clone(), public_car_id);
-                self.car_owners.insert(public_car_id, instance_uuid);
-            }
+        identity.subject = Some(self.token_validator.subject_from_token(&auth).await?);
+        identity.team_id = self.token_validator.team_id_from_token(&auth).await?;
+        identity.instance_uuid = self.token_validator.instance_uuid_from_token(&auth).await?;
+        if let Some(instance_uuid) = identity.instance_uuid.clone() {
+            self.instance_cars
+                .insert(instance_uuid.clone(), public_car_id);
+            self.car_owners.insert(public_car_id, instance_uuid);
         }
         let local_user_id = identity
             .subject
