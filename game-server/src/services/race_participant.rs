@@ -6,18 +6,24 @@ use std::time::Duration;
 
 use boink::model::Controls;
 use proto::race::v1::{
-    ParticipantCommandAck, ParticipantCommandRejectReason, ParticipantCommandStatus,
-    ParticipantCommandType, ParticipantServerEvent, ParticipantSnapshot, SpectatorView,
-    StreamClampReason, StreamSettings, ViewDowngradeReason,
-    participant_client_message::Payload as ParticipantClientPayload,
+    LocalSandboxJoinRequest, LocalSandboxJoinResponse, ParticipantCommandAck,
+    ParticipantCommandRejectReason, ParticipantCommandStatus, ParticipantCommandType,
+    ParticipantServerEvent, ParticipantSnapshot, SpectatorView, StreamClampReason, StreamSettings,
+    ViewDowngradeReason, participant_client_message::Payload as ParticipantClientPayload,
     participant_server_event::Payload as ParticipantServerPayload,
     race_participant_service_server::RaceParticipantService,
 };
+#[cfg(feature = "local")]
+use rand::Rng;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::auth::game_token::{GameTokenValidator, parse_game_token};
+#[cfg(feature = "local")]
+use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
+#[cfg(feature = "local")]
+use crate::runtime::engine_worker::{EngineActiveSandboxState, EngineRuntimeState};
 use crate::runtime::engine_worker::{EngineClient, EngineCommandTarget};
 
 use super::error_map::map_worker_err;
@@ -25,6 +31,8 @@ use super::mappers::{
     engine_gear_shift_to_proto, participant_opponent_state, participant_self_state,
     proto_participant_controls_to_controls,
 };
+#[cfg(feature = "local")]
+use super::race::RuntimeCarIdentity;
 use super::race::{FrameHub, RaceRuntimeStore};
 
 const PARTICIPANT_REQUESTED_HZ: u32 = 30;
@@ -40,6 +48,8 @@ pub struct RaceParticipantServiceImpl {
     frame_hub: FrameHub,
     token_validator: Arc<GameTokenValidator>,
     next_stream_seq: Arc<AtomicU64>,
+    #[cfg(feature = "local")]
+    local_sandbox_store: LocalSandboxConfigStore,
 }
 
 impl RaceParticipantServiceImpl {
@@ -51,6 +61,7 @@ impl RaceParticipantServiceImpl {
         jwt_issuers: Vec<String>,
         runtime_store: Arc<RaceRuntimeStore>,
         frame_hub: FrameHub,
+        #[cfg(feature = "local")] local_sandbox_store: LocalSandboxConfigStore,
     ) -> Self {
         Self {
             engine,
@@ -63,8 +74,189 @@ impl RaceParticipantServiceImpl {
                 jwt_issuers,
             )),
             next_stream_seq: Arc::new(AtomicU64::new(100_000)),
+            #[cfg(feature = "local")]
+            local_sandbox_store,
         }
     }
+}
+
+impl RaceParticipantServiceImpl {
+    #[cfg(feature = "local")]
+    async fn local_sandbox_join_impl(
+        &self,
+        requested_sandbox_id: String,
+        auth: Option<String>,
+    ) -> Result<LocalSandboxJoinResponse, Status> {
+        let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
+        let active_sandbox = select_local_join_sandbox(&runtime_state, &requested_sandbox_id)?;
+
+        let sandbox_id = active_sandbox.sandbox_id.clone();
+        let map_id = active_sandbox.map_id.clone();
+        let target = EngineCommandTarget::Sandbox {
+            sandbox_id: sandbox_id.clone(),
+        };
+        let engine_car_id = self
+            .engine
+            .spawn_sandbox_car(sandbox_id.clone())
+            .await
+            .map_err(map_worker_err)?;
+
+        if let Err(status) = self
+            .apply_local_spawn_mode(&sandbox_id, target.clone(), engine_car_id)
+            .await
+        {
+            if let Err(err) = self
+                .engine
+                .despawn_car_in(target.clone(), engine_car_id)
+                .await
+            {
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    engine_car_id,
+                    error = %err,
+                    "failed to despawn car after local_sandbox_join spawn-mode apply failure"
+                );
+            }
+            return Err(status);
+        }
+
+        let public_car_id = self.runtime_store.allocate_public_car_id();
+        let mut identity = RuntimeCarIdentity::default();
+        if let Some(token) = auth.as_ref() {
+            identity.subject = Some(self.token_validator.subject_from_token(token).await?);
+            identity.team_id = self.token_validator.team_id_from_token(token).await?;
+            identity.instance_uuid = self.token_validator.instance_uuid_from_token(token).await?;
+            if let Some(instance_uuid) = identity.instance_uuid.clone() {
+                self.runtime_store
+                    .instance_cars()
+                    .insert(instance_uuid.clone(), public_car_id);
+                self.runtime_store
+                    .car_owners()
+                    .insert(public_car_id, instance_uuid);
+            }
+        }
+        let local_user_id = identity
+            .subject
+            .clone()
+            .unwrap_or_else(|| format!("car-{public_car_id}"));
+        identity.local_bot_index = Some(
+            self.runtime_store
+                .allocate_local_bot_index(&sandbox_id, &local_user_id),
+        );
+        self.runtime_store.set_car_identity(public_car_id, identity);
+
+        self.runtime_store.known_cars().insert(public_car_id, ());
+        self.runtime_store
+            .last_client_seq()
+            .insert(public_car_id, 0);
+        self.runtime_store
+            .car_engine_ids()
+            .insert(public_car_id, engine_car_id);
+        self.runtime_store
+            .car_targets()
+            .insert(public_car_id, target);
+
+        Ok(LocalSandboxJoinResponse {
+            car_id: public_car_id,
+            map_id,
+        })
+    }
+
+    #[cfg(feature = "local")]
+    async fn local_spawn_mode_for_sandbox(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<LocalSandboxSpawnModeRecord, Status> {
+        let snapshot = self.local_sandbox_store.get_snapshot().await;
+        snapshot
+            .sandboxes
+            .iter()
+            .find(|entry| entry.sandbox_id == sandbox_id)
+            .map(|entry| entry.config.spawn_mode)
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "local sandbox config not found for sandbox_id={sandbox_id}"
+                ))
+            })
+    }
+
+    #[cfg(feature = "local")]
+    async fn apply_local_spawn_mode(
+        &self,
+        sandbox_id: &str,
+        target: EngineCommandTarget,
+        engine_car_id: u64,
+    ) -> Result<(), Status> {
+        let spawn_mode = self.local_spawn_mode_for_sandbox(sandbox_id).await?;
+        match spawn_mode {
+            LocalSandboxSpawnModeRecord::StartLine => self
+                .engine
+                .set_car_before_finish_line_in(target, engine_car_id)
+                .await
+                .map_err(map_worker_err),
+            LocalSandboxSpawnModeRecord::RandomOnTrack => self
+                .engine
+                .set_car_random_on_track_in(target, engine_car_id)
+                .await
+                .map_err(map_worker_err),
+            LocalSandboxSpawnModeRecord::InPit => self
+                .engine
+                .set_car_to_pitstop_in(target, engine_car_id)
+                .await
+                .map_err(map_worker_err),
+            LocalSandboxSpawnModeRecord::RandomStartSlot => {
+                let slots = self
+                    .engine
+                    .get_number_of_start_pos_in(target.clone())
+                    .await
+                    .map_err(map_worker_err)?;
+                if slots == 0 {
+                    return Err(Status::failed_precondition(
+                        "no start slots available for selected map",
+                    ));
+                }
+                let start_slot = {
+                    let mut rng = rand::thread_rng();
+                    rng.gen_range(1..=slots)
+                };
+                self.engine
+                    .set_car_at_start_pos_in(target, engine_car_id, start_slot)
+                    .await
+                    .map_err(map_worker_err)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "local")]
+fn select_local_join_sandbox<'a>(
+    runtime_state: &'a EngineRuntimeState,
+    requested_sandbox_id: &str,
+) -> Result<&'a EngineActiveSandboxState, Status> {
+    if runtime_state.active_sandboxes.is_empty() {
+        return Err(Status::failed_precondition("sandbox runtime is not active"));
+    }
+
+    let requested_sandbox_id = requested_sandbox_id.trim();
+    if !requested_sandbox_id.is_empty() {
+        return runtime_state
+            .active_sandboxes
+            .iter()
+            .find(|entry| entry.sandbox_id == requested_sandbox_id)
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "sandbox runtime is not active for sandbox_id={requested_sandbox_id}"
+                ))
+            });
+    }
+
+    if runtime_state.active_sandboxes.len() == 1 {
+        return Ok(&runtime_state.active_sandboxes[0]);
+    }
+
+    Err(Status::failed_precondition(
+        "sandbox_id is required when multiple sandbox sessions are active",
+    ))
 }
 
 #[tonic::async_trait]
@@ -125,6 +317,26 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn local_sandbox_join(
+        &self,
+        request: Request<LocalSandboxJoinRequest>,
+    ) -> Result<Response<LocalSandboxJoinResponse>, Status> {
+        #[cfg(not(feature = "local"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "LocalSandboxJoin is supported only in local backend mode",
+            ));
+        }
+        #[cfg(feature = "local")]
+        {
+            let auth = parse_game_token(request.metadata())?;
+            let req = request.into_inner();
+            let joined = self.local_sandbox_join_impl(req.sandbox_id, auth).await?;
+            Ok(Response::new(joined))
+        }
     }
 }
 

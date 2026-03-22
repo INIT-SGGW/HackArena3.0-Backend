@@ -118,77 +118,8 @@ impl RaceService for RaceServiceImpl {
 
         let auth = parse_game_token(request.metadata())?;
         let req = request.into_inner();
-        let engine = self.engine.clone();
-        let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
-        let active_sandbox = select_quick_join_sandbox(&runtime_state, &req.sandbox_id)?;
-
-        let sandbox_id = active_sandbox.sandbox_id.clone();
-        let map_id = active_sandbox.map_id.clone();
-        let target = EngineCommandTarget::Sandbox {
-            sandbox_id: sandbox_id.clone(),
-        };
-        let engine_car_id = engine
-            .spawn_sandbox_car(sandbox_id.clone())
-            .await
-            .map_err(map_worker_err)?;
-        let spawn_apply_result = {
-            #[cfg(feature = "local")]
-            {
-                self.apply_local_spawn_mode(&sandbox_id, target.clone(), engine_car_id)
-                    .await
-            }
-            #[cfg(not(feature = "local"))]
-            {
-                self.engine
-                    .set_car_before_finish_line_in(target.clone(), engine_car_id)
-                    .await
-                    .map_err(map_worker_err)
-            }
-        };
-        if let Err(status) = spawn_apply_result
-        {
-            if let Err(err) = engine.despawn_car_in(target.clone(), engine_car_id).await {
-                tracing::warn!(
-                    sandbox_id = %sandbox_id,
-                    engine_car_id,
-                    error = %err,
-                    "failed to despawn car after local spawn-mode apply failure"
-                );
-            }
-            return Err(status);
-        }
-        let public_car_id = self.runtime_store.allocate_public_car_id();
-        let mut identity = RuntimeCarIdentity::default();
-        if let Some(token) = auth.as_ref() {
-            identity.subject = Some(self.token_validator.subject_from_token(token).await?);
-            identity.team_id = self.token_validator.team_id_from_token(token).await?;
-            identity.instance_uuid = self.token_validator.instance_uuid_from_token(token).await?;
-            if let Some(instance_uuid) = identity.instance_uuid.clone() {
-                self.instance_cars
-                    .insert(instance_uuid.clone(), public_car_id);
-                self.car_owners.insert(public_car_id, instance_uuid);
-            }
-        }
-        let local_user_id = identity
-            .subject
-            .clone()
-            .unwrap_or_else(|| format!("car-{public_car_id}"));
-        identity.local_bot_index = Some(
-            self.runtime_store
-                .allocate_local_bot_index(&sandbox_id, &local_user_id),
-        );
-        self.runtime_store.set_car_identity(public_car_id, identity);
-
-        let resp = QuickJoinDevResponse {
-            car_id: public_car_id,
-            map_id,
-        };
-        self.known_cars.insert(public_car_id, ());
-        self.last_client_seq.insert(public_car_id, 0);
-        self.car_engine_ids.insert(public_car_id, engine_car_id);
-        self.car_targets.insert(public_car_id, target);
-
-        Ok(Response::new(resp))
+        let response = self.join_sandbox(req.sandbox_id, auth).await?;
+        Ok(Response::new(response))
     }
 
     async fn set_controls_dev(
@@ -281,6 +212,83 @@ impl RaceService for RaceServiceImpl {
 }
 
 impl RaceServiceImpl {
+    async fn join_sandbox(
+        &self,
+        requested_sandbox_id: String,
+        auth: Option<String>,
+    ) -> Result<QuickJoinDevResponse, Status> {
+        let engine = self.engine.clone();
+        let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
+        let active_sandbox = select_quick_join_sandbox(&runtime_state, &requested_sandbox_id)?;
+
+        let sandbox_id = active_sandbox.sandbox_id.clone();
+        let map_id = active_sandbox.map_id.clone();
+        let target = EngineCommandTarget::Sandbox {
+            sandbox_id: sandbox_id.clone(),
+        };
+        let engine_car_id = engine
+            .spawn_sandbox_car(sandbox_id.clone())
+            .await
+            .map_err(map_worker_err)?;
+        let spawn_apply_result = {
+            #[cfg(feature = "local")]
+            {
+                self.apply_local_spawn_mode(&sandbox_id, target.clone(), engine_car_id)
+                    .await
+            }
+            #[cfg(not(feature = "local"))]
+            {
+                self.engine
+                    .set_car_before_finish_line_in(target.clone(), engine_car_id)
+                    .await
+                    .map_err(map_worker_err)
+            }
+        };
+        if let Err(status) = spawn_apply_result {
+            if let Err(err) = engine.despawn_car_in(target.clone(), engine_car_id).await {
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    engine_car_id,
+                    error = %err,
+                    "failed to despawn car after local spawn-mode apply failure"
+                );
+            }
+            return Err(status);
+        }
+
+        let public_car_id = self.runtime_store.allocate_public_car_id();
+        let mut identity = RuntimeCarIdentity::default();
+        if let Some(token) = auth.as_ref() {
+            identity.subject = Some(self.token_validator.subject_from_token(token).await?);
+            identity.team_id = self.token_validator.team_id_from_token(token).await?;
+            identity.instance_uuid = self.token_validator.instance_uuid_from_token(token).await?;
+            if let Some(instance_uuid) = identity.instance_uuid.clone() {
+                self.instance_cars
+                    .insert(instance_uuid.clone(), public_car_id);
+                self.car_owners.insert(public_car_id, instance_uuid);
+            }
+        }
+        let local_user_id = identity
+            .subject
+            .clone()
+            .unwrap_or_else(|| format!("car-{public_car_id}"));
+        identity.local_bot_index = Some(
+            self.runtime_store
+                .allocate_local_bot_index(&sandbox_id, &local_user_id),
+        );
+        self.runtime_store.set_car_identity(public_car_id, identity);
+
+        self.known_cars.insert(public_car_id, ());
+        self.last_client_seq.insert(public_car_id, 0);
+        self.car_engine_ids.insert(public_car_id, engine_car_id);
+        self.car_targets.insert(public_car_id, target);
+
+        Ok(QuickJoinDevResponse {
+            car_id: public_car_id,
+            map_id,
+        })
+    }
+
     #[cfg(feature = "local")]
     async fn local_spawn_mode_for_sandbox(
         &self,
