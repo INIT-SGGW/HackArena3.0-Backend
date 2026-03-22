@@ -317,40 +317,6 @@ impl Engine {
             return Err(Error::from_ffi_status(spawn_code, "boink_spawn_vehicle"));
         }
 
-        // TODO: Temp solution
-        let spawn_pos = sys::BoinkVec3 {
-            x: -5.0,
-            y: 5.0,
-            z: 0.0,
-        };
-        let set_pos_code =
-            unsafe { sys::boink_set_vehicle_position(self.handle, vehicle_id, &spawn_pos) };
-        tracing::debug!(
-            set_pos_code,
-            vehicle_id,
-            "boink_set_vehicle_position result (spawn)"
-        );
-        if set_pos_code != sys::BOINK_OK {
-            tracing::debug!(
-                code = set_pos_code,
-                "boink_set_vehicle_position failed (spawn)"
-            );
-            return Err(Error::from_ffi_status(
-                set_pos_code,
-                "boink_set_vehicle_position",
-            ));
-        }
-
-        // TODO: Temp solution
-        let half = std::f32::consts::FRAC_1_SQRT_2;
-        let spawn_orientation = Quaternion {
-            x: 0.0,
-            y: half,
-            z: 0.0,
-            w: half,
-        };
-        self.set_vehicle_orientation(vehicle_id, spawn_orientation)?;
-
         Ok(vehicle_id)
     }
 
