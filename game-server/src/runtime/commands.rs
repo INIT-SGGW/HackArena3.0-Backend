@@ -44,10 +44,30 @@ pub enum EngineCommand {
         car_id: u64,
         reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
     },
+    SetCarBeforeFinishLine {
+        target: EngineCommandTarget,
+        car_id: u64,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
+    SetCarRandomOnTrack {
+        target: EngineCommandTarget,
+        car_id: u64,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
+    SetCarAtStartPos {
+        target: EngineCommandTarget,
+        car_id: u64,
+        position_index: u64,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
     SetCarToPitstop {
         target: EngineCommandTarget,
         car_id: u64,
         reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
+    GetNumberOfStartPos {
+        target: EngineCommandTarget,
+        reply_tx: oneshot::Sender<Result<u64, EngineWorkerError>>,
     },
     GetTrackData {
         target: EngineCommandTarget,

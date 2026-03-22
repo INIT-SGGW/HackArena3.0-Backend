@@ -2,21 +2,6 @@ use std::path::Path;
 
 use tonic::Status;
 
-use crate::local::sandbox_config_store::LocalSandboxSpawnModeRecord;
-
-pub(crate) fn ensure_supported_spawn_mode(
-    spawn_mode: LocalSandboxSpawnModeRecord,
-) -> Result<(), Status> {
-    match spawn_mode {
-        LocalSandboxSpawnModeRecord::StartLine => Ok(()),
-        LocalSandboxSpawnModeRecord::RandomOnTrack
-        | LocalSandboxSpawnModeRecord::InPit
-        | LocalSandboxSpawnModeRecord::RandomStartSlot => Err(Status::unimplemented(
-            "spawn mode is not implemented yet (supported: START_LINE)",
-        )),
-    }
-}
-
 pub(crate) async fn validate_map_id_track_exists(
     tracks_dir: &Path,
     map_id: &str,
