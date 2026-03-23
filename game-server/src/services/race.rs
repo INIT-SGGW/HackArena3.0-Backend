@@ -149,12 +149,16 @@ impl RaceService for RaceServiceImpl {
 
         self.last_client_seq
             .insert(req.target_car_id, req.client_seq);
+        self.runtime_store.set_controls_input(
+            req.target_car_id,
+            controls.throttle,
+            controls.brake,
+            controls.brake_balancer,
+            controls.differential_lock,
+        );
         let resp = SetControlsResponse {
             client_seq: req.client_seq,
-            accepted_throttle: req.throttle,
-            accepted_brake: req.brake,
-            accepted_steering: req.steering,
-            applies_from_tick: 0,
+            applies_from_tick: self.frame_hub.latest().tick,
             accepted_shift: engine_gear_shift_to_proto(accepted_controls.accepted_shift),
         };
 
@@ -845,6 +849,7 @@ async fn run_frontend_spectator_stream(
                 entry.state,
                 entry.last_client_seq,
                 &entry.pit_state,
+                entry.controls_input,
             ));
         }
 

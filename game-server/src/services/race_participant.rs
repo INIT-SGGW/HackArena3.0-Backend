@@ -472,7 +472,6 @@ fn participant_settings(
 
 fn participant_ack(
     client_seq: u64,
-    controls: Controls,
     applies_from_tick: u64,
     accepted_shift: i32,
 ) -> proto::race::v1::ParticipantControlsAck {
@@ -480,9 +479,6 @@ fn participant_ack(
         client_seq,
         applies_from_tick,
         accepted_shift,
-        accepted_throttle: controls.throttle,
-        accepted_brake: controls.brake,
-        accepted_steering: controls.steer,
     }
 }
 
@@ -673,17 +669,21 @@ async fn run_participant_stream(
                             }
                         };
 
-                        let (client_seq, controls) = controls;
+                        let (client_seq, requested_controls) = controls;
                         let frame = frame_hub.latest();
                         let pit_state = runtime_store
                             .pit_state_snapshot(self_public_car_id, frame.server_time_ms);
-                        let controls = if pit_state.emergency_lock_remaining_ms > 0 {
-                            Controls::new(0.0, 1.0, 0.5, 0.5, 0.0, EngineGearShift::None)
+                        let applied_controls = if pit_state.emergency_lock_remaining_ms > 0 {
+                            Controls::new(0.0, 1.0, 0.5, 0.0, 0.0, EngineGearShift::None)
                         } else {
-                            controls
+                            requested_controls
                         };
                         let accepted = match engine
-                            .set_controls_in(self_target.clone(), self_engine_car_id, controls)
+                            .set_controls_in(
+                                self_target.clone(),
+                                self_engine_car_id,
+                                applied_controls,
+                            )
                             .await
                         {
                             Ok(value) => value,
@@ -703,10 +703,16 @@ async fn run_participant_stream(
                         runtime_store
                             .last_client_seq()
                             .insert(self_public_car_id, client_seq);
+                        runtime_store.set_controls_input(
+                            self_public_car_id,
+                            requested_controls.throttle,
+                            requested_controls.brake,
+                            requested_controls.brake_balancer,
+                            requested_controls.differential_lock,
+                        );
                         let applies_from_tick = frame.tick;
                         let ack = participant_ack(
                             client_seq,
-                            controls,
                             applies_from_tick,
                             engine_gear_shift_to_proto(accepted.accepted_shift),
                         );

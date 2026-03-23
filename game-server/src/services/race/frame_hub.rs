@@ -12,7 +12,9 @@ use crate::runtime::engine_worker::{
     EngineActivityKind, EngineClient, EngineCommandTarget, EngineRuntimeState, EngineWorkerError,
 };
 
-use super::runtime_store::{RaceRuntimeStore, RuntimeCarIdentity, RuntimePitStateSnapshot};
+use super::runtime_store::{
+    RaceRuntimeStore, RuntimeCarIdentity, RuntimeControlInputSnapshot, RuntimePitStateSnapshot,
+};
 
 #[derive(Clone, Debug)]
 pub struct RuntimeCarFrame {
@@ -24,6 +26,7 @@ pub struct RuntimeCarFrame {
     pub last_client_seq: u64,
     pub identity: Option<RuntimeCarIdentity>,
     pub pit_state: RuntimePitStateSnapshot,
+    pub controls_input: RuntimeControlInputSnapshot,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -306,7 +309,7 @@ async fn collect_frame(
                 0.0,
                 if brake_hold { 1.0 } else { 0.0 },
                 0.5,
-                0.5,
+                0.0,
                 0.0,
                 GearShift::None,
             );
@@ -340,6 +343,7 @@ async fn collect_frame(
                 last_client_seq: runtime_store.car_last_client_seq(public_car_id),
                 identity: runtime_store.car_identity(public_car_id),
                 pit_state,
+                controls_input: runtime_store.controls_input_snapshot(public_car_id),
             },
         );
     }

@@ -14,14 +14,14 @@ use proto::race::v1::{
     GroundWidth as ProtoGroundWidth, ParticipantOpponentState, ParticipantSelfState,
     PitEntrySource as ProtoPitEntrySource, PitHistoryEntry as ProtoPitHistoryEntry,
     PitHistoryState as ProtoPitHistoryState, PitRuntimeState, PitstopData as ProtoPitstopData,
-    Quaternion, SetControlsDevRequest, TireTemperaturePerWheel, TireType as ProtoTireType,
-    TireWearPerWheel, TrackData as ProtoTrackData, Vector3, WheelSpeeds,
+    Quaternion, SetControlsDevRequest, TireSlipPerWheel, TireTemperaturePerWheel,
+    TireType as ProtoTireType, TireWearPerWheel, TrackData as ProtoTrackData, Vector3, WheelSpeeds,
     participant_client_message::Payload as ParticipantClientPayload,
 };
 use tonic::Status;
 
 use super::race::runtime_store::{
-    RuntimePitEntrySource, RuntimePitStateSnapshot, RuntimePitTireType,
+    RuntimeControlInputSnapshot, RuntimePitEntrySource, RuntimePitStateSnapshot, RuntimePitTireType,
 };
 
 /// Convert engine `Vec3` into proto `Vector3`.
@@ -35,7 +35,14 @@ pub(crate) fn vec3_to_proto(v: boink::model::Vec3) -> Vector3 {
 
 /// Convert gRPC dev-controls request into engine controls.
 pub(crate) fn proto_dev_to_controls(req: &SetControlsDevRequest) -> Result<Controls, Status> {
-    controls_from_proto(req.throttle, req.brake, req.steering, req.gear_shift)
+    controls_from_proto(
+        req.throttle,
+        req.brake,
+        0.5,
+        0.0,
+        req.steering,
+        req.gear_shift,
+    )
 }
 
 /// Convert participant bidi controls payload into engine controls.
@@ -48,6 +55,8 @@ pub(crate) fn proto_participant_controls_to_controls(
             controls_from_proto(
                 value.throttle,
                 value.brake,
+                value.brake_balancer,
+                value.differential_lock,
                 value.steering,
                 value.gear_shift,
             )?,
@@ -71,14 +80,16 @@ pub(crate) fn engine_gear_shift_to_proto(shift: EngineGearShift) -> i32 {
 fn controls_from_proto(
     throttle: f32,
     brake: f32,
+    brake_balancer: f32,
+    differential_lock: f32,
     steering: f32,
     raw_gear_shift: i32,
 ) -> Result<Controls, Status> {
     Ok(Controls::new(
         throttle,
         brake,
-        0.5,
-        0.5,
+        brake_balancer,
+        differential_lock,
         steering,
         proto_gear_shift_to_engine(raw_gear_shift)?,
     ))
@@ -162,7 +173,8 @@ pub(crate) fn participant_telemetry_from_state(
     last_applied_client_seq: u64,
     pit_state: &RuntimePitStateSnapshot,
 ) -> CarParticipantState {
-    let (tire_type, tire_wear, tire_temperature_celsius) = tire_telemetry_from_state(state);
+    let (tire_type, tire_wear, tire_temperature_celsius, tire_slip) =
+        tire_telemetry_from_state(state);
 
     CarParticipantState {
         last_applied_client_seq,
@@ -173,8 +185,6 @@ pub(crate) fn participant_telemetry_from_state(
             Gear::Neutral => 0,
             Gear::Forward(n) => n as i32,
         },
-        throttle_applied: state.throttle_applied,
-        brake_applied: state.brake_applied,
         ghost_mode: Some(ghost_mode_state_from_runtime(&state.ghost_mode_runtime)),
         pitstop_zone_flags: state.pitstop_state.zone_mask,
         wheels_in_pitstop: state.pitstop_state.wheels_in_pitstop as u32,
@@ -184,6 +194,7 @@ pub(crate) fn participant_telemetry_from_state(
         pit_runtime: Some(pit_runtime_from_snapshot(pit_state)),
         pit_history: Some(pit_history_from_snapshot(pit_state)),
         next_pit_tire_type: runtime_tire_type_to_proto(pit_state.next_pit_tire_type),
+        tire_slip,
     }
 }
 
@@ -201,6 +212,7 @@ pub(crate) fn frontend_full_state(
     state: VehicleState,
     last_applied_client_seq: u64,
     pit_state: &RuntimePitStateSnapshot,
+    controls_input: RuntimeControlInputSnapshot,
 ) -> FrontendCarFullState {
     FrontendCarFullState {
         car_id,
@@ -211,6 +223,10 @@ pub(crate) fn frontend_full_state(
             pit_state,
         )),
         render: Some(render_state_from_state(&state)),
+        input_throttle: controls_input.input_throttle,
+        input_brake: controls_input.input_brake,
+        current_brake_balancer: controls_input.current_brake_balancer,
+        current_differential_lock: controls_input.current_differential_lock,
     }
 }
 
@@ -312,6 +328,7 @@ fn tire_telemetry_from_state(
     i32,
     Option<TireWearPerWheel>,
     Option<TireTemperaturePerWheel>,
+    Option<TireSlipPerWheel>,
 ) {
     let no_wear_signal = state.tyre_health.iter().all(|v| *v == 0.0);
     let no_temp_signal = state.tyre_temperature_celsius.iter().all(|v| *v == 0.0);
@@ -319,10 +336,11 @@ fn tire_telemetry_from_state(
         .tyre_health
         .iter()
         .chain(state.tyre_temperature_celsius.iter())
+        .chain(state.tyre_slip.iter())
         .all(|v| v.is_finite());
 
     if !all_finite || (no_wear_signal && no_temp_signal) {
-        return (ProtoTireType::Unspecified as i32, None, None);
+        return (ProtoTireType::Unspecified as i32, None, None, None);
     }
 
     let tire_type = match state.tyre_type {
@@ -342,8 +360,14 @@ fn tire_telemetry_from_state(
         rear_left_celsius: state.tyre_temperature_celsius[2],
         rear_right_celsius: state.tyre_temperature_celsius[3],
     });
+    let tire_slip = Some(TireSlipPerWheel {
+        front_left: state.tyre_slip[0],
+        front_right: state.tyre_slip[1],
+        rear_left: state.tyre_slip[2],
+        rear_right: state.tyre_slip[3],
+    });
 
-    (tire_type, tire_wear, tire_temperature)
+    (tire_type, tire_wear, tire_temperature, tire_slip)
 }
 
 fn pit_runtime_from_snapshot(snapshot: &RuntimePitStateSnapshot) -> PitRuntimeState {

@@ -57,6 +57,25 @@ pub struct RuntimePitStateSnapshot {
     pub history: Vec<RuntimePitHistoryEntry>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RuntimeControlInputSnapshot {
+    pub input_throttle: f32,
+    pub input_brake: f32,
+    pub current_brake_balancer: f32,
+    pub current_differential_lock: f32,
+}
+
+impl Default for RuntimeControlInputSnapshot {
+    fn default() -> Self {
+        Self {
+            input_throttle: 0.0,
+            input_brake: 0.0,
+            current_brake_balancer: 0.5,
+            current_differential_lock: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct RuntimePitState {
     pit_request_active: bool,
@@ -103,6 +122,7 @@ pub struct RaceRuntimeStore {
     car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
     car_identity: Arc<DashMap<u64, RuntimeCarIdentity>>,
     car_pit_state: Arc<DashMap<u64, RuntimePitState>>,
+    car_controls_input: Arc<DashMap<u64, RuntimeControlInputSnapshot>>,
     local_bot_next_index: Arc<DashMap<(String, String), u32>>,
 }
 
@@ -118,6 +138,7 @@ impl RaceRuntimeStore {
             car_targets: Arc::new(DashMap::new()),
             car_identity: Arc::new(DashMap::new()),
             car_pit_state: Arc::new(DashMap::new()),
+            car_controls_input: Arc::new(DashMap::new()),
             local_bot_next_index: Arc::new(DashMap::new()),
         }
     }
@@ -185,6 +206,7 @@ impl RaceRuntimeStore {
         self.car_targets.remove(&car_id);
         self.car_identity.remove(&car_id);
         self.car_pit_state.remove(&car_id);
+        self.car_controls_input.remove(&car_id);
 
         let Some((_, owner_instance_uuid)) = self.car_owners.remove(&car_id) else {
             return;
@@ -202,6 +224,32 @@ impl RaceRuntimeStore {
     pub fn set_pit_request_active(&self, car_id: u64, active: bool) {
         let mut entry = self.car_pit_state.entry(car_id).or_default();
         entry.pit_request_active = active;
+    }
+
+    pub fn set_controls_input(
+        &self,
+        car_id: u64,
+        throttle: f32,
+        brake: f32,
+        brake_balancer: f32,
+        differential_lock: f32,
+    ) {
+        self.car_controls_input.insert(
+            car_id,
+            RuntimeControlInputSnapshot {
+                input_throttle: throttle,
+                input_brake: brake,
+                current_brake_balancer: brake_balancer,
+                current_differential_lock: differential_lock,
+            },
+        );
+    }
+
+    pub fn controls_input_snapshot(&self, car_id: u64) -> RuntimeControlInputSnapshot {
+        self.car_controls_input
+            .get(&car_id)
+            .map(|entry| *entry.value())
+            .unwrap_or_default()
     }
 
     pub fn set_next_pit_tire_type(&self, car_id: u64, tire_type: RuntimePitTireType) {
