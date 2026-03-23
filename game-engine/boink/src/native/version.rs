@@ -71,9 +71,9 @@ pub const REQUIRED_C_API_VERSION: Version = Version::new(
 
 /// Minimal C-API version accepted in `legacy-native-lib` mode.
 ///
-/// Legacy mode supports only native libraries exposing C API `>= 0.16.0`.
+/// Legacy mode supports only native libraries exposing C API `>= 0.17.0`.
 #[cfg(feature = "legacy-native-lib")]
-pub const MIN_LEGACY_C_API_VERSION: Version = Version::new(0, 16, 0);
+pub const MIN_LEGACY_C_API_VERSION: Version = Version::new(0, 17, 0);
 
 /// Queries the loaded native library for the Boink C-API and engine versions.
 ///
@@ -188,7 +188,7 @@ pub fn ensure_c_api_compatible() -> Result<()> {
 pub fn ensure_c_api_compatible() -> Result<()> {
     static LEGACY_WARN_ONCE: Once = Once::new();
     LEGACY_WARN_ONCE.call_once(|| {
-        warn!("Legacy compatibility mode enabled; minimum supported C API is 0.16.0");
+        warn!("Legacy compatibility mode enabled; minimum supported C API is 0.17.0");
     });
 
     let c_api = match query_c_api_version() {

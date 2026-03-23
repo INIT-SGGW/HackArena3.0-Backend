@@ -305,6 +305,8 @@ async fn collect_frame(
             let idle_controls = Controls::new(
                 0.0,
                 if brake_hold { 1.0 } else { 0.0 },
+                0.5,
+                0.5,
                 0.0,
                 GearShift::None,
             );

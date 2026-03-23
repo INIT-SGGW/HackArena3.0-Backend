@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::model::math::Vec3;
 use crate::model::{
     AcceptedControls, Controls, GhostModeRuntimeState, GhostModeSettings, Quaternion, RaceBestLap,
-    TrackData, VehicleBestLap, VehiclePitstopState, VehicleRaceMetrics, VehicleState,
+    TrackData, TyreType, VehicleBestLap, VehiclePitstopState, VehicleRaceMetrics, VehicleState,
     WeatherParams,
 };
 #[cfg(feature = "legacy-native-lib")]
@@ -668,6 +668,90 @@ impl Engine {
                 Ok(())
             } else {
                 Err(Error::from_ffi_status(code, "boink_set_vehicle_to_pitstop"))
+            }
+        }
+    }
+
+    /// Sets the tyre compound for the specified vehicle.
+    ///
+    /// Returns [`Error::ConditionNotMet`](crate::Error::ConditionNotMet) when
+    /// native preconditions are not satisfied (for example, vehicle not in fix zone).
+    #[instrument(skip(self))]
+    pub fn set_vehicle_tyre_type(&mut self, vehicle_id: u64, tyre_type: TyreType) -> Result<()> {
+        let ffi_tyre_type = tyre_type.to_ffi();
+
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance();
+            let set_vehicle_tyre_type = api.boink_set_vehicle_tyre_type();
+            tracing::debug!(
+                vehicle_id,
+                ?tyre_type,
+                "boink_set_vehicle_tyre_type (legacy dynamic symbol)"
+            );
+            let code = unsafe { set_vehicle_tyre_type(self.handle, vehicle_id, ffi_tyre_type) };
+            if code == sys::BOINK_OK {
+                return Ok(());
+            }
+            return Err(Error::from_ffi_status(code, "boink_set_vehicle_tyre_type"));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(vehicle_id, ?tyre_type, "boink_set_vehicle_tyre_type");
+            let code =
+                unsafe { sys::boink_set_vehicle_tyre_type(self.handle, vehicle_id, ffi_tyre_type) };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(code, "boink_set_vehicle_tyre_type"))
+            }
+        }
+    }
+
+    /// Retrieves the width and depth (length) of the specified vehicle.
+    #[instrument(skip(self))]
+    pub fn get_vehicle_dimensions(&self, vehicle_id: u64) -> Result<(f32, f32)> {
+        let mut width: f32 = 0.0;
+        let mut depth: f32 = 0.0;
+
+        #[cfg(feature = "legacy-native-lib")]
+        {
+            let api = NativeApi::instance();
+            let get_vehicle_dimensions = api.boink_get_vehicle_dimensions();
+            tracing::debug!(
+                vehicle_id,
+                "boink_get_vehicle_dimensions (legacy dynamic symbol)"
+            );
+            let code = unsafe {
+                get_vehicle_dimensions(
+                    self.handle,
+                    vehicle_id,
+                    &mut width as *mut _,
+                    &mut depth as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                return Ok((width, depth));
+            }
+            return Err(Error::from_ffi_status(code, "boink_get_vehicle_dimensions"));
+        }
+
+        #[cfg(not(feature = "legacy-native-lib"))]
+        {
+            tracing::debug!(vehicle_id, "boink_get_vehicle_dimensions");
+            let code = unsafe {
+                sys::boink_get_vehicle_dimensions(
+                    self.handle,
+                    vehicle_id,
+                    &mut width as *mut _,
+                    &mut depth as *mut _,
+                )
+            };
+            if code == sys::BOINK_OK {
+                Ok((width, depth))
+            } else {
+                Err(Error::from_ffi_status(code, "boink_get_vehicle_dimensions"))
             }
         }
     }

@@ -77,6 +77,8 @@ fn controls_from_proto(
     Ok(Controls::new(
         throttle,
         brake,
+        0.5,
+        0.5,
         steering,
         proto_gear_shift_to_engine(raw_gear_shift)?,
     ))

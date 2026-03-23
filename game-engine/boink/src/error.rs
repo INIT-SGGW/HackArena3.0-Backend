@@ -41,6 +41,10 @@ pub enum Error {
     #[error("no data available")]
     NoData,
 
+    /// The operation preconditions were not satisfied.
+    #[error("condition not met")]
+    ConditionNotMet,
+
     /// The file format is not supported by the native engine.
     #[error("unsupported format")]
     UnsupportedFormat,
@@ -126,6 +130,7 @@ impl Error {
 
         match code {
             x if x == sys::BOINK_NO_DATA => Self::NoData,
+            x if x == sys::BOINK_CONDITION_NOT_MET => Self::ConditionNotMet,
             x if x == sys::BOINK_ERR_INVALID_ARG => Self::InvalidArg,
             x if x == sys::BOINK_ERR_BUFFER_TOO_SMALL => Self::BufferTooSmall,
             x if x == sys::BOINK_ERR_NOT_FOUND => Self::NotFound,

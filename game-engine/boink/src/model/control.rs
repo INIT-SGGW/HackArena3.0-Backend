@@ -39,6 +39,8 @@ impl GearShift {
 ///
 /// - `throttle` in `[0.0, 1.0]`
 /// - `brake` in `[0.0, 1.0]`
+/// - `brake_balancer` in `[0.0, 1.0]`
+/// - `differential_lock` in `[0.0, 1.0]`
 /// - `steer` in `[-1.0, 1.0]`
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Controls {
@@ -46,6 +48,10 @@ pub struct Controls {
     pub throttle: f32,
     /// Brake demand (0 = no braking, 1 = full brakes).
     pub brake: f32,
+    /// Brake balancer demand.
+    pub brake_balancer: f32,
+    /// Differential lock demand.
+    pub differential_lock: f32,
     /// Steering input (negative = left, positive = right).
     pub steer: f32,
     /// Requested gear shift operation.
@@ -61,10 +67,19 @@ pub struct AcceptedControls {
 
 impl Controls {
     /// Creates clamped controls from raw values.
-    pub fn new(throttle: f32, brake: f32, steer: f32, gear_shift: GearShift) -> Self {
+    pub fn new(
+        throttle: f32,
+        brake: f32,
+        brake_balancer: f32,
+        differential_lock: f32,
+        steer: f32,
+        gear_shift: GearShift,
+    ) -> Self {
         Self {
             throttle: throttle.clamp(0.0, 1.0),
             brake: brake.clamp(0.0, 1.0),
+            brake_balancer: brake_balancer.clamp(0.0, 1.0),
+            differential_lock: differential_lock.clamp(0.0, 1.0),
             steer: steer.clamp(-1.0, 1.0),
             gear_shift,
         }
@@ -75,6 +90,8 @@ impl Controls {
         sys::BoinkControls {
             throttle: self.throttle,
             brake: self.brake,
+            brake_balancer: self.brake_balancer,
+            differential_lock: self.differential_lock,
             steer: self.steer,
             gear_shift: self.gear_shift.to_ffi(),
         }

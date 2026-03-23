@@ -678,7 +678,7 @@ async fn run_participant_stream(
                         let pit_state = runtime_store
                             .pit_state_snapshot(self_public_car_id, frame.server_time_ms);
                         let controls = if pit_state.emergency_lock_remaining_ms > 0 {
-                            Controls::new(0.0, 1.0, 0.0, EngineGearShift::None)
+                            Controls::new(0.0, 1.0, 0.5, 0.5, 0.0, EngineGearShift::None)
                         } else {
                             controls
                         };

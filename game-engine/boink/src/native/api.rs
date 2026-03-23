@@ -1,6 +1,6 @@
 //! Native function table used by legacy mode.
 //!
-//! With minimum supported legacy C API at `0.16.0`, symbols are treated as
+//! With minimum supported legacy C API at `0.17.0`, symbols are treated as
 //! stable and mapped directly to `boink_sys` exports.
 
 use std::sync::OnceLock;
@@ -22,6 +22,14 @@ type LegacySetVehicleBeforeFinishLineFn = unsafe extern "C" fn(boink_sys::BoinkH
 type LegacySetVehicleRandomPosFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
 type LegacySetVehicleBackToTrackFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
 type LegacySetVehicleToPitstopFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64) -> i32;
+type LegacySetVehicleTyreTypeFn =
+    unsafe extern "C" fn(boink_sys::BoinkHandle, u64, boink_sys::BoinkTyreType) -> i32;
+type LegacyGetVehicleDimensionsFn = unsafe extern "C" fn(
+    boink_sys::BoinkHandle,
+    u64,
+    *mut boink_sys::Real,
+    *mut boink_sys::Real,
+) -> i32;
 type LegacySetVehicleAtStartPosFn = unsafe extern "C" fn(boink_sys::BoinkHandle, u64, u64) -> i32;
 type LegacyGetNumberOfStartPosFn = unsafe extern "C" fn(boink_sys::BoinkHandle, *mut u64) -> i32;
 type LegacyReadVehicleGhostModeStateFn = unsafe extern "C" fn(
@@ -61,6 +69,8 @@ pub struct NativeApi {
     set_vehicle_random_pos: LegacySetVehicleRandomPosFn,
     set_vehicle_back_to_track: LegacySetVehicleBackToTrackFn,
     set_vehicle_to_pitstop: LegacySetVehicleToPitstopFn,
+    set_vehicle_tyre_type: LegacySetVehicleTyreTypeFn,
+    get_vehicle_dimensions: LegacyGetVehicleDimensionsFn,
     set_vehicle_at_start_pos: LegacySetVehicleAtStartPosFn,
     get_number_of_start_pos: LegacyGetNumberOfStartPosFn,
     read_vehicle_ghost_mode_state: LegacyReadVehicleGhostModeStateFn,
@@ -89,6 +99,8 @@ impl NativeApi {
             set_vehicle_random_pos: boink_sys::boink_set_vehicle_random_pos,
             set_vehicle_back_to_track: boink_sys::boink_set_vehicle_back_to_track,
             set_vehicle_to_pitstop: boink_sys::boink_set_vehicle_to_pitstop,
+            set_vehicle_tyre_type: boink_sys::boink_set_vehicle_tyre_type,
+            get_vehicle_dimensions: boink_sys::boink_get_vehicle_dimensions,
             set_vehicle_at_start_pos: boink_sys::boink_set_vehicle_at_start_pos,
             get_number_of_start_pos: boink_sys::boink_get_number_of_start_pos,
             read_vehicle_ghost_mode_state: boink_sys::boink_read_vehicle_ghost_mode_state,
@@ -154,6 +166,14 @@ impl NativeApi {
     #[must_use]
     pub fn boink_set_vehicle_to_pitstop(&self) -> LegacySetVehicleToPitstopFn {
         self.set_vehicle_to_pitstop
+    }
+    #[must_use]
+    pub fn boink_set_vehicle_tyre_type(&self) -> LegacySetVehicleTyreTypeFn {
+        self.set_vehicle_tyre_type
+    }
+    #[must_use]
+    pub fn boink_get_vehicle_dimensions(&self) -> LegacyGetVehicleDimensionsFn {
+        self.get_vehicle_dimensions
     }
     #[must_use]
     pub fn boink_set_vehicle_at_start_pos(&self) -> LegacySetVehicleAtStartPosFn {
