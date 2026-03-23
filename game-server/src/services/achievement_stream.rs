@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use boink::model::{Gear, Quaternion as EngineQuaternion, Vec3 as EngineVec3};
+use boink::model::{
+    Gear, Quaternion as EngineQuaternion, TyreType as EngineTyreType, Vec3 as EngineVec3,
+};
 use proto::achievement::v1::achievement_runtime_source;
 use proto::achievement::v1::achievement_stream_service_server::AchievementStreamService;
 use proto::achievement::v1::stream_achievement_runtime_response;
@@ -460,6 +462,12 @@ fn vehicle_state_for_achievement(
         .unwrap_or_else(|| "unknown".to_string());
     let (forward_alignment_to_centerline, signed_speed_along_centerline_mps) =
         compute_alignment_and_signed_speed(&car.state, centerline_geometry);
+    let tire_wear = AchievementTireWearPerWheel {
+        front_left: tire_wear_from_health(car.state.tyre_health[0]),
+        front_right: tire_wear_from_health(car.state.tyre_health[1]),
+        rear_left: tire_wear_from_health(car.state.tyre_health[2]),
+        rear_right: tire_wear_from_health(car.state.tyre_health[3]),
+    };
 
     AchievementVehicleState {
         car_id: car.public_car_id,
@@ -479,14 +487,8 @@ fn vehicle_state_for_achievement(
             Gear::Neutral => 0,
             Gear::Forward(gear) => i32::from(gear),
         },
-        // TODO: Replace placeholder tire metadata when engine exports tire state.
-        tire_type: AchievementTireType::Unspecified as i32,
-        tire_wear: Some(AchievementTireWearPerWheel {
-            front_left: 0.0,
-            front_right: 0.0,
-            rear_left: 0.0,
-            rear_right: 0.0,
-        }),
+        tire_type: achievement_tire_type_from_engine(car.state.tyre_type) as i32,
+        tire_wear: Some(tire_wear),
         wheel_positions: Some(AchievementWheelPositions {
             front_left: Some(vec3_to_proto(car.state.wheel_position[0])),
             front_right: Some(vec3_to_proto(car.state.wheel_position[1])),
@@ -495,6 +497,22 @@ fn vehicle_state_for_achievement(
         }),
         forward_alignment_to_centerline,
         signed_speed_along_centerline_mps,
+    }
+}
+
+fn achievement_tire_type_from_engine(value: EngineTyreType) -> AchievementTireType {
+    match value {
+        EngineTyreType::Hard => AchievementTireType::Hard,
+        EngineTyreType::Soft => AchievementTireType::Soft,
+        EngineTyreType::Wet => AchievementTireType::Wet,
+    }
+}
+
+fn tire_wear_from_health(health: f32) -> f32 {
+    if health.is_finite() {
+        (1.0 - health).clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
