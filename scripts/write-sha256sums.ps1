@@ -24,15 +24,17 @@ if (-not (Test-Path $releaseVersionDir)) {
     throw "Release directory not found: $releaseVersionDir"
 }
 
-$zipFiles = Get-ChildItem -Path $releaseVersionDir -Filter "*.zip" -File | Sort-Object Name
-if ($zipFiles.Count -eq 0) {
-    throw "No zip files found in: $releaseVersionDir"
+$releaseFiles = Get-ChildItem -Path $releaseVersionDir -File |
+    Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
+    Sort-Object Name
+if ($releaseFiles.Count -eq 0) {
+    throw "No release files found in: $releaseVersionDir"
 }
 
 $lines = New-Object System.Collections.Generic.List[string]
-foreach ($zip in $zipFiles) {
-    $hash = (Get-FileHash -Path $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    $lines.Add("$hash  $($zip.Name)")
+foreach ($file in $releaseFiles) {
+    $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $lines.Add("$hash  $($file.Name)")
 }
 
 $outputFile = Join-Path $releaseVersionDir "SHA256SUMS.txt"
