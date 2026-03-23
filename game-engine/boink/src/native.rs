@@ -4,15 +4,15 @@
 //! shared library (version queries, symbol loading, etc.).
 
 #[cfg(feature = "legacy-native-lib")]
+#[allow(dead_code)] // Reserved for future dynamic symbol loading extensions.
 pub(crate) mod api;
 #[cfg(feature = "legacy-native-lib")]
-#[allow(dead_code)]
+#[allow(dead_code)] // Reserved for future dynamic symbol loading extensions.
 pub(crate) mod error;
 pub mod info;
 #[cfg(feature = "legacy-native-lib")]
-#[allow(dead_code)]
+#[allow(dead_code)] // Reserved for future dynamic symbol loading extensions.
 pub(crate) mod loader;
-pub(crate) mod macros;
 pub(crate) mod raw;
 pub(crate) mod strings;
 pub mod version;

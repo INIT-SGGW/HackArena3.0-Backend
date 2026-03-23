@@ -13,8 +13,6 @@ use tracing::{info, warn};
 
 use crate::error::{Error, Result};
 
-#[cfg(feature = "legacy-native-lib")]
-use super::api::NativeApi;
 use super::info::query_engine_profile;
 
 /// Semantic version triple reported by the Boink engine.
@@ -87,8 +85,6 @@ pub fn query_versions() -> Result<VersionInfo> {
     })
 }
 
-/// Queries the loaded native library for the Boink C-API version.
-#[cfg(not(feature = "legacy-native-lib"))]
 pub fn query_c_api_version() -> Result<Version> {
     let mut major: u32 = 0;
     let mut minor: u32 = 0;
@@ -103,15 +99,7 @@ pub fn query_c_api_version() -> Result<Version> {
     }
 }
 
-/// Queries the loaded native library for the Boink C-API version.
-#[cfg(feature = "legacy-native-lib")]
-pub fn query_c_api_version() -> Result<Version> {
-    let api = NativeApi::instance();
-    query_dynamic_version(api.boink_get_c_api_version(), "boink_get_c_api_version")
-}
-
 /// Queries the loaded native library for the Boink engine library version.
-#[cfg(not(feature = "legacy-native-lib"))]
 pub fn query_engine_version() -> Result<Version> {
     let mut major: u32 = 0;
     let mut minor: u32 = 0;
@@ -124,13 +112,6 @@ pub fn query_engine_version() -> Result<Version> {
     } else {
         Err(Error::from_ffi_status(code, "boink_get_engine_version"))
     }
-}
-
-/// Queries the loaded native library for the Boink engine library version.
-#[cfg(feature = "legacy-native-lib")]
-pub fn query_engine_version() -> Result<Version> {
-    let api = NativeApi::instance();
-    query_dynamic_version(api.boink_get_engine_version(), "boink_get_engine_version")
 }
 
 /// Checks whether the loaded library's C-API version is compatible with this wrapper.
@@ -217,23 +198,6 @@ pub fn ensure_c_api_compatible() -> Result<()> {
             required: MIN_LEGACY_C_API_VERSION,
             actual: c_api,
         })
-    }
-}
-
-#[cfg(feature = "legacy-native-lib")]
-fn query_dynamic_version(
-    func: unsafe extern "C" fn(*mut u32, *mut u32, *mut u32) -> i32,
-    func_name: &'static str,
-) -> Result<Version> {
-    let mut major: u32 = 0;
-    let mut minor: u32 = 0;
-    let mut patch: u32 = 0;
-
-    let code = unsafe { func(&mut major, &mut minor, &mut patch) };
-    if code == sys::BOINK_OK {
-        Ok(Version::new(major, minor, patch))
-    } else {
-        Err(Error::from_ffi_status(code, func_name))
     }
 }
 

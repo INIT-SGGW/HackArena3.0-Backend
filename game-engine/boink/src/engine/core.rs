@@ -18,8 +18,6 @@ use crate::model::{
     TrackData, TyreType, VehicleBestLap, VehiclePitstopState, VehicleRaceMetrics, VehicleState,
     WeatherParams,
 };
-#[cfg(feature = "legacy-native-lib")]
-use crate::native::api::NativeApi;
 use crate::version::ensure_c_api_compatible;
 
 /// Domain-level configuration of the vehicle model used by the engine.
@@ -234,42 +232,19 @@ impl Engine {
     /// Retrieves static track geometry parsed from the loaded track.
     #[instrument(skip(self))]
     pub fn track_data(&self) -> Result<TrackData> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let get_track_data = api.boink_get_track_data();
-
-            let mut raw: sys::BoinkTrackData = unsafe { core::mem::zeroed() };
-            tracing::debug!("boink_get_track_data (legacy dynamic symbol)");
-            let code = unsafe { get_track_data(self.handle, &mut raw as *mut _) };
-            tracing::debug!(
-                code,
-                sample_count = raw.centerline_sample_count,
-                "boink_get_track_data result"
-            );
-            if code == sys::BOINK_OK {
-                return unsafe { TrackData::try_from_ffi(raw) };
-            }
+        let mut raw: sys::BoinkTrackData = unsafe { core::mem::zeroed() };
+        tracing::debug!("boink_get_track_data");
+        let code = unsafe { sys::boink_get_track_data(self.handle, &mut raw as *mut _) };
+        tracing::debug!(
+            code,
+            sample_count = raw.centerline_sample_count,
+            "boink_get_track_data result"
+        );
+        if code == sys::BOINK_OK {
+            unsafe { TrackData::try_from_ffi(raw) }
+        } else {
             tracing::debug!(code = code, "boink_get_track_data failed");
-            return Err(Error::from_ffi_status(code, "boink_get_track_data"));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            let mut raw: sys::BoinkTrackData = unsafe { core::mem::zeroed() };
-            tracing::debug!("boink_get_track_data");
-            let code = unsafe { sys::boink_get_track_data(self.handle, &mut raw as *mut _) };
-            tracing::debug!(
-                code,
-                sample_count = raw.centerline_sample_count,
-                "boink_get_track_data result"
-            );
-            if code == sys::BOINK_OK {
-                unsafe { TrackData::try_from_ffi(raw) }
-            } else {
-                tracing::debug!(code = code, "boink_get_track_data failed");
-                Err(Error::from_ffi_status(code, "boink_get_track_data"))
-            }
+            Err(Error::from_ffi_status(code, "boink_get_track_data"))
         }
     }
 
@@ -339,128 +314,59 @@ impl Engine {
             rain_intensity: weather.rain_intensity,
         };
 
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_weather = api.boink_set_weather();
-
-            tracing::debug!(
-                cloudiness = weather.cloudiness,
-                temperature_c = weather.temperature_c,
-                rain_intensity = weather.rain_intensity,
-                "boink_set_weather (legacy dynamic symbol)"
-            );
-            let code = unsafe { set_weather(self.handle, &ffi_weather as *const _) };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(code, "boink_set_weather"));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(
-                cloudiness = weather.cloudiness,
-                temperature_c = weather.temperature_c,
-                rain_intensity = weather.rain_intensity,
-                "boink_set_weather"
-            );
-            let code = unsafe { sys::boink_set_weather(self.handle, &ffi_weather as *const _) };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(code, "boink_set_weather"))
-            }
+        tracing::debug!(
+            cloudiness = weather.cloudiness,
+            temperature_c = weather.temperature_c,
+            rain_intensity = weather.rain_intensity,
+            "boink_set_weather"
+        );
+        let code = unsafe { sys::boink_set_weather(self.handle, &ffi_weather as *const _) };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(code, "boink_set_weather"))
         }
     }
 
     /// Updates global ghost mode settings used by simulation.
     pub fn set_ghost_mode_settings(&mut self, settings: GhostModeSettings) -> Result<()> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            if settings.enabled {
-                let ffi_settings = sys::BoinkGhostModeSettings {
-                    enter_speed_max_mps: settings.enter_speed_max_mps,
-                    exit_speed_min_mps: settings.exit_speed_min_mps,
-                    enter_delay_ms: settings.enter_delay_ms,
-                    exit_delay_ms: settings.exit_delay_ms,
-                    until_completed_laps: settings.until_completed_laps,
-                    vehicle_overlap_exit_delay_ms: settings.vehicle_overlap_exit_delay_ms,
-                };
+        if settings.enabled {
+            let ffi_settings = sys::BoinkGhostModeSettings {
+                enter_speed_max_mps: settings.enter_speed_max_mps,
+                exit_speed_min_mps: settings.exit_speed_min_mps,
+                enter_delay_ms: settings.enter_delay_ms,
+                exit_delay_ms: settings.exit_delay_ms,
+                until_completed_laps: settings.until_completed_laps,
+                vehicle_overlap_exit_delay_ms: settings.vehicle_overlap_exit_delay_ms,
+            };
 
-                let set_ghost_mode_settings = api.boink_set_ghost_mode_settings();
-
-                tracing::debug!(
-                    enter_speed_max_mps = settings.enter_speed_max_mps,
-                    exit_speed_min_mps = settings.exit_speed_min_mps,
-                    enter_delay_ms = settings.enter_delay_ms,
-                    exit_delay_ms = settings.exit_delay_ms,
-                    until_completed_laps = settings.until_completed_laps,
-                    vehicle_overlap_exit_delay_ms = settings.vehicle_overlap_exit_delay_ms,
-                    "boink_set_ghost_mode_settings (legacy dynamic symbol)"
-                );
-                let code =
-                    unsafe { set_ghost_mode_settings(self.handle, &ffi_settings as *const _) };
-                if code == sys::BOINK_OK {
-                    return Ok(());
-                }
-                return Err(Error::from_ffi_status(
+            tracing::debug!(
+                enter_speed_max_mps = settings.enter_speed_max_mps,
+                exit_speed_min_mps = settings.exit_speed_min_mps,
+                enter_delay_ms = settings.enter_delay_ms,
+                exit_delay_ms = settings.exit_delay_ms,
+                until_completed_laps = settings.until_completed_laps,
+                vehicle_overlap_exit_delay_ms = settings.vehicle_overlap_exit_delay_ms,
+                "boink_set_ghost_mode_settings"
+            );
+            let code = unsafe {
+                sys::boink_set_ghost_mode_settings(self.handle, &ffi_settings as *const _)
+            };
+            if code == sys::BOINK_OK {
+                Ok(())
+            } else {
+                Err(Error::from_ffi_status(
                     code,
                     "boink_set_ghost_mode_settings",
-                ));
+                ))
             }
-
-            let disable_ghost_mode = api.boink_disable_ghost_mode();
-
-            tracing::debug!("boink_disable_ghost_mode (legacy dynamic symbol)");
-            let code = unsafe { disable_ghost_mode(self.handle) };
+        } else {
+            tracing::debug!("boink_disable_ghost_mode");
+            let code = unsafe { sys::boink_disable_ghost_mode(self.handle) };
             if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(code, "boink_disable_ghost_mode"));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            if settings.enabled {
-                let ffi_settings = sys::BoinkGhostModeSettings {
-                    enter_speed_max_mps: settings.enter_speed_max_mps,
-                    exit_speed_min_mps: settings.exit_speed_min_mps,
-                    enter_delay_ms: settings.enter_delay_ms,
-                    exit_delay_ms: settings.exit_delay_ms,
-                    until_completed_laps: settings.until_completed_laps,
-                    vehicle_overlap_exit_delay_ms: settings.vehicle_overlap_exit_delay_ms,
-                };
-
-                tracing::debug!(
-                    enter_speed_max_mps = settings.enter_speed_max_mps,
-                    exit_speed_min_mps = settings.exit_speed_min_mps,
-                    enter_delay_ms = settings.enter_delay_ms,
-                    exit_delay_ms = settings.exit_delay_ms,
-                    until_completed_laps = settings.until_completed_laps,
-                    vehicle_overlap_exit_delay_ms = settings.vehicle_overlap_exit_delay_ms,
-                    "boink_set_ghost_mode_settings"
-                );
-                let code = unsafe {
-                    sys::boink_set_ghost_mode_settings(self.handle, &ffi_settings as *const _)
-                };
-                if code == sys::BOINK_OK {
-                    Ok(())
-                } else {
-                    Err(Error::from_ffi_status(
-                        code,
-                        "boink_set_ghost_mode_settings",
-                    ))
-                }
+                Ok(())
             } else {
-                tracing::debug!("boink_disable_ghost_mode");
-                let code = unsafe { sys::boink_disable_ghost_mode(self.handle) };
-                if code == sys::BOINK_OK {
-                    Ok(())
-                } else {
-                    Err(Error::from_ffi_status(code, "boink_disable_ghost_mode"))
-                }
+                Err(Error::from_ffi_status(code, "boink_disable_ghost_mode"))
             }
         }
     }
@@ -493,182 +399,77 @@ impl Engine {
     pub fn set_vehicle_before_point(&mut self, vehicle_id: u64, point: Vec3) -> Result<()> {
         let ffi_point: sys::BoinkVec3 = point.into();
 
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_vehicle_before_point = api.boink_set_vehicle_before_point();
-            tracing::debug!(
-                vehicle_id,
-                x = point.x,
-                y = point.y,
-                z = point.z,
-                "boink_set_vehicle_before_point (legacy dynamic symbol)"
-            );
-            let code = unsafe {
-                set_vehicle_before_point(self.handle, vehicle_id, &ffi_point as *const _)
-            };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(
+        tracing::debug!(
+            vehicle_id,
+            x = point.x,
+            y = point.y,
+            z = point.z,
+            "boink_set_vehicle_before_point"
+        );
+        let code = unsafe {
+            sys::boink_set_vehicle_before_point(self.handle, vehicle_id, &ffi_point as *const _)
+        };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_set_vehicle_before_point",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(
-                vehicle_id,
-                x = point.x,
-                y = point.y,
-                z = point.z,
-                "boink_set_vehicle_before_point"
-            );
-            let code = unsafe {
-                sys::boink_set_vehicle_before_point(self.handle, vehicle_id, &ffi_point as *const _)
-            };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_set_vehicle_before_point",
-                ))
-            }
+            ))
         }
     }
 
     /// Sets the world-space position of a vehicle to a point before the finish line.
     #[instrument(skip(self))]
     pub fn set_vehicle_before_finish_line(&mut self, vehicle_id: u64) -> Result<()> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_vehicle_before_finish_line = api.boink_set_vehicle_before_finish_line();
-            tracing::debug!(
-                vehicle_id,
-                "boink_set_vehicle_before_finish_line (legacy dynamic symbol)"
-            );
-            let code = unsafe { set_vehicle_before_finish_line(self.handle, vehicle_id) };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(
+        tracing::debug!(vehicle_id, "boink_set_vehicle_before_finish_line");
+        let code = unsafe { sys::boink_set_vehicle_before_finish_line(self.handle, vehicle_id) };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_set_vehicle_before_finish_line",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(vehicle_id, "boink_set_vehicle_before_finish_line");
-            let code =
-                unsafe { sys::boink_set_vehicle_before_finish_line(self.handle, vehicle_id) };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_set_vehicle_before_finish_line",
-                ))
-            }
+            ))
         }
     }
 
     /// Sets the world-space position of a vehicle to a random point.
     #[instrument(skip(self))]
     pub fn set_vehicle_random_pos(&mut self, vehicle_id: u64) -> Result<()> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_vehicle_random_pos = api.boink_set_vehicle_random_pos();
-            tracing::debug!(
-                vehicle_id,
-                "boink_set_vehicle_random_pos (legacy dynamic symbol)"
-            );
-            let code = unsafe { set_vehicle_random_pos(self.handle, vehicle_id) };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(code, "boink_set_vehicle_random_pos"));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(vehicle_id, "boink_set_vehicle_random_pos");
-            let code = unsafe { sys::boink_set_vehicle_random_pos(self.handle, vehicle_id) };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(code, "boink_set_vehicle_random_pos"))
-            }
+        tracing::debug!(vehicle_id, "boink_set_vehicle_random_pos");
+        let code = unsafe { sys::boink_set_vehicle_random_pos(self.handle, vehicle_id) };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(code, "boink_set_vehicle_random_pos"))
         }
     }
 
     /// Sets the world-space position of a vehicle to the closest point on track.
     #[instrument(skip(self))]
     pub fn set_vehicle_back_to_track(&mut self, vehicle_id: u64) -> Result<()> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_vehicle_back_to_track = api.boink_set_vehicle_back_to_track();
-            tracing::debug!(
-                vehicle_id,
-                "boink_set_vehicle_back_to_track (legacy dynamic symbol)"
-            );
-            let code = unsafe { set_vehicle_back_to_track(self.handle, vehicle_id) };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(
+        tracing::debug!(vehicle_id, "boink_set_vehicle_back_to_track");
+        let code = unsafe { sys::boink_set_vehicle_back_to_track(self.handle, vehicle_id) };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_set_vehicle_back_to_track",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(vehicle_id, "boink_set_vehicle_back_to_track");
-            let code = unsafe { sys::boink_set_vehicle_back_to_track(self.handle, vehicle_id) };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_set_vehicle_back_to_track",
-                ))
-            }
+            ))
         }
     }
 
     /// Sets the world-space position of a vehicle to the pitstop fix zone.
     #[instrument(skip(self))]
     pub fn set_vehicle_to_pitstop(&mut self, vehicle_id: u64) -> Result<()> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_vehicle_to_pitstop = api.boink_set_vehicle_to_pitstop();
-            tracing::debug!(
-                vehicle_id,
-                "boink_set_vehicle_to_pitstop (legacy dynamic symbol)"
-            );
-            let code = unsafe { set_vehicle_to_pitstop(self.handle, vehicle_id) };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(code, "boink_set_vehicle_to_pitstop"));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(vehicle_id, "boink_set_vehicle_to_pitstop");
-            let code = unsafe { sys::boink_set_vehicle_to_pitstop(self.handle, vehicle_id) };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(code, "boink_set_vehicle_to_pitstop"))
-            }
+        tracing::debug!(vehicle_id, "boink_set_vehicle_to_pitstop");
+        let code = unsafe { sys::boink_set_vehicle_to_pitstop(self.handle, vehicle_id) };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(code, "boink_set_vehicle_to_pitstop"))
         }
     }
 
@@ -680,32 +481,13 @@ impl Engine {
     pub fn set_vehicle_tyre_type(&mut self, vehicle_id: u64, tyre_type: TyreType) -> Result<()> {
         let ffi_tyre_type = tyre_type.to_ffi();
 
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_vehicle_tyre_type = api.boink_set_vehicle_tyre_type();
-            tracing::debug!(
-                vehicle_id,
-                ?tyre_type,
-                "boink_set_vehicle_tyre_type (legacy dynamic symbol)"
-            );
-            let code = unsafe { set_vehicle_tyre_type(self.handle, vehicle_id, ffi_tyre_type) };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(code, "boink_set_vehicle_tyre_type"));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(vehicle_id, ?tyre_type, "boink_set_vehicle_tyre_type");
-            let code =
-                unsafe { sys::boink_set_vehicle_tyre_type(self.handle, vehicle_id, ffi_tyre_type) };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(code, "boink_set_vehicle_tyre_type"))
-            }
+        tracing::debug!(vehicle_id, ?tyre_type, "boink_set_vehicle_tyre_type");
+        let code =
+            unsafe { sys::boink_set_vehicle_tyre_type(self.handle, vehicle_id, ffi_tyre_type) };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(code, "boink_set_vehicle_tyre_type"))
         }
     }
 
@@ -715,121 +497,53 @@ impl Engine {
         let mut width: f32 = 0.0;
         let mut depth: f32 = 0.0;
 
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let get_vehicle_dimensions = api.boink_get_vehicle_dimensions();
-            tracing::debug!(
+        tracing::debug!(vehicle_id, "boink_get_vehicle_dimensions");
+        let code = unsafe {
+            sys::boink_get_vehicle_dimensions(
+                self.handle,
                 vehicle_id,
-                "boink_get_vehicle_dimensions (legacy dynamic symbol)"
-            );
-            let code = unsafe {
-                get_vehicle_dimensions(
-                    self.handle,
-                    vehicle_id,
-                    &mut width as *mut _,
-                    &mut depth as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                return Ok((width, depth));
-            }
-            return Err(Error::from_ffi_status(code, "boink_get_vehicle_dimensions"));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(vehicle_id, "boink_get_vehicle_dimensions");
-            let code = unsafe {
-                sys::boink_get_vehicle_dimensions(
-                    self.handle,
-                    vehicle_id,
-                    &mut width as *mut _,
-                    &mut depth as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                Ok((width, depth))
-            } else {
-                Err(Error::from_ffi_status(code, "boink_get_vehicle_dimensions"))
-            }
+                &mut width as *mut _,
+                &mut depth as *mut _,
+            )
+        };
+        if code == sys::BOINK_OK {
+            Ok((width, depth))
+        } else {
+            Err(Error::from_ffi_status(code, "boink_get_vehicle_dimensions"))
         }
     }
 
     /// Sets the world-space position of a vehicle at a selected starting position.
     #[instrument(skip(self))]
     pub fn set_vehicle_at_start_pos(&mut self, vehicle_id: u64, position_index: u64) -> Result<()> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_vehicle_at_start_pos = api.boink_set_vehicle_at_start_pos();
-            tracing::debug!(
-                vehicle_id,
-                position_index,
-                "boink_set_vehicle_at_start_pos (legacy dynamic symbol)"
-            );
-            let code = unsafe { set_vehicle_at_start_pos(self.handle, vehicle_id, position_index) };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(
+        tracing::debug!(vehicle_id, position_index, "boink_set_vehicle_at_start_pos");
+        let code =
+            unsafe { sys::boink_set_vehicle_at_start_pos(self.handle, vehicle_id, position_index) };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_set_vehicle_at_start_pos",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(vehicle_id, position_index, "boink_set_vehicle_at_start_pos");
-            let code = unsafe {
-                sys::boink_set_vehicle_at_start_pos(self.handle, vehicle_id, position_index)
-            };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_set_vehicle_at_start_pos",
-                ))
-            }
+            ))
         }
     }
 
     /// Returns number of available start positions.
     #[instrument(skip(self))]
     pub fn get_number_of_start_pos(&self) -> Result<u64> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let get_number_of_start_pos = api.boink_get_number_of_start_pos();
-            let mut out_number_pos: u64 = 0;
-            tracing::debug!("boink_get_number_of_start_pos (legacy dynamic symbol)");
-            let code =
-                unsafe { get_number_of_start_pos(self.handle, &mut out_number_pos as *mut _) };
-            if code == sys::BOINK_OK {
-                return Ok(out_number_pos);
-            }
-            return Err(Error::from_ffi_status(
+        let mut out_number_pos: u64 = 0;
+        tracing::debug!("boink_get_number_of_start_pos");
+        let code = unsafe {
+            sys::boink_get_number_of_start_pos(self.handle, &mut out_number_pos as *mut _)
+        };
+        if code == sys::BOINK_OK {
+            Ok(out_number_pos)
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_get_number_of_start_pos",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            let mut out_number_pos: u64 = 0;
-            tracing::debug!("boink_get_number_of_start_pos");
-            let code = unsafe {
-                sys::boink_get_number_of_start_pos(self.handle, &mut out_number_pos as *mut _)
-            };
-            if code == sys::BOINK_OK {
-                Ok(out_number_pos)
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_get_number_of_start_pos",
-                ))
-            }
+            ))
         }
     }
 
@@ -842,55 +556,28 @@ impl Engine {
     ) -> Result<()> {
         let ffi_orientation: sys::BoinkQuaternion = orientation.into();
 
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let set_vehicle_orientation = api.boink_set_vehicle_orientation();
-            tracing::debug!(
+        tracing::debug!(
+            vehicle_id,
+            x = orientation.x,
+            y = orientation.y,
+            z = orientation.z,
+            w = orientation.w,
+            "boink_set_vehicle_orientation"
+        );
+        let code = unsafe {
+            sys::boink_set_vehicle_orientation(
+                self.handle,
                 vehicle_id,
-                x = orientation.x,
-                y = orientation.y,
-                z = orientation.z,
-                w = orientation.w,
-                "boink_set_vehicle_orientation (legacy dynamic symbol)"
-            );
-            let code = unsafe {
-                set_vehicle_orientation(self.handle, vehicle_id, &ffi_orientation as *const _)
-            };
-            if code == sys::BOINK_OK {
-                return Ok(());
-            }
-            return Err(Error::from_ffi_status(
+                &ffi_orientation as *const _,
+            )
+        };
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_set_vehicle_orientation",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            tracing::debug!(
-                vehicle_id,
-                x = orientation.x,
-                y = orientation.y,
-                z = orientation.z,
-                w = orientation.w,
-                "boink_set_vehicle_orientation"
-            );
-            let code = unsafe {
-                sys::boink_set_vehicle_orientation(
-                    self.handle,
-                    vehicle_id,
-                    &ffi_orientation as *const _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                Ok(())
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_set_vehicle_orientation",
-                ))
-            }
+            ))
         }
     }
 
@@ -916,97 +603,42 @@ impl Engine {
     /// Reads race-progress metrics for the specified vehicle.
     #[instrument(skip(self))]
     pub fn read_vehicle_race_metrics(&self, vehicle_id: u64) -> Result<VehicleRaceMetrics> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let read_vehicle_race_metrics = api.boink_read_vehicle_race_metrics();
-
-            let mut raw: sys::BoinkVehicleRaceMetrics = unsafe { core::mem::zeroed() };
-            tracing::debug!(
-                vehicle_id,
-                "boink_read_vehicle_race_metrics (legacy dynamic symbol)"
-            );
-            let code =
-                unsafe { read_vehicle_race_metrics(self.handle, vehicle_id, &mut raw as *mut _) };
-            if code == sys::BOINK_OK {
-                return Ok(raw.into());
-            }
-            return Err(Error::from_ffi_status(
+        let mut raw: sys::BoinkVehicleRaceMetrics = unsafe { core::mem::zeroed() };
+        tracing::debug!(vehicle_id, "boink_read_vehicle_race_metrics");
+        let code = unsafe {
+            sys::boink_read_vehicle_race_metrics(self.handle, vehicle_id, &mut raw as *mut _)
+        };
+        if code == sys::BOINK_OK {
+            Ok(raw.into())
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_read_vehicle_race_metrics",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            let mut raw: sys::BoinkVehicleRaceMetrics = unsafe { core::mem::zeroed() };
-            tracing::debug!(vehicle_id, "boink_read_vehicle_race_metrics");
-            let code = unsafe {
-                sys::boink_read_vehicle_race_metrics(self.handle, vehicle_id, &mut raw as *mut _)
-            };
-            if code == sys::BOINK_OK {
-                Ok(raw.into())
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_read_vehicle_race_metrics",
-                ))
-            }
+            ))
         }
     }
 
     /// Reads runtime pitstop-zone state for the specified vehicle.
     #[instrument(skip(self))]
     pub fn read_vehicle_pitstop_state(&self, vehicle_id: u64) -> Result<VehiclePitstopState> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let get_vehicle_pitstop_zone = api.boink_get_vehicle_pitstop_zone();
-
-            let mut raw_zone = sys::BoinkPitstopZone::BOINK_PITSTOP_ZONE_NONE;
-            let mut wheels_num: i32 = 0;
-            tracing::debug!(
+        let mut raw_zone = sys::BoinkPitstopZone::BOINK_PITSTOP_ZONE_NONE;
+        let mut wheels_num: i32 = 0;
+        tracing::debug!(vehicle_id, "boink_get_vehicle_pitstop_zone");
+        let code = unsafe {
+            sys::boink_get_vehicle_pitstop_zone(
+                self.handle,
                 vehicle_id,
-                "boink_get_vehicle_pitstop_zone (legacy dynamic symbol)"
-            );
-            let code = unsafe {
-                get_vehicle_pitstop_zone(
-                    self.handle,
-                    vehicle_id,
-                    &mut raw_zone as *mut _,
-                    &mut wheels_num as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                return VehiclePitstopState::try_from_ffi(raw_zone as u32, wheels_num);
-            }
-            return Err(Error::from_ffi_status(
+                &mut raw_zone as *mut _,
+                &mut wheels_num as *mut _,
+            )
+        };
+        if code == sys::BOINK_OK {
+            VehiclePitstopState::try_from_ffi(raw_zone as u32, wheels_num)
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_get_vehicle_pitstop_zone",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            let mut raw_zone = sys::BoinkPitstopZone::BOINK_PITSTOP_ZONE_NONE;
-            let mut wheels_num: i32 = 0;
-            tracing::debug!(vehicle_id, "boink_get_vehicle_pitstop_zone");
-            let code = unsafe {
-                sys::boink_get_vehicle_pitstop_zone(
-                    self.handle,
-                    vehicle_id,
-                    &mut raw_zone as *mut _,
-                    &mut wheels_num as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                VehiclePitstopState::try_from_ffi(raw_zone as u32, wheels_num)
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_get_vehicle_pitstop_zone",
-                ))
-            }
+            ))
         }
     }
 
@@ -1015,60 +647,26 @@ impl Engine {
     /// Returns `Ok(None)` when the vehicle exists but has no best lap yet.
     #[instrument(skip(self))]
     pub fn get_vehicle_personal_best_lap(&self, vehicle_id: u64) -> Result<Option<VehicleBestLap>> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let get_vehicle_personal_best_lap = api.boink_get_vehicle_personal_best_lap();
-
-            let mut lap: u32 = 0;
-            let mut lap_time_ms: u32 = 0;
-            tracing::debug!(
+        let mut lap: u32 = 0;
+        let mut lap_time_ms: u32 = 0;
+        tracing::debug!(vehicle_id, "boink_get_vehicle_personal_best_lap");
+        let code = unsafe {
+            sys::boink_get_vehicle_personal_best_lap(
+                self.handle,
                 vehicle_id,
-                "boink_get_vehicle_personal_best_lap (legacy dynamic symbol)"
-            );
-            let code = unsafe {
-                get_vehicle_personal_best_lap(
-                    self.handle,
-                    vehicle_id,
-                    &mut lap as *mut _,
-                    &mut lap_time_ms as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                return Ok(Some(VehicleBestLap { lap, lap_time_ms }));
-            }
-            if code == sys::BOINK_NO_DATA {
-                return Ok(None);
-            }
-            return Err(Error::from_ffi_status(
+                &mut lap as *mut _,
+                &mut lap_time_ms as *mut _,
+            )
+        };
+        if code == sys::BOINK_OK {
+            Ok(Some(VehicleBestLap { lap, lap_time_ms }))
+        } else if code == sys::BOINK_NO_DATA {
+            Ok(None)
+        } else {
+            Err(Error::from_ffi_status(
                 code,
                 "boink_get_vehicle_personal_best_lap",
-            ));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            let mut lap: u32 = 0;
-            let mut lap_time_ms: u32 = 0;
-            tracing::debug!(vehicle_id, "boink_get_vehicle_personal_best_lap");
-            let code = unsafe {
-                sys::boink_get_vehicle_personal_best_lap(
-                    self.handle,
-                    vehicle_id,
-                    &mut lap as *mut _,
-                    &mut lap_time_ms as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                Ok(Some(VehicleBestLap { lap, lap_time_ms }))
-            } else if code == sys::BOINK_NO_DATA {
-                Ok(None)
-            } else {
-                Err(Error::from_ffi_status(
-                    code,
-                    "boink_get_vehicle_personal_best_lap",
-                ))
-            }
+            ))
         }
     }
 
@@ -1077,110 +675,46 @@ impl Engine {
     /// Returns `Ok(None)` when no best lap is available yet.
     #[instrument(skip(self))]
     pub fn get_best_lap(&self) -> Result<Option<RaceBestLap>> {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let get_best_lap = api.boink_get_best_lap();
-
-            let mut vehicle_id: u64 = 0;
-            let mut lap: u32 = 0;
-            let mut lap_time_ms: u32 = 0;
-            tracing::debug!("boink_get_best_lap (legacy dynamic symbol)");
-            let code = unsafe {
-                get_best_lap(
-                    self.handle,
-                    &mut vehicle_id as *mut _,
-                    &mut lap as *mut _,
-                    &mut lap_time_ms as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                return Ok(Some(RaceBestLap {
-                    vehicle_id,
-                    lap,
-                    lap_time_ms,
-                }));
-            }
-            if code == sys::BOINK_NO_DATA {
-                return Ok(None);
-            }
-            return Err(Error::from_ffi_status(code, "boink_get_best_lap"));
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            let mut vehicle_id: u64 = 0;
-            let mut lap: u32 = 0;
-            let mut lap_time_ms: u32 = 0;
-            tracing::debug!("boink_get_best_lap");
-            let code = unsafe {
-                sys::boink_get_best_lap(
-                    self.handle,
-                    &mut vehicle_id as *mut _,
-                    &mut lap as *mut _,
-                    &mut lap_time_ms as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                Ok(Some(RaceBestLap {
-                    vehicle_id,
-                    lap,
-                    lap_time_ms,
-                }))
-            } else if code == sys::BOINK_NO_DATA {
-                Ok(None)
-            } else {
-                Err(Error::from_ffi_status(code, "boink_get_best_lap"))
-            }
+        let mut vehicle_id: u64 = 0;
+        let mut lap: u32 = 0;
+        let mut lap_time_ms: u32 = 0;
+        tracing::debug!("boink_get_best_lap");
+        let code = unsafe {
+            sys::boink_get_best_lap(
+                self.handle,
+                &mut vehicle_id as *mut _,
+                &mut lap as *mut _,
+                &mut lap_time_ms as *mut _,
+            )
+        };
+        if code == sys::BOINK_OK {
+            Ok(Some(RaceBestLap {
+                vehicle_id,
+                lap,
+                lap_time_ms,
+            }))
+        } else if code == sys::BOINK_NO_DATA {
+            Ok(None)
+        } else {
+            Err(Error::from_ffi_status(code, "boink_get_best_lap"))
         }
     }
 
     fn read_vehicle_ghost_mode_runtime_state(&self, vehicle_id: u64) -> GhostModeRuntimeState {
-        #[cfg(feature = "legacy-native-lib")]
-        {
-            let api = NativeApi::instance();
-            let read_vehicle_ghost_mode_state = api.boink_read_vehicle_ghost_mode_state();
-
-            let mut raw: sys::BoinkGhostModeRuntimeState = unsafe { core::mem::zeroed() };
-            tracing::debug!(
-                vehicle_id,
-                "boink_read_vehicle_ghost_mode_state (legacy dynamic symbol)"
-            );
-            let code = unsafe {
-                read_vehicle_ghost_mode_state(self.handle, vehicle_id, &mut raw as *mut _)
-            };
-            if code == sys::BOINK_OK {
-                return raw.into();
-            }
+        let mut raw: sys::BoinkGhostModeRuntimeState = unsafe { core::mem::zeroed() };
+        tracing::debug!(vehicle_id, "boink_read_vehicle_ghost_mode_state");
+        let code = unsafe {
+            sys::boink_read_vehicle_ghost_mode_state(self.handle, vehicle_id, &mut raw as *mut _)
+        };
+        if code == sys::BOINK_OK {
+            raw.into()
+        } else {
             tracing::warn!(
                 vehicle_id,
                 code,
                 "boink_read_vehicle_ghost_mode_state failed; falling back to inactive ghost mode state"
             );
-            return GhostModeRuntimeState::default();
-        }
-
-        #[cfg(not(feature = "legacy-native-lib"))]
-        {
-            let mut raw: sys::BoinkGhostModeRuntimeState = unsafe { core::mem::zeroed() };
-            tracing::debug!(vehicle_id, "boink_read_vehicle_ghost_mode_state");
-            let code = unsafe {
-                sys::boink_read_vehicle_ghost_mode_state(
-                    self.handle,
-                    vehicle_id,
-                    &mut raw as *mut _,
-                )
-            };
-            if code == sys::BOINK_OK {
-                raw.into()
-            } else {
-                tracing::warn!(
-                    vehicle_id,
-                    code,
-                    "boink_read_vehicle_ghost_mode_state failed; falling back to inactive ghost mode state"
-                );
-                GhostModeRuntimeState::default()
-            }
+            GhostModeRuntimeState::default()
         }
     }
 
