@@ -1987,7 +1987,10 @@ fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
 /// Builds the engine instance using server configuration defaults.
 fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError> {
     validate_map_id(map_id)?;
+    #[cfg(feature = "official")]
     let track_glb = cfg.tracks_dir.join(format!("{map_id}.glb"));
+    #[cfg(feature = "local")]
+    let track_glb = cfg.local_tracks_cache_dir.join(format!("{map_id}.glb"));
     tracing::info!(
         env = ?cfg.env,
         map_id = %map_id,

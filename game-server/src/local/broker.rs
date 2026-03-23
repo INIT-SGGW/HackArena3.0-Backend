@@ -371,7 +371,7 @@ fn is_auth_error(status: &Status) -> bool {
     )
 }
 
-async fn fetch_auth_token() -> anyhow::Result<String> {
+pub(crate) async fn fetch_auth_token() -> anyhow::Result<String> {
     let candidates = ha_auth_candidates();
     let mut tried = Vec::with_capacity(candidates.len());
     let mut output = None;

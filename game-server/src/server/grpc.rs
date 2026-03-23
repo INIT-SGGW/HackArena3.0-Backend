@@ -48,6 +48,8 @@ use crate::db::repos::weather::WeatherRepo;
 #[cfg(feature = "local")]
 use crate::local::broker::BrokerRegistrationState;
 #[cfg(feature = "local")]
+use crate::local::map_assets::LocalMapAssetsSync;
+#[cfg(feature = "local")]
 use crate::local::sandbox_config_store::LocalSandboxConfigStore;
 use crate::runtime::engine_worker::EngineClient;
 #[cfg(feature = "official")]
@@ -143,7 +145,19 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let token_validator = std::sync::Arc::new(TokenValidator::new());
 
-    let asset_impl = AssetServiceImpl::new(cfg.tracks_dir.clone());
+    #[cfg(feature = "official")]
+    let asset_impl = AssetServiceImpl::for_official(cfg.local_tracks_dir.clone());
+    #[cfg(feature = "local")]
+    let local_map_sync = Arc::new(
+        LocalMapAssetsSync::new(
+            cfg.backend_endpoint.clone(),
+            cfg.local_tracks_cache_dir.clone(),
+        )
+        .map_err(std::io::Error::other)?,
+    );
+    #[cfg(feature = "local")]
+    let asset_impl =
+        AssetServiceImpl::for_local(cfg.local_tracks_cache_dir.clone(), local_map_sync.clone());
     let race_runtime_store = Arc::new(RaceRuntimeStore::new());
     let (frame_hub, frame_hub_handle) = spawn_frame_hub(
         engine.clone(),
@@ -250,7 +264,7 @@ pub async fn serve_grpc(
             local_sandbox_engine,
             race_runtime_store.clone(),
             cfg.local_max_active_sandboxes,
-            cfg.tracks_dir.clone(),
+            local_map_sync.clone(),
             local_weather_events,
         )
     };

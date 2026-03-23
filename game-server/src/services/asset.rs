@@ -3,6 +3,8 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(feature = "local")]
+use std::sync::Arc;
 
 use async_stream::try_stream;
 use bytes::{Bytes, BytesMut};
@@ -10,14 +12,18 @@ use hash_cache::HashCache;
 use proto::race::v1::asset_service_server::AssetService;
 use proto::race::v1::{
     GetMapAssetBundleMetaRequest, GetMapAssetBundleMetaResponse, GetMapAssetRequest,
-    GetMapAssetResponse, HelicopterViewMetadata, ListMapsRequest, ListMapsResponse,
-    MapAssetBundleMeta, MapAssetKind, MapAssetMeta, MapCatalogEntry, MapMetadata, MimeType,
-    MinimapMetadata, Vector3,
+    GetMapAssetResponse, GetMapAssetSyncMetaRequest, GetMapAssetSyncMetaResponse,
+    HelicopterViewMetadata, ListMapsRequest, ListMapsResponse, MapAssetBundleMeta, MapAssetKind,
+    MapAssetMeta, MapCatalogEntry, MapGlbKind, MapMetadata, MimeType, MinimapMetadata,
+    StreamMapAssetGlbRequest, StreamMapAssetGlbResponse, Vector3,
 };
 use serde::Deserialize;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use tonic::{Request, Response, Status};
+
+#[cfg(feature = "local")]
+use crate::local::map_assets::LocalMapAssetsSync;
 
 type BoxStream<T> = Pin<Box<dyn tokio_stream::Stream<Item = Result<T, Status>> + Send + 'static>>;
 
@@ -135,19 +141,41 @@ impl From<MapMetadataJson> for MapMetadata {
 
 /// gRPC AssetService implementation.
 pub struct AssetServiceImpl {
+    serving_enabled: bool,
     tracks_dir: PathBuf,
     hash_cache: HashCache,
+    #[cfg(feature = "local")]
+    local_sync: Option<Arc<LocalMapAssetsSync>>,
 }
 
 impl AssetServiceImpl {
-    /// Builds the service with the given track directory.
-    pub fn new(tracks_dir: PathBuf) -> Self {
+    fn new_internal(
+        tracks_dir: PathBuf,
+        serving_enabled: bool,
+        #[cfg(feature = "local")] local_sync: Option<Arc<LocalMapAssetsSync>>,
+    ) -> Self {
         let sidecars = tracks_dir.join(".hashes");
         let hash_cache = HashCache::new(Some(sidecars));
         Self {
+            serving_enabled,
             tracks_dir,
             hash_cache,
+            #[cfg(feature = "local")]
+            local_sync,
         }
+    }
+
+    #[cfg(feature = "official")]
+    pub fn for_official(local_tracks_dir: Option<PathBuf>) -> Self {
+        match local_tracks_dir {
+            Some(path) => Self::new_internal(path, true),
+            None => Self::new_internal(PathBuf::new(), false),
+        }
+    }
+
+    #[cfg(feature = "local")]
+    pub fn for_local(tracks_cache_dir: PathBuf, local_sync: Arc<LocalMapAssetsSync>) -> Self {
+        Self::new_internal(tracks_cache_dir, true, Some(local_sync))
     }
 
     fn sanitize_id(id: &str) -> Result<(), Status> {
@@ -188,6 +216,18 @@ impl AssetServiceImpl {
 
     fn resolve_map_metadata_path(root: &Path, map_id: &str) -> PathBuf {
         root.join(format!("{map_id}.json"))
+    }
+
+    fn resolve_path_for_glb_kind(
+        root: &Path,
+        map_id: &str,
+        kind: MapGlbKind,
+    ) -> Result<PathBuf, Status> {
+        match kind {
+            MapGlbKind::Main => Ok(Self::resolve_main_glb_path(root, map_id)),
+            MapGlbKind::Animation => Ok(Self::resolve_animation_glb_path(root, map_id)),
+            MapGlbKind::Unspecified => Err(Status::invalid_argument("glb kind is required")),
+        }
     }
 
     fn map_id_from_glb_entry(path: &Path) -> Option<String> {
@@ -371,6 +411,21 @@ impl AssetServiceImpl {
 
         Ok(parsed.into())
     }
+
+    #[cfg(feature = "local")]
+    async fn ensure_local_map_cached_if_needed(&self, map_id: &str) -> Result<(), Status> {
+        if let Some(sync) = &self.local_sync {
+            if !Self::has_required_bundle_assets(&self.tracks_dir, map_id) {
+                sync.ensure_map_cached(map_id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "local"))]
+    async fn ensure_local_map_cached_if_needed(&self, _map_id: &str) -> Result<(), Status> {
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -379,6 +434,16 @@ impl AssetService for AssetServiceImpl {
         &self,
         _request: Request<ListMapsRequest>,
     ) -> Result<Response<ListMapsResponse>, Status> {
+        #[cfg(feature = "local")]
+        if let Some(sync) = &self.local_sync {
+            let maps = sync.list_maps_remote_or_cached().await?;
+            return Ok(Response::new(ListMapsResponse { maps }));
+        }
+
+        if !self.serving_enabled {
+            return Ok(Response::new(ListMapsResponse { maps: Vec::new() }));
+        }
+
         let mut maps = Vec::new();
         let mut entries = fs::read_dir(&self.tracks_dir).await.map_err(|e| {
             tracing::error!(
@@ -428,6 +493,10 @@ impl AssetService for AssetServiceImpl {
     ) -> Result<Response<GetMapAssetBundleMetaResponse>, Status> {
         let GetMapAssetBundleMetaRequest { map_id } = request.into_inner();
         let map_id = Self::validate_map_id(&map_id)?;
+        self.ensure_local_map_cached_if_needed(&map_id).await?;
+        if !self.serving_enabled {
+            return Err(Status::not_found("map asset bundle not found"));
+        }
 
         let main_glb_path = Self::resolve_main_glb_path(&self.tracks_dir, &map_id);
         let animation_glb_path = Self::resolve_animation_glb_path(&self.tracks_dir, &map_id);
@@ -493,6 +562,10 @@ impl AssetService for AssetServiceImpl {
         } = request.into_inner();
 
         let map_id = Self::validate_map_id(&map_id)?;
+        self.ensure_local_map_cached_if_needed(&map_id).await?;
+        if !self.serving_enabled {
+            return Err(Status::not_found("map asset not found"));
+        }
         let kind = MapAssetKind::try_from(kind).unwrap_or(MapAssetKind::Unspecified);
         let path = Self::resolve_path_for_kind(&self.tracks_dir, &map_id, kind)?;
 
@@ -589,6 +662,146 @@ impl AssetService for AssetServiceImpl {
         };
         tracing::info!(%map_id, kind = ?kind, "asset streaming started");
 
+        Ok(Response::new(Box::pin(s)))
+    }
+
+    async fn get_map_asset_sync_meta(
+        &self,
+        request: Request<GetMapAssetSyncMetaRequest>,
+    ) -> Result<Response<GetMapAssetSyncMetaResponse>, Status> {
+        #[cfg(feature = "local")]
+        if self.local_sync.is_some() {
+            return Err(Status::unimplemented(
+                "GetMapAssetSyncMeta is not supported on local backend",
+            ));
+        }
+
+        let GetMapAssetSyncMetaRequest { map_id } = request.into_inner();
+        let map_id = Self::validate_map_id(&map_id)?;
+        if !self.serving_enabled {
+            return Err(Status::not_found("map sync metadata not found"));
+        }
+
+        let minimap_svg_path = Self::resolve_minimap_svg_path(&self.tracks_dir, &map_id);
+        let map_metadata_path = Self::resolve_map_metadata_path(&self.tracks_dir, &map_id);
+        let minimap_metadata_path = Self::resolve_minimap_metadata_path(&self.tracks_dir, &map_id);
+
+        let minimap_svg = fs::read(&minimap_svg_path)
+            .await
+            .map_err(|e| match e.kind() {
+                ErrorKind::NotFound => Status::not_found("map minimap svg not found"),
+                _ => Status::internal("failed to read minimap svg"),
+            })?;
+        let main_metadata_json =
+            fs::read(&map_metadata_path)
+                .await
+                .map_err(|e| match e.kind() {
+                    ErrorKind::NotFound => Status::not_found("map metadata json not found"),
+                    _ => Status::internal("failed to read map metadata json"),
+                })?;
+        let minimap_metadata_json = fs::read(&minimap_metadata_path).await.map_err(|e| match e
+            .kind()
+        {
+            ErrorKind::NotFound => Status::not_found("map minimap metadata json not found"),
+            _ => Status::internal("failed to read map minimap metadata json"),
+        })?;
+
+        Ok(Response::new(GetMapAssetSyncMetaResponse {
+            map_id,
+            minimap_svg: Bytes::from(minimap_svg),
+            main_metadata_json: Bytes::from(main_metadata_json),
+            minimap_metadata_json: Bytes::from(minimap_metadata_json),
+        }))
+    }
+
+    type StreamMapAssetGlbStream = BoxStream<StreamMapAssetGlbResponse>;
+
+    async fn stream_map_asset_glb(
+        &self,
+        request: Request<StreamMapAssetGlbRequest>,
+    ) -> Result<Response<Self::StreamMapAssetGlbStream>, Status> {
+        #[cfg(feature = "local")]
+        if self.local_sync.is_some() {
+            return Err(Status::unimplemented(
+                "StreamMapAssetGlb is not supported on local backend",
+            ));
+        }
+
+        let StreamMapAssetGlbRequest {
+            map_id,
+            kind,
+            offset,
+            limit,
+        } = request.into_inner();
+        let map_id = Self::validate_map_id(&map_id)?;
+        if !self.serving_enabled {
+            return Err(Status::not_found("map glb not found"));
+        }
+        let kind = MapGlbKind::try_from(kind).unwrap_or(MapGlbKind::Unspecified);
+        let path = Self::resolve_path_for_glb_kind(&self.tracks_dir, &map_id, kind)?;
+
+        let meta = fs::metadata(&path).await.map_err(|e| match e.kind() {
+            ErrorKind::NotFound => Status::not_found("map glb not found"),
+            _ => Status::internal("file IO error"),
+        })?;
+        let total_len = meta.len();
+
+        if offset >= total_len {
+            let s = try_stream! {
+                yield StreamMapAssetGlbResponse {
+                    offset,
+                    data: Bytes::new(),
+                    eof: true,
+                };
+            };
+            return Ok(Response::new(Box::pin(s) as Self::StreamMapAssetGlbStream));
+        }
+
+        let chunk_size = Self::choose_chunk_size(limit)?;
+        let stream_path = path.clone();
+        let s = try_stream! {
+            let mut file = File::open(&stream_path).await.map_err(|e| match e.kind() {
+                ErrorKind::NotFound => Status::not_found("map glb not found"),
+                _ => Status::internal("file IO error"),
+            })?;
+
+            file.seek(std::io::SeekFrom::Start(offset)).await.map_err(|_| Status::internal("file IO error"))?;
+
+            let mut reader = BufReader::with_capacity(chunk_size, file);
+            let mut pos = offset;
+            let mut buf = BytesMut::with_capacity(chunk_size);
+
+            loop {
+                buf.clear();
+                buf.reserve(chunk_size);
+                let n = reader
+                    .read_buf(&mut buf)
+                    .await
+                    .map_err(|_| Status::internal("file IO error"))?;
+
+                if n == 0 {
+                    yield StreamMapAssetGlbResponse {
+                        offset: pos,
+                        data: Bytes::new(),
+                        eof: true,
+                    };
+                    break;
+                }
+
+                let end = pos + n as u64;
+                let eof = end >= total_len;
+                let chunk_bytes = buf.split().freeze();
+                yield StreamMapAssetGlbResponse {
+                    offset: pos,
+                    data: chunk_bytes,
+                    eof,
+                };
+                pos = end;
+                if eof {
+                    break;
+                }
+            }
+        };
         Ok(Response::new(Box::pin(s)))
     }
 }

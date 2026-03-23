@@ -2,12 +2,11 @@
 
 mod helpers;
 mod mappers;
-mod validation;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::local::map_assets::LocalMapAssetsSync;
 use crate::local::sandbox_config_store::{
     LocalSandboxConfigRecord, LocalSandboxConfigStore, LocalTimeOfDaySettingsRecord,
     LocalWeatherSettingsRecord, local_sandbox_input_from_proto, local_sandbox_to_proto,
@@ -43,7 +42,6 @@ use self::mappers::{
     resolve_runtime_time_of_day_preset, runtime_time_of_day_preset_to_proto,
     runtime_weather_now_from_local, utc_now_timestamp, weather_params_from_local,
 };
-use self::validation::validate_map_id_track_exists;
 
 #[derive(Clone)]
 pub struct LocalSandboxAdminServiceImpl {
@@ -51,7 +49,7 @@ pub struct LocalSandboxAdminServiceImpl {
     engine: EngineClient,
     runtime_store: Arc<RaceRuntimeStore>,
     max_active_sandboxes: u32,
-    tracks_dir: PathBuf,
+    map_assets_sync: Arc<LocalMapAssetsSync>,
     started_at_utc: Arc<RwLock<HashMap<String, prost_types::Timestamp>>>,
     weather_events: LocalWeatherEventHub,
 }
@@ -65,7 +63,7 @@ impl LocalSandboxAdminServiceImpl {
         engine: EngineClient,
         runtime_store: Arc<RaceRuntimeStore>,
         max_active_sandboxes: u32,
-        tracks_dir: PathBuf,
+        map_assets_sync: Arc<LocalMapAssetsSync>,
         weather_events: LocalWeatherEventHub,
     ) -> Self {
         Self {
@@ -73,7 +71,7 @@ impl LocalSandboxAdminServiceImpl {
             engine,
             runtime_store,
             max_active_sandboxes,
-            tracks_dir,
+            map_assets_sync,
             started_at_utc: Arc::new(RwLock::new(HashMap::new())),
             weather_events,
         }
@@ -272,7 +270,9 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
             sandbox_id: local_sandbox_id_v5(&config, request.expected_revision),
             config,
         };
-        validate_map_id_track_exists(&self.tracks_dir, &sandbox.config.map_id).await?;
+        self.map_assets_sync
+            .ensure_map_cached(&sandbox.config.map_id)
+            .await?;
         let revision = self
             .store
             .create_config(request.expected_revision, sandbox.clone())
@@ -304,7 +304,9 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
             sandbox_id: request.sandbox_id,
             config,
         };
-        validate_map_id_track_exists(&self.tracks_dir, &sandbox.config.map_id).await?;
+        self.map_assets_sync
+            .ensure_map_cached(&sandbox.config.map_id)
+            .await?;
 
         let revision = self
             .store
@@ -450,7 +452,9 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
                         request.sandbox_id
                     ))
                 })?;
-            validate_map_id_track_exists(&self.tracks_dir, &sandbox.config.map_id).await?;
+            self.map_assets_sync
+                .ensure_map_cached(&sandbox.config.map_id)
+                .await?;
 
             let runtime_before = self.engine.runtime_state().await.map_err(map_worker_err)?;
             if runtime_before.revision != request.expected_revision {

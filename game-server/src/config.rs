@@ -11,6 +11,8 @@ const DEFAULT_API_URL: &str = "https://ha3-api.hackarena.pl";
 const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
 #[cfg(feature = "local")]
 const LOCAL_SANDBOX_STORE_RELATIVE_PATH: &str = "local/sandbox-configs.json";
+#[cfg(feature = "local")]
+const LOCAL_TRACKS_CACHE_RELATIVE_PATH: &str = "local/tracks-cache";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppEnv {
@@ -56,9 +58,15 @@ pub struct Config {
     #[cfg(feature = "local")]
     pub broker_endpoint: String,
     #[cfg(feature = "local")]
+    pub backend_endpoint: String,
+    #[cfg(feature = "local")]
     pub local_sandbox_store_path: PathBuf,
     #[cfg(feature = "local")]
+    pub local_tracks_cache_dir: PathBuf,
+    #[cfg(feature = "local")]
     pub local_max_active_sandboxes: u32,
+    #[cfg(feature = "official")]
+    pub local_tracks_dir: Option<PathBuf>,
     #[cfg(feature = "official")]
     pub official_database_url: String,
     #[cfg(feature = "official")]
@@ -137,20 +145,31 @@ impl Config {
             _ => default_expose_headers(),
         };
 
-        let tracks_rel = PathBuf::from("assets").join("tracks");
-        let tracks_dir = resolve_dir("TRACKS_DIR", tracks_rel)
-            .map_err(|e| format!("Failed to resolve tracks directory: {}", e))?;
+        #[cfg(feature = "official")]
+        let tracks_dir = {
+            let tracks_rel = PathBuf::from("assets").join("tracks");
+            let tracks_dir = resolve_dir("TRACKS_DIR", tracks_rel)
+                .map_err(|e| format!("Failed to resolve tracks directory: {}", e))?;
 
-        tracing::info!(path = %tracks_dir.display(), "using tracks directory");
+            tracing::info!(path = %tracks_dir.display(), "using tracks directory");
 
-        if tracks_dir
-            .read_dir()
-            .map_err(|e| e.to_string())?
-            .next()
-            .is_none()
-        {
-            tracing::warn!(path=%tracks_dir.display(), "tracks directory is empty");
-        }
+            if tracks_dir
+                .read_dir()
+                .map_err(|e| e.to_string())?
+                .next()
+                .is_none()
+            {
+                tracing::warn!(path=%tracks_dir.display(), "tracks directory is empty");
+            }
+            tracks_dir
+        };
+        #[cfg(feature = "local")]
+        let tracks_dir = {
+            let dir = resolve_local_tracks_cache_dir()
+                .map_err(|e| format!("Failed to resolve local tracks cache directory: {e}"))?;
+            tracing::info!(path = %dir.display(), "using local tracks cache directory");
+            dir
+        };
 
         let bolids_rel = PathBuf::from("assets").join("bolids");
         let bolids_dir = resolve_dir("BOLIDS_DIR", bolids_rel)
@@ -191,11 +210,24 @@ impl Config {
         let game_token_jwks_endpoint = to_game_token_jwks_endpoint(&api_url)?;
         #[cfg(feature = "local")]
         let broker_endpoint = to_broker_endpoint(&api_url)?;
+        #[cfg(feature = "local")]
+        let backend_endpoint = to_backend_endpoint(&api_url)?;
 
         #[cfg(feature = "local")]
         let local_sandbox_store_path = default_local_sandbox_store_path();
         #[cfg(feature = "local")]
+        let local_tracks_cache_dir = tracks_dir.clone();
+        #[cfg(feature = "local")]
         let local_max_active_sandboxes = LOCAL_MAX_ACTIVE_SANDBOXES;
+        #[cfg(feature = "official")]
+        let local_tracks_dir = resolve_optional_dir("LOCAL_TRACKS_DIR")
+            .map_err(|e| format!("Failed to resolve LOCAL_TRACKS_DIR: {e}"))?;
+        #[cfg(feature = "official")]
+        if let Some(path) = &local_tracks_dir {
+            tracing::info!(path = %path.display(), "using local tracks directory for AssetService");
+        } else {
+            tracing::warn!("LOCAL_TRACKS_DIR is not configured; local map assets are disabled");
+        }
 
         #[cfg(feature = "official")]
         let official_database_url = read_env_string("OFFICIAL_DATABASE_URL")
@@ -222,9 +254,15 @@ impl Config {
             #[cfg(feature = "local")]
             broker_endpoint,
             #[cfg(feature = "local")]
+            backend_endpoint,
+            #[cfg(feature = "local")]
             local_sandbox_store_path,
             #[cfg(feature = "local")]
+            local_tracks_cache_dir,
+            #[cfg(feature = "local")]
             local_max_active_sandboxes,
+            #[cfg(feature = "official")]
+            local_tracks_dir,
             #[cfg(feature = "official")]
             official_database_url,
             #[cfg(feature = "official")]
@@ -252,6 +290,12 @@ fn to_game_token_jwks_endpoint(api_url: &str) -> Result<String, String> {
     Ok(format!("{trimmed}/gametoken"))
 }
 
+#[cfg(feature = "local")]
+fn to_backend_endpoint(api_url: &str) -> Result<String, String> {
+    let trimmed = validate_api_url(api_url)?;
+    Ok(format!("{trimmed}/backend"))
+}
+
 fn validate_api_url(api_url: &str) -> Result<&str, String> {
     let trimmed = api_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -270,6 +314,19 @@ fn exe_dir() -> Option<PathBuf> {
         .ok()?
         .parent()
         .map(|p| p.to_path_buf())
+}
+
+#[cfg(feature = "local")]
+fn resolve_local_tracks_cache_dir() -> anyhow::Result<PathBuf> {
+    let path = if let Some(raw) = read_env_string("LOCAL_TRACKS_CACHE_DIR") {
+        PathBuf::from(raw)
+    } else if let Some(dir) = exe_dir() {
+        dir.join(LOCAL_TRACKS_CACHE_RELATIVE_PATH)
+    } else {
+        PathBuf::from(LOCAL_TRACKS_CACHE_RELATIVE_PATH)
+    };
+    std::fs::create_dir_all(&path)?;
+    Ok(path.canonicalize().unwrap_or(path))
 }
 
 fn resolve_dir<P: AsRef<Path>>(env_var: &str, default_rel: P) -> anyhow::Result<PathBuf> {
@@ -330,6 +387,21 @@ fn resolve_dir<P: AsRef<Path>>(env_var: &str, default_rel: P) -> anyhow::Result<
     Err(anyhow::anyhow!(
         "Could not resolve directory for {env_var}. Tried: {list}"
     ))
+}
+
+#[cfg(feature = "official")]
+fn resolve_optional_dir(env_var: &str) -> anyhow::Result<Option<PathBuf>> {
+    let Some(raw) = read_env_string(env_var) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw);
+    if !path.is_dir() {
+        anyhow::bail!(
+            "{env_var} points to a non-existent directory: {}",
+            path.display()
+        );
+    }
+    Ok(Some(path.canonicalize().unwrap_or(path)))
 }
 
 fn parse_allow_origin(raw: &str) -> Result<AllowOrigin, String> {
