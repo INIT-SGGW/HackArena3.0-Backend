@@ -13,8 +13,8 @@
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 16;
-pub const BOINK_C_API_VERSION_PATCH: c_uint = 1;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 17;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
@@ -22,6 +22,9 @@ pub const BOINK_OK: c_int = 0;
 /// Indicates that no data is currently available for the request.
 /// This is not considered an error.
 pub const BOINK_NO_DATA: c_int = 1;
+
+/// Indicates that the operation could not be completed because required conditions were not met.
+pub const BOINK_CONDITION_NOT_MET: c_int = 2;
 
 /// Indicates an invalid argument (for example a null pointer or an out-of-range value).
 pub const BOINK_ERR_INVALID_ARG: c_int = -1;
@@ -109,6 +112,10 @@ pub struct BoinkControls {
     pub throttle: Real,
     /// Brake demand in the range [0.0, 1.0].
     pub brake: Real,
+    /// Brake balancer demand in the range [0.0, 1.0].
+    pub brake_balancer: Real,
+    /// Differential lock demand in the range [0.0, 1.0].
+    pub differential_lock: Real,
     /// Normalized steering input in the range [-1.0, 1.0].
     ///
     /// Negative values correspond to steering left.
@@ -220,12 +227,12 @@ pub struct BoinkGhostModeRuntimeState {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BoinkTyreType {
-    /// Soft compound tyre.
+    /// Soft tyre compound.
     #[default]
     BOINK_TYRE_TYPE_SOFT = 0,
-    /// Hard compound tyre.
+    /// Normal tyre compound.
     BOINK_TYRE_TYPE_HARD = 1,
-    /// Wet tyre.
+    /// Wet tyre compound.
     BOINK_TYRE_TYPE_WET = 2,
 }
 
@@ -453,6 +460,16 @@ pub struct BoinkVehicleState {
     ///   [2] = rear-left
     ///   [3] = rear-right
     pub tyre_temperature_celsius: [Real; 4],
+    /// Current tyre slip vector length.
+    /// - 0-1: the tyre maintains grip with the ground
+    /// - >1: the tyre has lost traction
+    ///
+    /// Index mapping:
+    ///   [0] = front-left
+    ///   [1] = front-right
+    ///   [2] = rear-left
+    ///   [3] = rear-right
+    pub tyre_slip: [Real; 4],
     /// Currently equipped tyre type.
     pub tyre_type: BoinkTyreType,
     /// Indicates whether all four wheels are in contact with the ground.
@@ -855,6 +872,26 @@ unsafe extern "C" {
     /// - Another error code for other failures.
     pub fn boink_set_vehicle_to_pitstop(h: BoinkHandle, vehicle_id: u64) -> c_int;
 
+    /// Sets the tyre compound/type for a specific vehicle.
+    ///
+    /// This immediately updates the vehicle's tyres in the simulation.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle.
+    /// - `tyre_type` - tyre compound/type to apply.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - `BOINK_CONDITION_NOT_MET` when the vehicle was not in the pitstop fix zone or was not stationary.
+    /// - Another error code for other failures.
+    pub fn boink_set_vehicle_tyre_type(
+        h: BoinkHandle,
+        vehicle_id: u64,
+        tyre_type: BoinkTyreType,
+    ) -> c_int;
+
     /// Sets the world-space position of a vehicle at a selected starting position.
     ///
     /// This immediately updates the specified vehicle's position in the simulation.
@@ -923,6 +960,25 @@ unsafe extern "C" {
         h: BoinkHandle,
         vehicle_id: u64,
         out_state: *mut BoinkVehicleState,
+    ) -> c_int;
+
+    /// Retrieves the dimensions of a specific vehicle.
+    ///
+    /// Parameters:
+    /// - `handle` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle.
+    /// - `out_width` - non-null pointer receiving the vehicle width.
+    /// - `out_depth` - non-null pointer receiving the vehicle depth (length).
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - An error code on failure.
+    pub fn boink_get_vehicle_dimensions(
+        handle: BoinkHandle,
+        vehicle_id: u64,
+        out_width: *mut Real,
+        out_depth: *mut Real,
     ) -> c_int;
 
     /// Reads race-progress metrics for the specified vehicle.

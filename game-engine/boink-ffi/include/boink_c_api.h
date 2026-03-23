@@ -32,9 +32,9 @@
 
 #define BOINK_C_API_VERSION_MAJOR 0
 
-#define BOINK_C_API_VERSION_MINOR 16
+#define BOINK_C_API_VERSION_MINOR 17
 
-#define BOINK_C_API_VERSION_PATCH 1
+#define BOINK_C_API_VERSION_PATCH 0
 
 /**
  * Indicates successful operation.
@@ -46,6 +46,11 @@
  * This is not considered an error.
  */
 #define BOINK_NO_DATA 1
+
+/**
+ * Indicates that the operation could not be completed because required conditions were not met.
+ */
+#define BOINK_CONDITION_NOT_MET 2
 
 /**
  * Indicates an invalid argument (for example a null pointer or an out-of-range value).
@@ -156,15 +161,15 @@ typedef enum BoinkGearShift {
  */
 typedef enum BoinkTyreType {
   /**
-   * Soft compound tyre.
+   * Soft tyre compound.
    */
   BOINK_TYRE_TYPE_SOFT = 0,
   /**
-   * Hard compound tyre.
+   * Normal tyre compound.
    */
   BOINK_TYRE_TYPE_HARD = 1,
   /**
-   * Wet tyre.
+   * Wet tyre compound.
    */
   BOINK_TYRE_TYPE_WET = 2,
 } BoinkTyreType;
@@ -480,6 +485,14 @@ typedef struct BoinkControls {
    */
   Real brake;
   /**
+   * Brake balancer demand in the range [0.0, 1.0].
+   */
+  Real brake_balancer;
+  /**
+   * Differential lock demand in the range [0.0, 1.0].
+   */
+  Real differential_lock;
+  /**
    * Normalized steering input in the range [-1.0, 1.0].
    *
    * Negative values correspond to steering left.
@@ -615,6 +628,18 @@ typedef struct BoinkVehicleState {
    *   [3] = rear-right
    */
   Real tyre_temperature_celsius[4];
+  /**
+   * Current tyre slip vector length.
+   * - 0-1: the tyre maintains grip with the ground
+   * - >1: the tyre has lost traction
+   *
+   * Index mapping:
+   *   [0] = front-left
+   *   [1] = front-right
+   *   [2] = rear-left
+   *   [3] = rear-right
+   */
+  Real tyre_slip[4];
   /**
    * Currently equipped tyre type.
    */
@@ -1148,6 +1173,26 @@ BOINK_API int boink_set_vehicle_back_to_track(BoinkHandle h, uint64_t vehicle_id
 BOINK_API int boink_set_vehicle_to_pitstop(BoinkHandle h, uint64_t vehicle_id);
 
 /**
+ * Sets the tyre compound/type for a specific vehicle.
+ *
+ * This immediately updates the vehicle's tyres in the simulation.
+ *
+ * Parameters:
+ * - `h` - handle to a valid race.
+ * - `vehicle_id` - identifier of the vehicle.
+ * - `tyre_type` - tyre compound/type to apply.
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+ * - `BOINK_CONDITION_NOT_MET` when the vehicle was not in the pitstop fix zone or was not stationary.
+ * - Another error code for other failures.
+ */
+BOINK_API int boink_set_vehicle_tyre_type(BoinkHandle h,
+                                       uint64_t vehicle_id,
+                                       enum BoinkTyreType tyre_type);
+
+/**
  * Sets the world-space position of a vehicle at a selected starting position.
  *
  * This immediately updates the specified vehicle's position in the simulation.
@@ -1218,6 +1263,25 @@ BOINK_API int boink_set_vehicle_orientation(BoinkHandle h,
 BOINK_API int boink_read_vehicle_state(BoinkHandle h,
                                     uint64_t vehicle_id,
                                     struct BoinkVehicleState *out_state);
+
+/**
+ * Retrieves the dimensions of a specific vehicle.
+ *
+ * Parameters:
+ * - `handle` - handle to a valid race.
+ * - `vehicle_id` - identifier of the vehicle.
+ * - `out_width` - non-null pointer receiving the vehicle width.
+ * - `out_depth` - non-null pointer receiving the vehicle depth (length).
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+ * - An error code on failure.
+ */
+BOINK_API int boink_get_vehicle_dimensions(BoinkHandle handle,
+                                        uint64_t vehicle_id,
+                                        Real *out_width,
+                                        Real *out_depth);
 
 /**
  * Reads race-progress metrics for the specified vehicle.
