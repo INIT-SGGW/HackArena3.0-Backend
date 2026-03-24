@@ -39,3 +39,6 @@ deploy/releases/
 
 # Runtime logs
 logs/
+
+# Submission archives
+.submissions/
