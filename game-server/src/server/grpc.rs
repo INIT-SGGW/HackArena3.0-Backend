@@ -23,6 +23,10 @@ use proto::race::v1::runtime_admin_service_server::RuntimeAdminServiceServer;
 use proto::race::v1::sandbox_config_admin_service_server::SandboxConfigAdminServiceServer;
 use proto::race::v1::track_service_server::TrackServiceServer;
 #[cfg(feature = "official")]
+use proto::submission::v1::slot_query_service_server::SlotQueryServiceServer;
+#[cfg(feature = "official")]
+use proto::submission::v1::submission_service_server::SubmissionServiceServer;
+#[cfg(feature = "official")]
 use proto::weather::v1::weather_admin_service_server::WeatherAdminServiceServer;
 use proto::weather::v1::weather_query_service_server::WeatherQueryServiceServer;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -43,6 +47,8 @@ use crate::config::Config;
 use crate::db::repos::race_config::RaceConfigRepo;
 #[cfg(feature = "official")]
 use crate::db::repos::sandbox_config::SandboxConfigRepo;
+#[cfg(feature = "official")]
+use crate::db::repos::submission::SubmissionRepo;
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
 #[cfg(feature = "local")]
@@ -70,6 +76,10 @@ use crate::services::race_participant::RaceParticipantServiceImpl;
 use crate::services::race_table::RaceTableQueryServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::sandbox_admin::SandboxAdminServiceImpl;
+#[cfg(feature = "official")]
+use crate::services::submission::{
+    HpsTeamResolver, SlotQueryServiceImpl, SubmissionServiceImpl, spawn_submission_worker,
+};
 use crate::services::track::TrackServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::weather::LocalWeatherEventHub;
@@ -141,9 +151,51 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<PublicMenuServiceServer<PublicMenuServiceImpl>>()
         .await;
+    #[cfg(feature = "official")]
+    health_reporter
+        .set_serving::<SubmissionServiceServer<SubmissionServiceImpl>>()
+        .await;
+    #[cfg(feature = "official")]
+    health_reporter
+        .set_serving::<SlotQueryServiceServer<SlotQueryServiceImpl>>()
+        .await;
 
     #[cfg(feature = "official")]
     let token_validator = std::sync::Arc::new(TokenValidator::new());
+    #[cfg(feature = "official")]
+    let submission_repo = SubmissionRepo::new(official_db_pool.clone());
+    #[cfg(feature = "official")]
+    let team_resolver = Arc::new(
+        HpsTeamResolver::new(
+            &cfg.hps_endpoint,
+            cfg.keycloak_token_url.clone(),
+            cfg.keycloak_client_id.clone(),
+            cfg.keycloak_client_secret.clone(),
+        )
+        .map_err(std::io::Error::other)?,
+    );
+    #[cfg(feature = "official")]
+    let (submission_queue_tx, slot_updates_tx, submission_worker_handle) = spawn_submission_worker(
+        cfg.clone(),
+        submission_repo.clone(),
+        shutdown_rx.resubscribe(),
+    )
+    .map_err(std::io::Error::other)?;
+    #[cfg(feature = "official")]
+    let submission_impl = SubmissionServiceImpl::new(
+        submission_repo.clone(),
+        token_validator.clone(),
+        team_resolver.clone(),
+        submission_queue_tx,
+        cfg.submission_archive_max_mb,
+    );
+    #[cfg(feature = "official")]
+    let slot_query_impl = SlotQueryServiceImpl::new(
+        submission_repo.clone(),
+        token_validator.clone(),
+        team_resolver,
+        slot_updates_tx,
+    );
 
     #[cfg(feature = "official")]
     let asset_impl = AssetServiceImpl::for_official(cfg.local_tracks_dir.clone());
@@ -330,6 +382,10 @@ pub async fn serve_grpc(
     let server = server.add_service(RuntimeAdminServiceServer::new(sandbox_admin_impl));
     #[cfg(feature = "official")]
     let server = server.add_service(PublicMenuServiceServer::new(public_menu_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(SubmissionServiceServer::new(submission_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(SlotQueryServiceServer::new(slot_query_impl));
     #[cfg(feature = "local")]
     let server = server.add_service(LocalSandboxAdminServiceServer::new(
         local_sandbox_admin_impl,
@@ -344,6 +400,10 @@ pub async fn serve_grpc(
 
     if !frame_hub_handle.is_finished() {
         frame_hub_handle.abort();
+    }
+    #[cfg(feature = "official")]
+    if !submission_worker_handle.is_finished() {
+        submission_worker_handle.abort();
     }
 
     serve_result

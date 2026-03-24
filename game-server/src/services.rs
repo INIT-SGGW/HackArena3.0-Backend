@@ -18,5 +18,7 @@ pub mod race_participant;
 pub mod race_table;
 #[cfg(feature = "official")]
 pub mod sandbox_admin;
+#[cfg(feature = "official")]
+pub mod submission;
 pub mod track;
 pub mod weather;

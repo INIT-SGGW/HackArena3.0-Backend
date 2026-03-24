@@ -7,6 +7,10 @@ use tower_http::cors::{AllowOrigin, ExposeHeaders};
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
 const DEFAULT_HPS_ENDPOINT: &str = "http://127.0.0.1:50052";
 const DEFAULT_API_URL: &str = "https://ha3-api.hackarena.pl";
+#[cfg(feature = "official")]
+const DEFAULT_SUBMISSION_ARCHIVE_MAX_MB: u32 = 25;
+#[cfg(feature = "official")]
+const DEFAULT_SUBMISSION_BUILD_TIMEOUT_SEC: u64 = 1_800;
 #[cfg(feature = "local")]
 const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
 #[cfg(feature = "local")]
@@ -71,6 +75,30 @@ pub struct Config {
     pub official_database_url: String,
     #[cfg(feature = "official")]
     pub official_db_max_connections: u32,
+    #[cfg(feature = "official")]
+    pub builder_host: String,
+    #[cfg(feature = "official")]
+    pub builder_ssh_key_path: PathBuf,
+    #[cfg(feature = "official")]
+    pub builder_ssh_known_hosts_file: PathBuf,
+    #[cfg(feature = "official")]
+    pub registry: String,
+    #[cfg(feature = "official")]
+    pub submission_archive_max_mb: u32,
+    #[cfg(feature = "official")]
+    pub submission_build_timeout_sec: u64,
+    #[cfg(feature = "official")]
+    pub keycloak_token_url: String,
+    #[cfg(feature = "official")]
+    pub keycloak_client_id: String,
+    #[cfg(feature = "official")]
+    pub keycloak_client_secret: String,
+    #[cfg(feature = "official")]
+    pub wrapper_gh_owner: String,
+    #[cfg(feature = "official")]
+    pub wrapper_gh_repo: String,
+    #[cfg(feature = "official")]
+    pub gh_token: Option<String>,
 }
 
 impl Config {
@@ -236,6 +264,64 @@ impl Config {
         #[cfg(feature = "official")]
         let official_db_max_connections =
             parse_u32_env("OFFICIAL_DB_MAX_CONNECTIONS")?.unwrap_or(8);
+        #[cfg(feature = "official")]
+        let builder_host = read_env_string("BUILDER_HOST")
+            .ok_or("BUILDER_HOST must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let builder_ssh_key_path = {
+            let raw = read_env_string("BUILDER_SSH_KEY_PATH")
+                .ok_or("BUILDER_SSH_KEY_PATH must be set for official backend")?;
+            let path = PathBuf::from(raw);
+            if !path.is_file() {
+                return Err(format!(
+                    "BUILDER_SSH_KEY_PATH points to a non-existent file: {}",
+                    path.display()
+                ));
+            }
+            path.canonicalize().unwrap_or(path)
+        };
+        #[cfg(feature = "official")]
+        let builder_ssh_known_hosts_file = PathBuf::from(
+            read_env_string("BUILDER_SSH_KNOWN_HOSTS_FILE")
+                .unwrap_or_else(|| ".submissions/known_hosts".to_string()),
+        );
+        #[cfg(feature = "official")]
+        let registry =
+            read_env_string("REGISTRY").ok_or("REGISTRY must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let keycloak_token_url = validate_http_url(
+            "KEYCLOAK_TOKEN_URL",
+            &read_env_string("KEYCLOAK_TOKEN_URL")
+                .ok_or("KEYCLOAK_TOKEN_URL must be set for official backend")?,
+        )?;
+        #[cfg(feature = "official")]
+        let keycloak_client_id = read_env_string("KEYCLOAK_CLIENT_ID")
+            .ok_or("KEYCLOAK_CLIENT_ID must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let keycloak_client_secret = read_env_string("KEYCLOAK_CLIENT_SECRET")
+            .ok_or("KEYCLOAK_CLIENT_SECRET must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let wrapper_gh_owner = read_env_string("WRAPPER_GH_OWNER")
+            .ok_or("WRAPPER_GH_OWNER must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let wrapper_gh_repo = read_env_string("WRAPPER_GH_REPO")
+            .ok_or("WRAPPER_GH_REPO must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let gh_token = read_env_string("GH_TOKEN");
+        #[cfg(feature = "official")]
+        let submission_archive_max_mb = parse_u32_env("SUBMISSION_ARCHIVE_MAX_MB")?
+            .unwrap_or(DEFAULT_SUBMISSION_ARCHIVE_MAX_MB);
+        #[cfg(feature = "official")]
+        if submission_archive_max_mb == 0 {
+            return Err("SUBMISSION_ARCHIVE_MAX_MB must be >= 1".into());
+        }
+        #[cfg(feature = "official")]
+        let submission_build_timeout_sec = parse_u64_env("SUBMISSION_BUILD_TIMEOUT_SEC")?
+            .unwrap_or(DEFAULT_SUBMISSION_BUILD_TIMEOUT_SEC);
+        #[cfg(feature = "official")]
+        if submission_build_timeout_sec == 0 {
+            return Err("SUBMISSION_BUILD_TIMEOUT_SEC must be >= 1".into());
+        }
 
         Ok(Self {
             env: app_env,
@@ -267,6 +353,30 @@ impl Config {
             official_database_url,
             #[cfg(feature = "official")]
             official_db_max_connections,
+            #[cfg(feature = "official")]
+            builder_host,
+            #[cfg(feature = "official")]
+            builder_ssh_key_path,
+            #[cfg(feature = "official")]
+            builder_ssh_known_hosts_file,
+            #[cfg(feature = "official")]
+            registry,
+            #[cfg(feature = "official")]
+            submission_archive_max_mb,
+            #[cfg(feature = "official")]
+            submission_build_timeout_sec,
+            #[cfg(feature = "official")]
+            keycloak_token_url,
+            #[cfg(feature = "official")]
+            keycloak_client_id,
+            #[cfg(feature = "official")]
+            keycloak_client_secret,
+            #[cfg(feature = "official")]
+            wrapper_gh_owner,
+            #[cfg(feature = "official")]
+            wrapper_gh_repo,
+            #[cfg(feature = "official")]
+            gh_token,
         })
     }
 }
@@ -307,6 +417,29 @@ fn validate_api_url(api_url: &str) -> Result<&str, String> {
     }
 
     Ok(trimmed)
+}
+
+#[cfg(feature = "official")]
+fn validate_http_url(name: &str, raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{name} cannot be empty"));
+    }
+
+    let uri = trimmed
+        .parse::<http::Uri>()
+        .map_err(|e| format!("Invalid {name}: {e}"))?;
+
+    match uri.scheme_str() {
+        Some("http") | Some("https") => {}
+        _ => return Err(format!("{name} must start with http:// or https://")),
+    }
+
+    if uri.authority().is_none() {
+        return Err(format!("{name} must include host"));
+    }
+
+    Ok(trimmed.to_string())
 }
 
 fn exe_dir() -> Option<PathBuf> {
@@ -501,6 +634,17 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>, String> {
     match read_env_string(name) {
         Some(value) => value
             .parse::<u32>()
+            .map(Some)
+            .map_err(|e| format!("Invalid {name}: {e}")),
+        None => Ok(None),
+    }
+}
+
+#[cfg(feature = "official")]
+fn parse_u64_env(name: &str) -> Result<Option<u64>, String> {
+    match read_env_string(name) {
+        Some(value) => value
+            .parse::<u64>()
             .map(Some)
             .map_err(|e| format!("Invalid {name}: {e}")),
         None => Ok(None),

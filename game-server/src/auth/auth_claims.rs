@@ -20,6 +20,7 @@ const AUTH_CLAIMS_HEADER: &str = "x-ha3-auth-claims";
 
 #[derive(Clone, Deserialize)]
 struct TokenClaims {
+    sub: Option<String>,
     roles: Option<Vec<String>>,
     realm_access: Option<RealmAccess>,
 }
@@ -45,6 +46,19 @@ impl TokenValidator {
             .ok_or_else(|| Status::unauthenticated("missing x-ha3-auth-claims"))?;
         let roles = extract_roles(&claims);
         Ok(roles.iter().any(|role| is_admin_role(role)))
+    }
+
+    /// Parse trusted claims from metadata and return the `sub` claim.
+    pub async fn subject(&self, metadata: &MetadataMap) -> Result<String, Status> {
+        let claims = claims_from_metadata(metadata)?
+            .ok_or_else(|| Status::unauthenticated("missing x-ha3-auth-claims"))?;
+        let subject = claims
+            .sub
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| Status::unauthenticated("missing sub claim"))?;
+        Ok(subject.to_string())
     }
 }
 
