@@ -42,6 +42,12 @@ pub struct FilledTeamSlotRecord {
     pub description: Option<String>,
 }
 
+/// Succeeded submission assigned to requested team slot.
+#[derive(Debug, Clone)]
+pub struct SucceededTeamSlotSubmissionRecord {
+    pub submission_id: String,
+}
+
 /// Succeeded submission not referenced by any team slot.
 #[derive(Debug, Clone)]
 pub struct OrphanedSubmissionRecord {
@@ -254,6 +260,31 @@ impl SubmissionRepo {
                 },
             )
             .collect())
+    }
+
+    /// Returns succeeded submission currently assigned to team slot.
+    pub async fn get_succeeded_submission_for_slot(
+        &self,
+        team_id: &str,
+        slot_index: i16,
+    ) -> anyhow::Result<Option<SucceededTeamSlotSubmissionRecord>> {
+        let row = sqlx::query_as::<_, (String,)>(
+            r#"
+            SELECT submissions.submission_id
+            FROM team_submission_slots AS slots
+            JOIN submissions ON submissions.submission_id = slots.submission_id
+            WHERE slots.team_id = $1
+              AND slots.slot_index = $2
+              AND submissions.status = 'succeeded'::submission_status
+            LIMIT 1
+            "#,
+        )
+        .bind(team_id)
+        .bind(slot_index)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|(submission_id,)| SucceededTeamSlotSubmissionRecord { submission_id }))
     }
 
     /// Returns succeeded submissions for team that are not used in any slot.

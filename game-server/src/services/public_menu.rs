@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+use crate::auth::auth_claims::TokenValidator;
 use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 use crate::db::repos::sandbox_config::{SandboxConfigRecord, SandboxConfigRepo};
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
@@ -24,6 +25,7 @@ use crate::services::sandbox_admin::mappers::{
     find_sandbox_by_id, public_sandbox_runtime_info_from_record,
     runtime_time_of_day_preset_to_proto, unix_ms_to_timestamp, utc_now_timestamp,
 };
+use crate::services::submission::HpsTeamResolver;
 
 const STREAM_CHANNEL_CAPACITY: usize = 16;
 const STREAM_POLL_INTERVAL_MS: u64 = 1000;
@@ -129,6 +131,8 @@ pub struct PublicMenuServiceImpl {
     race_repo: RaceConfigRepo,
     engine: EngineClient,
     runtime_store: Arc<RaceRuntimeStore>,
+    token_validator: Arc<TokenValidator>,
+    team_resolver: Arc<HpsTeamResolver>,
     upcoming_invalidation: UpcomingRacesCacheInvalidation,
     sandbox_invalidation: SandboxConfigCacheInvalidation,
     upcoming_cache: Arc<RwLock<UpcomingRacesCacheState>>,
@@ -141,6 +145,8 @@ impl PublicMenuServiceImpl {
         race_repo: RaceConfigRepo,
         engine: EngineClient,
         runtime_store: Arc<RaceRuntimeStore>,
+        token_validator: Arc<TokenValidator>,
+        team_resolver: Arc<HpsTeamResolver>,
         upcoming_invalidation: UpcomingRacesCacheInvalidation,
         sandbox_invalidation: SandboxConfigCacheInvalidation,
     ) -> Self {
@@ -149,6 +155,8 @@ impl PublicMenuServiceImpl {
             race_repo,
             engine,
             runtime_store,
+            token_validator,
+            team_resolver,
             upcoming_invalidation,
             sandbox_invalidation,
             upcoming_cache: Arc::new(RwLock::new(UpcomingRacesCacheState::default())),
@@ -156,10 +164,11 @@ impl PublicMenuServiceImpl {
         }
     }
 
-    async fn build_menu_state(&self) -> Result<PublicMenuState, Status> {
+    async fn build_menu_state(&self, team_id: &str) -> Result<PublicMenuState, Status> {
         let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
         let sandbox_configs = self.get_sandbox_configs().await?;
         let active_car_counts = self.runtime_store.active_car_counts_by_sandbox();
+        let joined_sandboxes = self.runtime_store.joined_sandbox_ids_for_team(team_id);
         let runtime_state = PublicRuntimeState {
             server_time_utc: Some(utc_now_timestamp()),
             active_mode: match runtime.activity_kind {
@@ -180,6 +189,7 @@ impl PublicMenuServiceImpl {
                                                 .get(&active.sandbox_id)
                                                 .copied()
                                                 .unwrap_or(0),
+                                            joined_sandboxes.contains(&active.sandbox_id),
                                         )
                                     },
                                 )
@@ -288,9 +298,11 @@ impl PublicMenuService for PublicMenuServiceImpl {
 
     async fn get_public_menu_state(
         &self,
-        _request: Request<GetPublicMenuStateRequest>,
+        request: Request<GetPublicMenuStateRequest>,
     ) -> Result<Response<GetPublicMenuStateResponse>, Status> {
-        let state = self.build_menu_state().await?;
+        let user_id = self.token_validator.subject(request.metadata()).await?;
+        let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
+        let state = self.build_menu_state(&team_id).await?;
         Ok(Response::new(GetPublicMenuStateResponse {
             state: Some(state),
         }))
@@ -298,8 +310,10 @@ impl PublicMenuService for PublicMenuServiceImpl {
 
     async fn stream_public_menu_state(
         &self,
-        _request: Request<StreamPublicMenuStateRequest>,
+        request: Request<StreamPublicMenuStateRequest>,
     ) -> Result<Response<Self::StreamPublicMenuStateStream>, Status> {
+        let user_id = self.token_validator.subject(request.metadata()).await?;
+        let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
         let service = self.clone();
         let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
 
@@ -309,7 +323,7 @@ impl PublicMenuService for PublicMenuServiceImpl {
                 tokio::time::interval(tokio::time::Duration::from_millis(STREAM_POLL_INTERVAL_MS));
 
             loop {
-                match service.build_menu_state().await {
+                match service.build_menu_state(&team_id).await {
                     Ok(state) => {
                         let comparable = comparable_menu_state(&state);
                         if last_comparable_state.as_ref() != Some(&comparable) {

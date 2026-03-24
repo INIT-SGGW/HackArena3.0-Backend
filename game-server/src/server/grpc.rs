@@ -23,6 +23,8 @@ use proto::race::v1::runtime_admin_service_server::RuntimeAdminServiceServer;
 use proto::race::v1::sandbox_config_admin_service_server::SandboxConfigAdminServiceServer;
 use proto::race::v1::track_service_server::TrackServiceServer;
 #[cfg(feature = "official")]
+use proto::submission::v1::official_sandbox_command_service_server::OfficialSandboxCommandServiceServer;
+#[cfg(feature = "official")]
 use proto::submission::v1::slot_query_service_server::SlotQueryServiceServer;
 #[cfg(feature = "official")]
 use proto::submission::v1::submission_service_server::SubmissionServiceServer;
@@ -78,7 +80,8 @@ use crate::services::race_table::RaceTableQueryServiceImpl;
 use crate::services::sandbox_admin::SandboxAdminServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::submission::{
-    HpsTeamResolver, SlotQueryServiceImpl, SubmissionServiceImpl, spawn_submission_worker,
+    HpsTeamResolver, OfficialSandboxCommandServiceImpl, SlotQueryServiceImpl,
+    SubmissionServiceImpl, new_official_sandbox_join_registry, spawn_submission_worker,
 };
 use crate::services::track::TrackServiceImpl;
 #[cfg(feature = "local")]
@@ -159,6 +162,10 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<SlotQueryServiceServer<SlotQueryServiceImpl>>()
         .await;
+    #[cfg(feature = "official")]
+    health_reporter
+        .set_serving::<OfficialSandboxCommandServiceServer<OfficialSandboxCommandServiceImpl>>()
+        .await;
 
     #[cfg(feature = "official")]
     let token_validator = std::sync::Arc::new(TokenValidator::new());
@@ -182,6 +189,8 @@ pub async fn serve_grpc(
     )
     .map_err(std::io::Error::other)?;
     #[cfg(feature = "official")]
+    let official_sandbox_joins = new_official_sandbox_join_registry();
+    #[cfg(feature = "official")]
     let submission_impl = SubmissionServiceImpl::new(
         submission_repo.clone(),
         token_validator.clone(),
@@ -193,8 +202,9 @@ pub async fn serve_grpc(
     let slot_query_impl = SlotQueryServiceImpl::new(
         submission_repo.clone(),
         token_validator.clone(),
-        team_resolver,
-        slot_updates_tx,
+        team_resolver.clone(),
+        slot_updates_tx.clone(),
+        official_sandbox_joins.clone(),
     );
 
     #[cfg(feature = "official")]
@@ -211,6 +221,16 @@ pub async fn serve_grpc(
     let asset_impl =
         AssetServiceImpl::for_local(cfg.local_tracks_cache_dir.clone(), local_map_sync.clone());
     let race_runtime_store = Arc::new(RaceRuntimeStore::new());
+    #[cfg(feature = "official")]
+    let official_sandbox_command_impl = OfficialSandboxCommandServiceImpl::new(
+        submission_repo.clone(),
+        token_validator.clone(),
+        team_resolver.clone(),
+        engine.clone(),
+        race_runtime_store.clone(),
+        slot_updates_tx.clone(),
+        official_sandbox_joins,
+    );
     let (frame_hub, frame_hub_handle) = spawn_frame_hub(
         engine.clone(),
         race_runtime_store.clone(),
@@ -294,6 +314,8 @@ pub async fn serve_grpc(
                 race_config_repo,
                 public_menu_engine,
                 race_runtime_store.clone(),
+                token_validator.clone(),
+                team_resolver.clone(),
                 upcoming_races_invalidation,
                 sandbox_config_invalidation,
             ),
@@ -386,6 +408,10 @@ pub async fn serve_grpc(
     let server = server.add_service(SubmissionServiceServer::new(submission_impl));
     #[cfg(feature = "official")]
     let server = server.add_service(SlotQueryServiceServer::new(slot_query_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(OfficialSandboxCommandServiceServer::new(
+        official_sandbox_command_impl,
+    ));
     #[cfg(feature = "local")]
     let server = server.add_service(LocalSandboxAdminServiceServer::new(
         local_sandbox_admin_impl,

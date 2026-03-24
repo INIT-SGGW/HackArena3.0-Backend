@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -197,6 +198,34 @@ impl RaceRuntimeStore {
             }
         }
         counts
+    }
+
+    pub fn joined_sandbox_ids_for_team(&self, team_id: &str) -> HashSet<String> {
+        let mut sandboxes = HashSet::new();
+        let team_id = team_id.trim();
+        if team_id.is_empty() {
+            return sandboxes;
+        }
+
+        for target in self.car_targets.iter() {
+            let car_id = *target.key();
+            let sandbox_id = match target.value() {
+                EngineCommandTarget::Sandbox { sandbox_id } => sandbox_id.clone(),
+                EngineCommandTarget::OfficialRace => continue,
+            };
+
+            let team_matches = self
+                .car_identity
+                .get(&car_id)
+                .and_then(|identity| identity.value().team_id.clone())
+                .map(|value| value.trim() == team_id)
+                .unwrap_or(false);
+            if team_matches {
+                sandboxes.insert(sandbox_id);
+            }
+        }
+
+        sandboxes
     }
 
     pub fn remove_car(&self, car_id: u64) {

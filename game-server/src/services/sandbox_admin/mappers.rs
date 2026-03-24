@@ -135,6 +135,7 @@ pub fn public_sandbox_runtime_info_from_record(
     record: SandboxConfigRecord,
     active_time_of_day_preset: RuntimeTimeOfDayPreset,
     active_player_count: u32,
+    team_bot_joined: bool,
 ) -> PublicSandboxRuntimeInfo {
     PublicSandboxRuntimeInfo {
         sandbox_id: record.sandbox_id,
@@ -143,6 +144,7 @@ pub fn public_sandbox_runtime_info_from_record(
         active_time_of_day_preset: active_time_of_day_preset as i32,
         ghost_mode: record.config.ghost_mode.map(ghost_mode_to_proto),
         active_player_count,
+        team_bot_joined,
     }
 }
 
