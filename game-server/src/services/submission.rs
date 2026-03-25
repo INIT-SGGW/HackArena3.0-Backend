@@ -4,9 +4,10 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
+use boink::error::Error as BoinkError;
 use dashmap::DashMap;
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -31,7 +32,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 use tar::{Archive, Builder};
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -44,7 +45,7 @@ use tonic::{Code, Request, Response, Status};
 use crate::auth::auth_claims::TokenValidator;
 use crate::config::Config;
 use crate::db::repos::submission::{NewSubmissionRecord, SubmissionRepo};
-use crate::runtime::engine_worker::{EngineClient, EngineCommandTarget};
+use crate::runtime::engine_worker::{EngineClient, EngineCommandTarget, EngineWorkerError};
 use crate::services::error_map::map_worker_err;
 use crate::services::race::{RaceRuntimeStore, RuntimeCarIdentity};
 
@@ -62,6 +63,7 @@ const SLOT_UPDATE_CHANNEL_CAPACITY: usize = 128;
 const SLOT_STREAM_CHANNEL_CAPACITY: usize = 8;
 const BUILD_EVENT_CHANNEL_CAPACITY: usize = 128;
 const SUBMISSIONS_ROOT: &str = ".submissions";
+const BOT_LOGS_SUBDIR: &str = "bot-logs";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_API_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRY_API_TIMEOUT: Duration = Duration::from_secs(10);
@@ -86,6 +88,7 @@ pub(crate) struct TeamSandboxJoinState {
     pub(crate) engine_car_id: u64,
     pub(crate) container_name: String,
     pub(crate) container_id: String,
+    pub(crate) log_file_path: PathBuf,
 }
 
 pub(crate) type OfficialSandboxJoinRegistry = Arc<DashMap<String, TeamSandboxJoinState>>;
@@ -128,6 +131,23 @@ struct GitHubReleaseResponse {
 struct GitHubReleaseAsset {
     id: u64,
     name: String,
+}
+
+#[derive(Debug, Clone)]
+struct PythonRunConfig {
+    entrypoint: Vec<String>,
+    source_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WrapperManifestToml {
+    run: Option<WrapperRunToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WrapperRunToml {
+    entrypoint: Option<Vec<String>>,
+    source_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,6 +453,96 @@ impl GameTokenIssuer {
     }
 }
 
+#[derive(Clone)]
+pub struct WrapperAuthTokenIssuer {
+    http_client: reqwest::Client,
+    keycloak_token_url: String,
+    keycloak_client_id: String,
+    keycloak_client_secret: String,
+}
+
+impl WrapperAuthTokenIssuer {
+    pub(crate) fn new(
+        keycloak_token_url: String,
+        keycloak_client_id: String,
+        keycloak_client_secret: String,
+    ) -> anyhow::Result<Self> {
+        let http_client = reqwest::Client::builder()
+            .timeout(KEYCLOAK_TOKEN_TIMEOUT)
+            .build()
+            .context("failed to build wrapper-auth Keycloak HTTP client")?;
+        Ok(Self {
+            http_client,
+            keycloak_token_url,
+            keycloak_client_id,
+            keycloak_client_secret,
+        })
+    }
+
+    pub(crate) async fn issue_wrapper_auth_token(&self) -> Result<String, Status> {
+        self.fetch_wrapper_auth_token().await.map_err(|err| {
+            tracing::error!(
+                error = %err,
+                "wrapper-auth: failed to fetch auth token from Keycloak"
+            );
+            Status::unauthenticated("wrapper-auth: failed to fetch auth token from Keycloak")
+        })
+    }
+
+    async fn fetch_wrapper_auth_token(&self) -> anyhow::Result<String> {
+        let response = self
+            .http_client
+            .post(&self.keycloak_token_url)
+            .form(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", self.keycloak_client_id.as_str()),
+                ("client_secret", self.keycloak_client_secret.as_str()),
+            ])
+            .send()
+            .await
+            .context("wrapper-auth: Keycloak token request failed")?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("wrapper-auth: failed to read Keycloak token response body")?;
+
+        if !status.is_success() {
+            let details = serde_json::from_str::<KeycloakErrorResponse>(&body)
+                .ok()
+                .map(|value| match (value.error, value.error_description) {
+                    (Some(err), Some(desc)) if !desc.trim().is_empty() => {
+                        format!("{err}: {}", desc.trim())
+                    }
+                    (Some(err), _) => err,
+                    _ => body.trim().to_string(),
+                })
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "<empty>".to_string());
+            bail!(
+                "wrapper-auth: Keycloak token request returned {}: {details}",
+                status.as_u16()
+            );
+        }
+
+        let parsed: KeycloakTokenResponse = serde_json::from_str(&body)
+            .context("wrapper-auth: failed to parse Keycloak token response JSON")?;
+        let token = parsed.access_token.trim();
+        if token.is_empty() {
+            bail!("wrapper-auth: Keycloak response did not include access_token");
+        }
+
+        if let Some(token_type) = parsed.token_type.as_deref()
+            && !token_type.eq_ignore_ascii_case("bearer")
+        {
+            tracing::warn!(token_type = %token_type, "wrapper-auth: unexpected Keycloak token_type");
+        }
+
+        Ok(token.to_string())
+    }
+}
+
 /// gRPC SubmissionService implementation.
 #[derive(Clone)]
 pub struct SubmissionServiceImpl {
@@ -481,11 +591,14 @@ pub struct OfficialSandboxCommandServiceImpl {
     token_validator: Arc<TokenValidator>,
     team_resolver: Arc<HpsTeamResolver>,
     game_token_issuer: Arc<GameTokenIssuer>,
+    wrapper_auth_token_issuer: Arc<WrapperAuthTokenIssuer>,
     wrapper_backend_endpoint: String,
     engine: EngineClient,
     runtime_store: Arc<RaceRuntimeStore>,
     slot_updates_tx: broadcast::Sender<String>,
     join_registry: OfficialSandboxJoinRegistry,
+    bot_logs_root: PathBuf,
+    log_capture_tasks: Arc<DashMap<String, JoinHandle<()>>>,
     join_command_lock: Arc<Mutex<()>>,
 }
 
@@ -514,6 +627,7 @@ impl OfficialSandboxCommandServiceImpl {
         token_validator: Arc<TokenValidator>,
         team_resolver: Arc<HpsTeamResolver>,
         game_token_issuer: Arc<GameTokenIssuer>,
+        wrapper_auth_token_issuer: Arc<WrapperAuthTokenIssuer>,
         wrapper_backend_endpoint: String,
         engine: EngineClient,
         runtime_store: Arc<RaceRuntimeStore>,
@@ -525,11 +639,14 @@ impl OfficialSandboxCommandServiceImpl {
             token_validator,
             team_resolver,
             game_token_issuer,
+            wrapper_auth_token_issuer,
             wrapper_backend_endpoint,
             engine,
             runtime_store,
             slot_updates_tx,
             join_registry,
+            bot_logs_root: PathBuf::from(SUBMISSIONS_ROOT).join(BOT_LOGS_SUBDIR),
+            log_capture_tasks: Arc::new(DashMap::new()),
             join_command_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -537,6 +654,203 @@ impl OfficialSandboxCommandServiceImpl {
     fn container_name_for_team(team_id: &str) -> anyhow::Result<String> {
         let team_component = sanitize_tag_component(team_id)?;
         Ok(format!("ha3-official-bot-team-{team_component}"))
+    }
+
+    fn sanitize_log_component(value: &str) -> String {
+        let mut sanitized = String::with_capacity(value.len());
+        for ch in value.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                sanitized.push(ch);
+            } else {
+                sanitized.push('_');
+            }
+        }
+        let trimmed = sanitized.trim_matches('_');
+        if trimmed.is_empty() {
+            "unknown".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn build_bot_log_path(
+        &self,
+        team_id: &str,
+        submission_id: &str,
+        sandbox_id: &str,
+        slot_index: i16,
+        container_id: &str,
+    ) -> PathBuf {
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        let team = Self::sanitize_log_component(team_id);
+        let submission = Self::sanitize_log_component(submission_id);
+        let sandbox = Self::sanitize_log_component(sandbox_id);
+        let container_short = Self::sanitize_log_component(
+            container_id.trim().get(..12).unwrap_or(container_id.trim()),
+        );
+        let file_name = format!(
+            "{ts_ms}_team-{team}_submission-{submission}_sandbox-{sandbox}_slot-{slot_index}_container-{container_short}.log"
+        );
+        self.bot_logs_root.join(file_name)
+    }
+
+    async fn stop_log_capture_for_team(&self, team_id: &str) {
+        let Some((_, handle)) = self.log_capture_tasks.remove(team_id) else {
+            return;
+        };
+
+        if !handle.is_finished() {
+            handle.abort();
+        }
+        match handle.await {
+            Ok(()) => {}
+            Err(err) if err.is_cancelled() => {}
+            Err(err) => {
+                tracing::warn!(
+                    team_id = %team_id,
+                    error = %err,
+                    "bot log capture task ended with join error"
+                );
+            }
+        }
+    }
+
+    async fn start_bot_log_capture(
+        &self,
+        team_id: &str,
+        submission_id: &str,
+        sandbox_id: &str,
+        slot_index: i16,
+        container_id: &str,
+    ) -> anyhow::Result<PathBuf> {
+        fs::create_dir_all(&self.bot_logs_root)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create bot logs directory {}",
+                    self.bot_logs_root.display()
+                )
+            })?;
+
+        let log_file_path =
+            self.build_bot_log_path(team_id, submission_id, sandbox_id, slot_index, container_id);
+        let mut log_file = fs::File::create(&log_file_path).await.with_context(|| {
+            format!("failed to create bot log file {}", log_file_path.display())
+        })?;
+        let started_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        log_file
+            .write_all(
+                format!(
+                    "# team_id={team_id}\n# submission_id={submission_id}\n# sandbox_id={sandbox_id}\n# slot_index={slot_index}\n# container_id={container_id}\n# started_at_unix_ms={started_at_ms}\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to write bot log header {}",
+                    log_file_path.display()
+                )
+            })?;
+        log_file.flush().await.with_context(|| {
+            format!("failed to flush bot log header {}", log_file_path.display())
+        })?;
+
+        let mut command = Command::new("docker");
+        command
+            .arg("logs")
+            .arg("-f")
+            .arg("--timestamps")
+            .arg(container_id)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .context("failed to execute docker/logs follow process")?;
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let _ = child.kill().await;
+                bail!("docker/logs did not provide stdout stream");
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                let _ = child.kill().await;
+                bail!("docker/logs did not provide stderr stream");
+            }
+        };
+
+        let writer = Arc::new(Mutex::new(log_file));
+        let log_file_path_for_task = log_file_path.clone();
+        let team_id_for_task = team_id.to_string();
+        let container_id_for_task = container_id.to_string();
+        let stdout_task = tokio::spawn(stream_bot_logs_to_file(stdout, writer.clone(), "stdout"));
+        let stderr_task = tokio::spawn(stream_bot_logs_to_file(stderr, writer.clone(), "stderr"));
+
+        let capture_task = tokio::spawn(async move {
+            let wait_result = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            let mut guard = writer.lock().await;
+            match wait_result {
+                Ok(status) => {
+                    let _ = guard
+                        .write_all(
+                            format!("# docker/logs follow ended status={:?}\n", status.code())
+                                .as_bytes(),
+                        )
+                        .await;
+                    let _ = guard.flush().await;
+                    tracing::info!(
+                        team_id = %team_id_for_task,
+                        container_id = %container_id_for_task,
+                        log_file = %log_file_path_for_task.display(),
+                        status = ?status.code(),
+                        "bot log capture finished"
+                    );
+                }
+                Err(err) => {
+                    let _ = guard
+                        .write_all(format!("# docker/logs follow failed error={err}\n").as_bytes())
+                        .await;
+                    let _ = guard.flush().await;
+                    tracing::warn!(
+                        team_id = %team_id_for_task,
+                        container_id = %container_id_for_task,
+                        log_file = %log_file_path_for_task.display(),
+                        error = %err,
+                        "bot log capture process failed"
+                    );
+                }
+            }
+        });
+
+        if let Some(previous_task) = self
+            .log_capture_tasks
+            .insert(team_id.to_string(), capture_task)
+        {
+            previous_task.abort();
+        }
+
+        tracing::info!(
+            team_id = %team_id,
+            submission_id = %submission_id,
+            sandbox_id = %sandbox_id,
+            slot_index,
+            container_id = %container_id,
+            log_file = %log_file_path.display(),
+            "started bot log capture"
+        );
+
+        Ok(log_file_path)
     }
 
     async fn rollback_join_runtime(
@@ -558,13 +872,22 @@ impl OfficialSandboxCommandServiceImpl {
             );
         }
         if let Err(err) = self.engine.despawn_car_in(target, engine_car_id).await {
-            tracing::warn!(
-                team_id = %team_id,
-                sandbox_id = %sandbox_id,
-                engine_car_id,
-                error = %err,
-                "failed to rollback spawned join car after bot container failure"
-            );
+            if is_engine_resource_not_found(&err) {
+                tracing::debug!(
+                    team_id = %team_id,
+                    sandbox_id = %sandbox_id,
+                    engine_car_id,
+                    "rollback join: engine car already absent"
+                );
+            } else {
+                tracing::warn!(
+                    team_id = %team_id,
+                    sandbox_id = %sandbox_id,
+                    engine_car_id,
+                    error = %err,
+                    "failed to rollback spawned join car after bot container failure"
+                );
+            }
         }
         self.runtime_store.remove_car(public_car_id);
     }
@@ -584,14 +907,27 @@ impl OfficialSandboxCommandServiceImpl {
                 "failed to remove bot container during join cleanup"
             );
         }
+        self.stop_log_capture_for_team(team_id).await;
 
         let target = EngineCommandTarget::Sandbox {
             sandbox_id: join_state.sandbox_id.clone(),
         };
-        self.engine
+        if let Err(err) = self
+            .engine
             .despawn_car_in(target, join_state.engine_car_id)
             .await
-            .map_err(map_worker_err)?;
+        {
+            if is_engine_resource_not_found(&err) {
+                tracing::debug!(
+                    team_id = %team_id,
+                    sandbox_id = %join_state.sandbox_id,
+                    engine_car_id = join_state.engine_car_id,
+                    "join cleanup: engine car already absent"
+                );
+            } else {
+                return Err(map_worker_err(err));
+            }
+        }
 
         self.runtime_store.remove_car(join_state.public_car_id);
         self.join_registry.remove(team_id);
@@ -605,6 +941,7 @@ impl OfficialSandboxCommandServiceImpl {
             engine_car_id = join_state.engine_car_id,
             container_name = %join_state.container_name,
             container_id = %join_state.container_id,
+            log_file = %join_state.log_file_path.display(),
             reason,
             "official sandbox join resources cleaned"
         );
@@ -914,6 +1251,10 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
             .game_token_issuer
             .issue_team_bot_token(&team_id)
             .await?;
+        let wrapper_auth_token = self
+            .wrapper_auth_token_issuer
+            .issue_wrapper_auth_token()
+            .await?;
         let container_name = Self::container_name_for_team(&team_id).map_err(|err| {
             Status::failed_precondition(format!("invalid team_id for container name: {err}"))
         })?;
@@ -968,6 +1309,7 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
             &container_name,
             &self.wrapper_backend_endpoint,
             &team_bot_token,
+            &wrapper_auth_token,
             &team_id,
             &slot_submission.submission_id,
             &sandbox_id,
@@ -992,6 +1334,34 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
                 ))));
             }
         };
+        let log_file_path = match self
+            .start_bot_log_capture(
+                &team_id,
+                &slot_submission.submission_id,
+                &sandbox_id,
+                slot_index,
+                &container_id,
+            )
+            .await
+        {
+            Ok(path) => path,
+            Err(err) => {
+                self.stop_log_capture_for_team(&team_id).await;
+                self.rollback_join_runtime(
+                    &team_id,
+                    &sandbox_id,
+                    target,
+                    public_car_id,
+                    engine_car_id,
+                    &container_name,
+                )
+                .await;
+                return Ok(Response::new(join_failed(format!(
+                    "failed to initialize bot log capture: {}",
+                    clip_for_error(&format!("{err:#}"))
+                ))));
+            }
+        };
 
         self.join_registry.insert(
             team_id.clone(),
@@ -1002,6 +1372,7 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
                 engine_car_id,
                 container_name: container_name.clone(),
                 container_id: container_id.clone(),
+                log_file_path: log_file_path.clone(),
             },
         );
         let _ = self.slot_updates_tx.send(team_id.clone());
@@ -1016,6 +1387,7 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
             engine_car_id,
             container_name = %container_name,
             container_id = %container_id,
+            log_file = %log_file_path.display(),
             "official sandbox join succeeded"
         );
         Ok(Response::new(JoinOfficialSandboxResponse {
@@ -1193,10 +1565,27 @@ async fn run_remote_build_pipeline(
     let context_dir = temp_dir.path().join("build-context");
     let archive_path = job.archive_path.clone();
     let prepare_context_dir = context_dir.clone();
-    tokio::task::spawn_blocking(move || prepare_build_context(&archive_path, &prepare_context_dir))
-        .await
-        .context("build-context task join error")??;
-    prepare_wrapper_wheel(cfg, &job.wrapper_version, &context_dir, events_tx).await?;
+    let python_run_config = tokio::task::spawn_blocking(move || {
+        prepare_build_context(&archive_path, &prepare_context_dir)
+    })
+    .await
+    .context("build-context task join error")??;
+    emit_build_log_line(
+        events_tx,
+        format!(
+            "[context] resolved run config: source_dir={}, entrypoint={:?}",
+            python_run_config.source_dir, python_run_config.entrypoint
+        ),
+    )
+    .await;
+    prepare_wrapper_wheel(
+        cfg,
+        &job.wrapper_version,
+        &context_dir,
+        &python_run_config,
+        events_tx,
+    )
+    .await?;
 
     let local_context_tar = temp_dir.path().join("context.tar.gz");
     let package_context_dir = context_dir.clone();
@@ -1546,6 +1935,7 @@ async fn prepare_wrapper_wheel(
     cfg: &Config,
     wrapper_version: &str,
     context_dir: &Path,
+    run_config: &PythonRunConfig,
     events_tx: &mpsc::Sender<Result<SubmitBuildStreamResponse, Status>>,
 ) -> anyhow::Result<()> {
     emit_build_log_line(events_tx, "[wrapper-fetch] resolving release asset").await;
@@ -1643,7 +2033,8 @@ async fn prepare_wrapper_wheel(
         .with_context(|| format!("failed to write wrapper wheel {}", wheel_path.display()))?;
 
     let dockerfile_path = context_dir.join("Dockerfile");
-    fs::write(&dockerfile_path, build_python_dockerfile(&asset.name))
+    let dockerfile = build_python_dockerfile(&asset.name, run_config)?;
+    fs::write(&dockerfile_path, dockerfile)
         .await
         .with_context(|| {
             format!(
@@ -1670,17 +2061,29 @@ fn normalize_wrapper_version(raw: &str) -> anyhow::Result<(String, String)> {
     Ok((format!("v{asset_version}"), asset_version.to_string()))
 }
 
-fn build_python_dockerfile(wheel_file_name: &str) -> String {
-    format!(
+fn build_python_dockerfile(
+    wheel_file_name: &str,
+    run_config: &PythonRunConfig,
+) -> anyhow::Result<String> {
+    if run_config.entrypoint.is_empty() {
+        bail!("manifest run.entrypoint must be non-empty");
+    }
+    let cmd_json = serde_json::to_string(&run_config.entrypoint)
+        .context("failed to serialize manifest run.entrypoint to Docker CMD")?;
+
+    Ok(format!(
         r#"FROM python:3.10-slim
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app/src
 COPY wheels/{wheel_file_name} /app/wheels/{wheel_file_name}
 COPY user/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir /app/wheels/{wheel_file_name}
 RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY user/src /app/src
-"#
-    )
+COPY user/{source_dir} /app/src
+ENTRYPOINT {cmd_json}
+"#,
+        source_dir = run_config.source_dir
+    ))
 }
 
 fn github_release_error_message(status: u16, release_tag: &str) -> String {
@@ -1699,25 +2102,14 @@ fn github_asset_error_message(status: u16, asset_name: &str) -> String {
     }
 }
 
-fn prepare_build_context(archive_path: &Path, context_dir: &Path) -> anyhow::Result<()> {
+fn prepare_build_context(
+    archive_path: &Path,
+    context_dir: &Path,
+) -> anyhow::Result<PythonRunConfig> {
     std::fs::create_dir_all(context_dir).context("failed to create build context directory")?;
     let user_dir = context_dir.join("user");
     std::fs::create_dir_all(&user_dir).context("failed to create user directory")?;
     let extracted_entries = extract_archive_secure(archive_path, &user_dir)?;
-
-    let user_src = user_dir.join("src");
-    if !user_src.is_dir() {
-        let sample = format_path_sample(&extracted_entries, 20);
-        let nested_user_src = user_dir.join("user").join("src").is_dir();
-        let extra_hint = if nested_user_src {
-            " Found nested `user/src`; archive likely has extra top-level `user/` folder."
-        } else {
-            ""
-        };
-        bail!(
-            "archive validation failed: expected `src/` at archive root (mapped to build-context/user/src). Extracted entries sample: {sample}.{extra_hint}"
-        );
-    }
     let requirements = user_dir.join("requirements.txt");
     if !requirements.is_file() {
         let sample = format_path_sample(&extracted_entries, 20);
@@ -1732,7 +2124,135 @@ fn prepare_build_context(archive_path: &Path, context_dir: &Path) -> anyhow::Res
         );
     }
 
-    Ok(())
+    let run_config = resolve_python_run_config(&user_dir)?;
+    Ok(run_config)
+}
+
+fn resolve_python_run_config(user_dir: &Path) -> anyhow::Result<PythonRunConfig> {
+    let manifest_path = user_dir.join("manifest.toml");
+    let mut source_dir = "src".to_string();
+    let mut manifest_entrypoint: Option<Vec<String>> = None;
+    if manifest_path.is_file() {
+        let manifest_raw = std::fs::read_to_string(&manifest_path).with_context(|| {
+            format!(
+                "failed to read wrapper manifest {}",
+                manifest_path.display()
+            )
+        })?;
+        let manifest: WrapperManifestToml = toml::from_str(&manifest_raw).with_context(|| {
+            format!(
+                "failed to parse wrapper manifest {}",
+                manifest_path.display()
+            )
+        })?;
+        if let Some(run) = manifest.run {
+            if let Some(source_dir_raw) = run.source_dir {
+                source_dir = normalize_manifest_source_dir(&source_dir_raw)?;
+            }
+            if let Some(entrypoint) = run.entrypoint {
+                let trimmed_entrypoint: Vec<String> = entrypoint
+                    .into_iter()
+                    .map(|arg| arg.trim().to_string())
+                    .filter(|arg| !arg.is_empty())
+                    .collect();
+                if trimmed_entrypoint.is_empty() {
+                    bail!("manifest run.entrypoint must not be empty");
+                }
+                manifest_entrypoint = Some(trimmed_entrypoint);
+            }
+        }
+    }
+
+    let source_path = user_dir.join(&source_dir);
+    if !source_path.is_dir() {
+        bail!(
+            "run.source_dir `{}` does not exist in archive (expected `{}`)",
+            source_dir,
+            source_path.display()
+        );
+    }
+
+    if let Some(entrypoint) = manifest_entrypoint {
+        return Ok(PythonRunConfig {
+            entrypoint,
+            source_dir,
+        });
+    }
+
+    let bot_module_entry = source_path.join("bot").join("__main__.py");
+    if bot_module_entry.is_file() {
+        return Ok(PythonRunConfig {
+            entrypoint: vec!["python".to_string(), "-m".to_string(), "bot".to_string()],
+            source_dir,
+        });
+    }
+    let main_py_entry = source_path.join("main.py");
+    if main_py_entry.is_file() {
+        return Ok(PythonRunConfig {
+            entrypoint: vec![
+                "python".to_string(),
+                "-u".to_string(),
+                "/app/src/main.py".to_string(),
+            ],
+            source_dir,
+        });
+    }
+
+    bail!(
+        "cannot resolve bot entrypoint: provide manifest.toml with [run].entrypoint or include {}/bot/__main__.py or {}/main.py",
+        source_dir,
+        source_dir
+    )
+}
+
+fn normalize_manifest_source_dir(raw: &str) -> anyhow::Result<String> {
+    let normalized_slashes = raw.trim().replace('\\', "/");
+    let trimmed = normalized_slashes
+        .trim_start_matches("./")
+        .trim_start_matches('/');
+    if trimmed.is_empty() {
+        bail!("manifest run.source_dir must not be empty");
+    }
+
+    let without_user_prefix = if let Some(stripped) = trimmed.strip_prefix("user/") {
+        if stripped.trim().is_empty() {
+            bail!("manifest run.source_dir `user/` is invalid");
+        }
+        stripped
+    } else {
+        trimmed
+    };
+
+    let path = Path::new(without_user_prefix);
+    let mut parts: Vec<String> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => {
+                let segment = segment.to_string_lossy();
+                if segment.is_empty() {
+                    bail!("manifest run.source_dir contains empty path segment");
+                }
+                if !segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+                {
+                    bail!("manifest run.source_dir contains unsupported characters");
+                }
+                parts.push(segment.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                bail!("manifest run.source_dir must not contain `..`");
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                bail!("manifest run.source_dir must be a relative path");
+            }
+        }
+    }
+    if parts.is_empty() {
+        bail!("manifest run.source_dir must not be empty");
+    }
+    Ok(parts.join("/"))
 }
 
 fn extract_archive_secure(archive_path: &Path, user_dir: &Path) -> anyhow::Result<Vec<String>> {
@@ -1886,6 +2406,7 @@ async fn start_bot_container(
     container_name: &str,
     wrapper_backend_endpoint: &str,
     team_token: &str,
+    wrapper_auth_token: &str,
     team_id: &str,
     submission_id: &str,
     sandbox_id: &str,
@@ -1912,9 +2433,16 @@ async fn start_bot_container(
         .arg("HA3_WRAPPER_BACKEND_ENDPOINT")
         .arg("--env")
         .arg("HA3_WRAPPER_TEAM_TOKEN")
+        .arg("--env")
+        .arg("HA3_WRAPPER_AUTH_TOKEN")
         .arg(image_ref);
+    #[cfg(feature = "official")]
+    {
+        command.arg("--official");
+    }
     command.env("HA3_WRAPPER_BACKEND_ENDPOINT", wrapper_backend_endpoint);
     command.env("HA3_WRAPPER_TEAM_TOKEN", team_token);
+    command.env("HA3_WRAPPER_AUTH_TOKEN", wrapper_auth_token);
     let (stdout, _stderr) =
         run_command_capture(command, "docker/run", Some(BOT_DOCKER_TIMEOUT)).await?;
 
@@ -1975,6 +2503,47 @@ async fn remove_bot_container(container_name: &str) -> anyhow::Result<()> {
                 Ok(())
             } else {
                 Err(err)
+            }
+        }
+    }
+}
+
+async fn stream_bot_logs_to_file<R>(stream: R, writer: Arc<Mutex<fs::File>>, channel: &'static str)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(stream).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let mut guard = writer.lock().await;
+                if let Err(err) = guard
+                    .write_all(format!("[{channel}] {line}\n").as_bytes())
+                    .await
+                {
+                    tracing::warn!(channel, error = %err, "failed writing bot log line");
+                    break;
+                }
+                if let Err(err) = guard.flush().await {
+                    tracing::warn!(channel, error = %err, "failed flushing bot log file");
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                tracing::warn!(channel, error = %err, "failed reading docker logs stream");
+                let mut guard = writer.lock().await;
+                let _ = guard
+                    .write_all(
+                        format!(
+                            "[{channel}] <stream read error: {}>\n",
+                            clip_for_error(&err.to_string())
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                let _ = guard.flush().await;
+                break;
             }
         }
     }
@@ -2277,6 +2846,10 @@ fn ssh_error_hint(stderr: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+fn is_engine_resource_not_found(err: &EngineWorkerError) -> bool {
+    matches!(err, EngineWorkerError::Engine(BoinkError::NotFound))
 }
 
 fn preflight_ssh_transport(cfg: &Config) -> anyhow::Result<()> {

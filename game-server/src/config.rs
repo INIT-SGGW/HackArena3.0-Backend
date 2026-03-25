@@ -94,6 +94,10 @@ pub struct Config {
     #[cfg(feature = "official")]
     pub keycloak_client_secret: String,
     #[cfg(feature = "official")]
+    pub keycloak_ha3_wrapper_client_id: String,
+    #[cfg(feature = "official")]
+    pub keycloak_ha3_wrapper_client_secret: String,
+    #[cfg(feature = "official")]
     pub game_token_issuer_endpoint: String,
     #[cfg(feature = "official")]
     pub official_bot_backend_endpoint: String,
@@ -308,6 +312,13 @@ impl Config {
         let keycloak_client_secret = read_env_string("KEYCLOAK_CLIENT_SECRET")
             .ok_or("KEYCLOAK_CLIENT_SECRET must be set for official backend")?;
         #[cfg(feature = "official")]
+        let keycloak_ha3_wrapper_client_id = read_env_string("KEYCLOAK_HA3_WRAPPER_CLIENT_ID")
+            .ok_or("KEYCLOAK_HA3_WRAPPER_CLIENT_ID must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let keycloak_ha3_wrapper_client_secret =
+            read_env_string("KEYCLOAK_HA3_WRAPPER_CLIENT_SECRET")
+                .ok_or("KEYCLOAK_HA3_WRAPPER_CLIENT_SECRET must be set for official backend")?;
+        #[cfg(feature = "official")]
         let official_bot_backend_endpoint = validate_http_url(
             "OFFICIAL_BOT_BACKEND_ENDPOINT",
             &read_env_string("OFFICIAL_BOT_BACKEND_ENDPOINT")
@@ -384,6 +395,10 @@ impl Config {
             keycloak_client_id,
             #[cfg(feature = "official")]
             keycloak_client_secret,
+            #[cfg(feature = "official")]
+            keycloak_ha3_wrapper_client_id,
+            #[cfg(feature = "official")]
+            keycloak_ha3_wrapper_client_secret,
             #[cfg(feature = "official")]
             game_token_issuer_endpoint,
             #[cfg(feature = "official")]

@@ -81,7 +81,8 @@ use crate::services::sandbox_admin::SandboxAdminServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::submission::{
     GameTokenIssuer, HpsTeamResolver, OfficialSandboxCommandServiceImpl, SlotQueryServiceImpl,
-    SubmissionServiceImpl, new_official_sandbox_join_registry, spawn_submission_worker,
+    SubmissionServiceImpl, WrapperAuthTokenIssuer, new_official_sandbox_join_registry,
+    spawn_submission_worker,
 };
 use crate::services::track::TrackServiceImpl;
 #[cfg(feature = "local")]
@@ -187,6 +188,15 @@ pub async fn serve_grpc(
             .map_err(std::io::Error::other)?,
     );
     #[cfg(feature = "official")]
+    let wrapper_auth_token_issuer = Arc::new(
+        WrapperAuthTokenIssuer::new(
+            cfg.keycloak_token_url.clone(),
+            cfg.keycloak_ha3_wrapper_client_id.clone(),
+            cfg.keycloak_ha3_wrapper_client_secret.clone(),
+        )
+        .map_err(std::io::Error::other)?,
+    );
+    #[cfg(feature = "official")]
     let (submission_queue_tx, slot_updates_tx, submission_worker_handle) = spawn_submission_worker(
         cfg.clone(),
         submission_repo.clone(),
@@ -233,6 +243,7 @@ pub async fn serve_grpc(
         token_validator.clone(),
         team_resolver.clone(),
         game_token_issuer,
+        wrapper_auth_token_issuer,
         cfg.official_bot_backend_endpoint.clone(),
         engine.clone(),
         race_runtime_store.clone(),

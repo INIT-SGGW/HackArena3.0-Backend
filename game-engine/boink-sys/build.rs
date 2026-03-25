@@ -48,13 +48,13 @@ fn setup_windows(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
     } else {
         println!("cargo:rustc-link-lib=dylib=boink");
         copy_runtime_lib(&lib_dir, "boink.dll");
-        copy_runtime_lib(&lib_dir, "glfw3.dll");
+        // copy_runtime_lib(&lib_dir, "glfw3.dll");
         if profile == "debug" {
-            copy_runtime_lib(&lib_dir, "fmtd.dll");
-            copy_runtime_lib(&lib_dir, "spdlogd.dll");
+            // copy_runtime_lib(&lib_dir, "fmtd.dll");
+            // copy_runtime_lib(&lib_dir, "spdlogd.dll");
         } else {
-            copy_runtime_lib(&lib_dir, "fmt.dll");
-            copy_runtime_lib(&lib_dir, "spdlog.dll");
+            // copy_runtime_lib(&lib_dir, "fmt.dll");
+            // copy_runtime_lib(&lib_dir, "spdlog.dll");
         }
     }
 }
