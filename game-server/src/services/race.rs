@@ -219,12 +219,13 @@ impl RaceService for RaceServiceImpl {
         {
             let auth = parse_game_token(request.metadata())?
                 .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
-            let (public_car_id, engine_car_id) = self.resolve_team_official_car(&auth).await?;
+            let (public_car_id, engine_car_id, target) =
+                self.resolve_team_active_command_car(&auth).await?;
             let frame = self.frame_hub.latest();
             let applies_from_tick = frame.tick;
             let response = match self
                 .engine
-                .set_car_back_to_track_in(EngineCommandTarget::OfficialRace, engine_car_id)
+                .set_car_back_to_track_in(target, engine_car_id)
                 .await
             {
                 Ok(()) => {
@@ -269,7 +270,8 @@ impl RaceService for RaceServiceImpl {
             let auth = parse_game_token(request.metadata())?
                 .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
             let req = request.into_inner();
-            let (public_car_id, _engine_car_id) = self.resolve_team_official_car(&auth).await?;
+            let (public_car_id, _engine_car_id, _target) =
+                self.resolve_team_active_command_car(&auth).await?;
             self.runtime_store
                 .set_pit_request_active(public_car_id, req.request_pitstop);
             let response = RequestPitstopResponse {
@@ -296,12 +298,13 @@ impl RaceService for RaceServiceImpl {
         {
             let auth = parse_game_token(request.metadata())?
                 .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
-            let (public_car_id, engine_car_id) = self.resolve_team_official_car(&auth).await?;
+            let (public_car_id, engine_car_id, target) =
+                self.resolve_team_active_command_car(&auth).await?;
             let frame = self.frame_hub.latest();
             let applies_from_tick = frame.tick;
             let response = match self
                 .engine
-                .set_car_to_pitstop_in(EngineCommandTarget::OfficialRace, engine_car_id)
+                .set_car_to_pitstop_in(target, engine_car_id)
                 .await
             {
                 Ok(()) => {
@@ -347,7 +350,8 @@ impl RaceService for RaceServiceImpl {
             let auth = parse_game_token(request.metadata())?
                 .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
             let req = request.into_inner();
-            let (public_car_id, _engine_car_id) = self.resolve_team_official_car(&auth).await?;
+            let (public_car_id, _engine_car_id, _target) =
+                self.resolve_team_active_command_car(&auth).await?;
             let applies_from_tick = self.frame_hub.latest().tick;
             let response = match runtime_tire_type_from_proto(req.next_tire_type) {
                 Ok(next_tire_type) => {
@@ -823,7 +827,10 @@ impl RaceServiceImpl {
     }
 
     #[cfg(feature = "official")]
-    async fn resolve_team_official_car(&self, auth: &str) -> Result<(u64, u64), Status> {
+    async fn resolve_team_active_command_car(
+        &self,
+        auth: &str,
+    ) -> Result<(u64, u64, EngineCommandTarget), Status> {
         let team_id = self
             .token_validator
             .team_id_from_token(auth)
@@ -831,10 +838,49 @@ impl RaceServiceImpl {
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| Status::unauthenticated("missing team_id claim"))?;
 
+        let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
+        match runtime_state.activity_kind {
+            EngineActivityKind::OfficialRace => {
+                let (public_car_id, engine_car_id) =
+                    self.resolve_team_official_race_car(&team_id)?;
+                Ok((
+                    public_car_id,
+                    engine_car_id,
+                    EngineCommandTarget::OfficialRace,
+                ))
+            }
+            EngineActivityKind::Sandbox => {
+                let join_state = self
+                    .official_sandbox_joins
+                    .get(&team_id)
+                    .map(|entry| entry.value().clone())
+                    .ok_or_else(|| Status::not_found("no active official sandbox join for team"))?;
+                let sandbox_active = runtime_state
+                    .active_sandboxes
+                    .iter()
+                    .any(|entry| entry.sandbox_id == join_state.sandbox_id);
+                if !sandbox_active {
+                    return Err(Status::failed_precondition(
+                        "sandbox runtime is not active for team join",
+                    ));
+                }
+                Ok((
+                    join_state.public_car_id,
+                    join_state.engine_car_id,
+                    EngineCommandTarget::Sandbox {
+                        sandbox_id: join_state.sandbox_id,
+                    },
+                ))
+            }
+            EngineActivityKind::None => Err(Status::failed_precondition("runtime is not active")),
+        }
+    }
+
+    fn resolve_team_official_race_car(&self, team_id: &str) -> Result<(u64, u64), Status> {
         let identity_map = self.runtime_store.car_identity_map();
         let mut matching_cars = Vec::new();
         for identity_entry in identity_map.iter() {
-            if identity_entry.value().team_id.as_deref() != Some(team_id.as_str()) {
+            if identity_entry.value().team_id.as_deref() != Some(team_id) {
                 continue;
             }
 
