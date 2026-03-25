@@ -238,6 +238,19 @@ impl RaceService for RaceServiceImpl {
                     cooldown_remaining_ms,
                 }));
             }
+            let in_pit = frame
+                .cars
+                .get(&public_car_id)
+                .map(|car| car.state.pitstop_state.is_in_any_zone())
+                .unwrap_or(false);
+            if in_pit {
+                return Ok(Response::new(BackToTrackResponse {
+                    status: ParticipantCommandStatus::Rejected as i32,
+                    applies_from_tick,
+                    rejected_reason: ParticipantCommandRejectReason::InPit as i32,
+                    cooldown_remaining_ms: 0,
+                }));
+            }
             let response = match self
                 .engine
                 .set_car_back_to_track_in(target, engine_car_id)

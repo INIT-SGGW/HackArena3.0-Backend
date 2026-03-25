@@ -998,6 +998,41 @@ async fn run_participant_stream(
                                 }
                                 continue;
                             }
+                            let in_pit = frame
+                                .cars
+                                .get(&self_public_car_id)
+                                .map(|car| car.state.pitstop_state.is_in_any_zone())
+                                .unwrap_or(false);
+                            if in_pit {
+                                let ack = participant_command_ack(
+                                    command.client_seq,
+                                    ParticipantCommandType::BackToTrack,
+                                    ParticipantCommandStatus::Rejected,
+                                    applies_from_tick,
+                                    ParticipantCommandRejectReason::InPit,
+                                    0,
+                                );
+
+                                if !send_participant_event(
+                                    &tx,
+                                    &mut server_seq,
+                                    ParticipantServerPayload::CommandAck(ack),
+                                )
+                                .await
+                                {
+                                    cleanup_participant_car(
+                                        "command-ack-send-failed",
+                                        &engine,
+                                        runtime_store.as_ref(),
+                                        self_public_car_id,
+                                        &self_target,
+                                        self_engine_car_id,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                                continue;
+                            }
                         }
                         let ack = match engine
                             .set_car_back_to_track_in(self_target.clone(), self_engine_car_id)
