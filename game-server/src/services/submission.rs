@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow, bail};
@@ -12,6 +13,8 @@ use dashmap::DashMap;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use proto::achievement::v1::achievement_service_client::AchievementServiceClient;
+use proto::achievement::v1::{GrantLogsAchievementRequest, GrantLogsFailReason};
 use proto::auth::v1::game_token_issuer_service_client::GameTokenIssuerServiceClient;
 use proto::auth::v1::{GameTokenIssueType, IssueGameTokenRequest};
 use proto::hackarena::platform::common::v1::Uuid as PlatformUuid;
@@ -55,6 +58,9 @@ const TEAM_EDITION: &str = "3";
 const TEAM_CACHE_TTL: Duration = Duration::from_secs(300);
 const HPS_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const GAME_TOKEN_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+const ACHIEVEMENT_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+const ACHIEVEMENT_TRANSIENT_RETRIES: u32 = 2;
+const ACHIEVEMENT_RETRY_BACKOFF_BASE_MS: u64 = 200;
 const KEYCLOAK_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVICE_TOKEN_DEFAULT_TTL_SEC: u64 = 300;
 const SERVICE_TOKEN_TTL_SAFETY_SEC: u64 = 30;
@@ -546,6 +552,165 @@ impl WrapperAuthTokenIssuer {
     }
 }
 
+#[derive(Clone)]
+pub struct LogsAchievementGranter {
+    channel: Channel,
+    origin: Uri,
+    team_resolver: Arc<HpsTeamResolver>,
+}
+
+impl LogsAchievementGranter {
+    pub(crate) fn new(endpoint: &str, team_resolver: Arc<HpsTeamResolver>) -> anyhow::Result<Self> {
+        let endpoint_url = endpoint.trim();
+        if endpoint_url.is_empty() {
+            bail!("achievement service endpoint is empty");
+        }
+        let origin: Uri = endpoint_url
+            .parse()
+            .map_err(|err| anyhow!("invalid achievement service origin `{endpoint_url}`: {err}"))?;
+        let endpoint = Endpoint::from_shared(endpoint_url.to_string()).map_err(|err| {
+            anyhow!("invalid achievement service endpoint `{endpoint_url}`: {err}")
+        })?;
+        let endpoint = if endpoint_url.starts_with("https://") {
+            endpoint
+                .tls_config(ClientTlsConfig::new().with_enabled_roots())
+                .map_err(|err| {
+                    anyhow!(
+                        "invalid TLS config for achievement service endpoint `{endpoint_url}`: {err}"
+                    )
+                })?
+        } else {
+            endpoint
+        };
+        Ok(Self {
+            channel: endpoint.connect_lazy(),
+            origin,
+            team_resolver,
+        })
+    }
+
+    pub(crate) async fn grant_logs_achievement(&self, team_id: &str) -> Result<(), Status> {
+        let token = self.team_resolver.current_or_fetch_service_token().await?;
+        match self
+            .grant_logs_achievement_with_retry(team_id, &token)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(status)
+                if matches!(
+                    status.code(),
+                    Code::Unauthenticated | Code::PermissionDenied
+                ) =>
+            {
+                let refreshed = self.team_resolver.refresh_service_token().await?;
+                self.grant_logs_achievement_with_retry(team_id, &refreshed)
+                    .await
+            }
+            Err(status) => Err(status),
+        }
+    }
+
+    async fn grant_logs_achievement_with_retry(
+        &self,
+        team_id: &str,
+        service_token: &str,
+    ) -> Result<(), Status> {
+        let mut retry_attempt: u32 = 0;
+        loop {
+            match self
+                .grant_logs_achievement_with_cookie(team_id, service_token)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(status)
+                    if is_transient_achievement_error(status.code())
+                        && retry_attempt < ACHIEVEMENT_TRANSIENT_RETRIES =>
+                {
+                    retry_attempt += 1;
+                    let backoff = achievement_retry_backoff(retry_attempt);
+                    tracing::debug!(
+                        team_id,
+                        retry_attempt,
+                        max_attempts = ACHIEVEMENT_TRANSIENT_RETRIES + 1,
+                        code = ?status.code(),
+                        delay_ms = backoff.as_millis(),
+                        "retrying logs achievement grant after transient error"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(status) => return Err(status),
+            }
+        }
+    }
+
+    async fn grant_logs_achievement_with_cookie(
+        &self,
+        team_id: &str,
+        service_token: &str,
+    ) -> Result<(), Status> {
+        let team_id = team_id.trim();
+        if team_id.is_empty() {
+            return Err(Status::failed_precondition("team_id is empty"));
+        }
+
+        let mut client =
+            AchievementServiceClient::with_origin(self.channel.clone(), self.origin.clone());
+        let mut request = Request::new(GrantLogsAchievementRequest {
+            team_id: team_id.to_string(),
+        });
+        attach_auth_cookie(&mut request, service_token)?;
+
+        let response = tokio::time::timeout(
+            ACHIEVEMENT_RPC_TIMEOUT,
+            client.grant_logs_achievement(request),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("Achievement GrantLogsAchievement timed out"))?
+        .map_err(|err| {
+            Status::new(
+                err.code(),
+                format!("Achievement GrantLogsAchievement failed: {err}"),
+            )
+        })?;
+
+        let response = response.into_inner();
+        if response.is_granted_successfully {
+            tracing::info!(team_id, "logs achievement granted");
+            return Ok(());
+        }
+
+        let reason = GrantLogsFailReason::try_from(response.reason).ok();
+        if matches!(
+            reason,
+            Some(GrantLogsFailReason::GrantLogsFailAlreadyGranted)
+        ) {
+            tracing::debug!(team_id, "logs achievement already granted");
+            return Ok(());
+        }
+
+        tracing::warn!(
+            team_id,
+            reason = ?reason,
+            raw_reason = response.reason,
+            "logs achievement grant request was not accepted"
+        );
+        Ok(())
+    }
+}
+
+fn is_transient_achievement_error(code: Code) -> bool {
+    matches!(
+        code,
+        Code::Unavailable | Code::DeadlineExceeded | Code::Internal | Code::Unknown
+    )
+}
+
+fn achievement_retry_backoff(retry_attempt: u32) -> Duration {
+    let exponent = retry_attempt.saturating_sub(1).min(4);
+    let multiplier = 1u64 << exponent;
+    Duration::from_millis(ACHIEVEMENT_RETRY_BACKOFF_BASE_MS.saturating_mul(multiplier))
+}
+
 /// gRPC SubmissionService implementation.
 #[derive(Clone)]
 pub struct SubmissionServiceImpl {
@@ -594,6 +759,7 @@ pub struct OfficialSandboxCommandServiceImpl {
     token_validator: Arc<TokenValidator>,
     team_resolver: Arc<HpsTeamResolver>,
     game_token_issuer: Arc<GameTokenIssuer>,
+    logs_achievement_granter: Arc<LogsAchievementGranter>,
     wrapper_auth_token_issuer: Arc<WrapperAuthTokenIssuer>,
     wrapper_backend_endpoint: String,
     engine: EngineClient,
@@ -630,6 +796,7 @@ impl OfficialSandboxCommandServiceImpl {
         token_validator: Arc<TokenValidator>,
         team_resolver: Arc<HpsTeamResolver>,
         game_token_issuer: Arc<GameTokenIssuer>,
+        logs_achievement_granter: Arc<LogsAchievementGranter>,
         wrapper_auth_token_issuer: Arc<WrapperAuthTokenIssuer>,
         wrapper_backend_endpoint: String,
         engine: EngineClient,
@@ -642,6 +809,7 @@ impl OfficialSandboxCommandServiceImpl {
             token_validator,
             team_resolver,
             game_token_issuer,
+            logs_achievement_granter,
             wrapper_auth_token_issuer,
             wrapper_backend_endpoint,
             engine,
@@ -795,8 +963,24 @@ impl OfficialSandboxCommandServiceImpl {
         let log_file_path_for_task = log_file_path.clone();
         let team_id_for_task = team_id.to_string();
         let container_id_for_task = container_id.to_string();
-        let stdout_task = tokio::spawn(stream_bot_logs_to_file(stdout, writer.clone(), "stdout"));
-        let stderr_task = tokio::spawn(stream_bot_logs_to_file(stderr, writer.clone(), "stderr"));
+        let logs_achievement_granted = Arc::new(AtomicBool::new(false));
+        let logs_achievement_granter = self.logs_achievement_granter.clone();
+        let stdout_task = tokio::spawn(stream_bot_logs_to_file(
+            stdout,
+            writer.clone(),
+            "stdout",
+            team_id.to_string(),
+            logs_achievement_granter.clone(),
+            logs_achievement_granted.clone(),
+        ));
+        let stderr_task = tokio::spawn(stream_bot_logs_to_file(
+            stderr,
+            writer.clone(),
+            "stderr",
+            team_id.to_string(),
+            logs_achievement_granter,
+            logs_achievement_granted,
+        ));
 
         let capture_task = tokio::spawn(async move {
             let wait_result = child.wait().await;
@@ -2588,14 +2772,40 @@ async fn remove_bot_container(container_name: &str) -> anyhow::Result<()> {
     }
 }
 
-async fn stream_bot_logs_to_file<R>(stream: R, writer: Arc<Mutex<fs::File>>, channel: &'static str)
-where
+async fn stream_bot_logs_to_file<R>(
+    stream: R,
+    writer: Arc<Mutex<fs::File>>,
+    channel: &'static str,
+    team_id: String,
+    logs_achievement_granter: Arc<LogsAchievementGranter>,
+    logs_achievement_granted: Arc<AtomicBool>,
+) where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut lines = BufReader::new(stream).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
+                if !logs_achievement_granted.load(Ordering::Relaxed)
+                    && contains_dupa_with_letter_boundaries_only(&line)
+                    && !logs_achievement_granted.swap(true, Ordering::Relaxed)
+                {
+                    let team_id_for_grant = team_id.clone();
+                    let granter = logs_achievement_granter.clone();
+                    tokio::spawn(async move {
+                        if let Err(status) =
+                            granter.grant_logs_achievement(&team_id_for_grant).await
+                        {
+                            tracing::warn!(
+                                team_id = %team_id_for_grant,
+                                code = ?status.code(),
+                                error = %status,
+                                "failed to grant logs achievement"
+                            );
+                        }
+                    });
+                }
+
                 let redacted = redact_log_line(&line);
                 let mut guard = writer.lock().await;
                 if let Err(err) = guard
@@ -2628,6 +2838,30 @@ where
             }
         }
     }
+}
+
+fn contains_dupa_with_letter_boundaries_only(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut search_start = 0usize;
+
+    while search_start < lower.len() {
+        let Some(found_rel) = lower[search_start..].find("dupa") else {
+            return false;
+        };
+        let start = search_start + found_rel;
+        let end = start + 4;
+
+        let left_is_letter = start > 0 && bytes[start - 1].is_ascii_alphabetic();
+        let right_is_letter = end < bytes.len() && bytes[end].is_ascii_alphabetic();
+        if !left_is_letter && !right_is_letter {
+            return true;
+        }
+
+        search_start = start + 1;
+    }
+
+    false
 }
 
 async fn run_command_capture(

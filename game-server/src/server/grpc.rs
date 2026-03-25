@@ -80,9 +80,9 @@ use crate::services::race_table::RaceTableQueryServiceImpl;
 use crate::services::sandbox_admin::SandboxAdminServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::submission::{
-    GameTokenIssuer, HpsTeamResolver, OfficialSandboxCommandServiceImpl, SlotQueryServiceImpl,
-    SubmissionServiceImpl, WrapperAuthTokenIssuer, new_official_sandbox_join_registry,
-    spawn_submission_worker,
+    GameTokenIssuer, HpsTeamResolver, LogsAchievementGranter, OfficialSandboxCommandServiceImpl,
+    SlotQueryServiceImpl, SubmissionServiceImpl, WrapperAuthTokenIssuer,
+    new_official_sandbox_join_registry, spawn_submission_worker,
 };
 use crate::services::track::TrackServiceImpl;
 #[cfg(feature = "local")]
@@ -197,6 +197,14 @@ pub async fn serve_grpc(
         .map_err(std::io::Error::other)?,
     );
     #[cfg(feature = "official")]
+    let logs_achievement_granter = Arc::new(
+        LogsAchievementGranter::new(
+            &format!("{}/achievements", cfg.api_url.trim().trim_end_matches('/')),
+            team_resolver.clone(),
+        )
+        .map_err(std::io::Error::other)?,
+    );
+    #[cfg(feature = "official")]
     let (submission_queue_tx, slot_updates_tx, submission_worker_handle) = spawn_submission_worker(
         cfg.clone(),
         submission_repo.clone(),
@@ -243,6 +251,7 @@ pub async fn serve_grpc(
         token_validator.clone(),
         team_resolver.clone(),
         game_token_issuer,
+        logs_achievement_granter,
         wrapper_auth_token_issuer,
         cfg.official_bot_backend_endpoint.clone(),
         engine.clone(),
