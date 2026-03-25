@@ -94,6 +94,10 @@ pub struct Config {
     #[cfg(feature = "official")]
     pub keycloak_client_secret: String,
     #[cfg(feature = "official")]
+    pub game_token_issuer_endpoint: String,
+    #[cfg(feature = "official")]
+    pub official_bot_backend_endpoint: String,
+    #[cfg(feature = "official")]
     pub wrapper_gh_owner: String,
     #[cfg(feature = "official")]
     pub wrapper_gh_repo: String,
@@ -236,6 +240,8 @@ impl Config {
 
         let api_url = read_env_string("API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
         let game_token_jwks_endpoint = to_game_token_jwks_endpoint(&api_url)?;
+        #[cfg(feature = "official")]
+        let game_token_issuer_endpoint = to_game_token_issuer_endpoint(&api_url)?;
         #[cfg(feature = "local")]
         let broker_endpoint = to_broker_endpoint(&api_url)?;
         #[cfg(feature = "local")]
@@ -300,6 +306,12 @@ impl Config {
         #[cfg(feature = "official")]
         let keycloak_client_secret = read_env_string("KEYCLOAK_CLIENT_SECRET")
             .ok_or("KEYCLOAK_CLIENT_SECRET must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let official_bot_backend_endpoint = validate_http_url(
+            "OFFICIAL_BOT_BACKEND_ENDPOINT",
+            &read_env_string("OFFICIAL_BOT_BACKEND_ENDPOINT")
+                .ok_or("OFFICIAL_BOT_BACKEND_ENDPOINT must be set for official backend")?,
+        )?;
         #[cfg(feature = "official")]
         let wrapper_gh_owner = read_env_string("WRAPPER_GH_OWNER")
             .ok_or("WRAPPER_GH_OWNER must be set for official backend")?;
@@ -372,6 +384,10 @@ impl Config {
             #[cfg(feature = "official")]
             keycloak_client_secret,
             #[cfg(feature = "official")]
+            game_token_issuer_endpoint,
+            #[cfg(feature = "official")]
+            official_bot_backend_endpoint,
+            #[cfg(feature = "official")]
             wrapper_gh_owner,
             #[cfg(feature = "official")]
             wrapper_gh_repo,
@@ -396,6 +412,12 @@ fn to_broker_endpoint(api_url: &str) -> Result<String, String> {
 }
 
 fn to_game_token_jwks_endpoint(api_url: &str) -> Result<String, String> {
+    let trimmed = validate_api_url(api_url)?;
+    Ok(format!("{trimmed}/gametoken"))
+}
+
+#[cfg(feature = "official")]
+fn to_game_token_issuer_endpoint(api_url: &str) -> Result<String, String> {
     let trimmed = validate_api_url(api_url)?;
     Ok(format!("{trimmed}/gametoken"))
 }

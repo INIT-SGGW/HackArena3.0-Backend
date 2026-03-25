@@ -80,7 +80,7 @@ use crate::services::race_table::RaceTableQueryServiceImpl;
 use crate::services::sandbox_admin::SandboxAdminServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::submission::{
-    HpsTeamResolver, OfficialSandboxCommandServiceImpl, SlotQueryServiceImpl,
+    GameTokenIssuer, HpsTeamResolver, OfficialSandboxCommandServiceImpl, SlotQueryServiceImpl,
     SubmissionServiceImpl, new_official_sandbox_join_registry, spawn_submission_worker,
 };
 use crate::services::track::TrackServiceImpl;
@@ -182,6 +182,11 @@ pub async fn serve_grpc(
         .map_err(std::io::Error::other)?,
     );
     #[cfg(feature = "official")]
+    let game_token_issuer = Arc::new(
+        GameTokenIssuer::new(&cfg.game_token_issuer_endpoint, team_resolver.clone())
+            .map_err(std::io::Error::other)?,
+    );
+    #[cfg(feature = "official")]
     let (submission_queue_tx, slot_updates_tx, submission_worker_handle) = spawn_submission_worker(
         cfg.clone(),
         submission_repo.clone(),
@@ -226,10 +231,12 @@ pub async fn serve_grpc(
         submission_repo.clone(),
         token_validator.clone(),
         team_resolver.clone(),
+        game_token_issuer,
+        cfg.official_bot_backend_endpoint.clone(),
         engine.clone(),
         race_runtime_store.clone(),
         slot_updates_tx.clone(),
-        official_sandbox_joins,
+        official_sandbox_joins.clone(),
     );
     let (frame_hub, frame_hub_handle) = spawn_frame_hub(
         engine.clone(),
@@ -266,6 +273,8 @@ pub async fn serve_grpc(
         cfg.jwt_issuers.clone(),
         race_runtime_store.clone(),
         frame_hub.clone(),
+        #[cfg(feature = "official")]
+        official_sandbox_joins,
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
     );

@@ -11,6 +11,8 @@ use dashmap::DashMap;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use proto::auth::v1::game_token_issuer_service_client::GameTokenIssuerServiceClient;
+use proto::auth::v1::{GameTokenIssueType, IssueGameTokenRequest};
 use proto::hackarena::platform::common::v1::Uuid as PlatformUuid;
 use proto::hackarena::platform::teams::v1::teams_service_client::TeamsServiceClient;
 use proto::hackarena::platform::teams::v1::{GetTeamByUserRequest, Team};
@@ -34,6 +36,7 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::codegen::http::Uri;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::{Code, Request, Response, Status};
@@ -48,10 +51,12 @@ use crate::services::race::{RaceRuntimeStore, RuntimeCarIdentity};
 const TEAM_EDITION: &str = "3";
 const TEAM_CACHE_TTL: Duration = Duration::from_secs(300);
 const HPS_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+const GAME_TOKEN_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const KEYCLOAK_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVICE_TOKEN_DEFAULT_TTL_SEC: u64 = 300;
 const SERVICE_TOKEN_TTL_SAFETY_SEC: u64 = 30;
 const SERVICE_TOKEN_MIN_TTL_SEC: u64 = 10;
+const BOT_DOCKER_TIMEOUT: Duration = Duration::from_secs(60);
 const SUBMISSION_QUEUE_CAPACITY: usize = 64;
 const SLOT_UPDATE_CHANNEL_CAPACITY: usize = 128;
 const SLOT_STREAM_CHANNEL_CAPACITY: usize = 8;
@@ -75,10 +80,12 @@ pub(crate) struct SubmissionBuildJob {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TeamSandboxJoinState {
-    sandbox_id: String,
-    slot_index: i16,
-    public_car_id: u64,
-    engine_car_id: u64,
+    pub(crate) sandbox_id: String,
+    pub(crate) slot_index: i16,
+    pub(crate) public_car_id: u64,
+    pub(crate) engine_car_id: u64,
+    pub(crate) container_name: String,
+    pub(crate) container_id: String,
 }
 
 pub(crate) type OfficialSandboxJoinRegistry = Arc<DashMap<String, TeamSandboxJoinState>>;
@@ -248,6 +255,10 @@ impl HpsTeamResolver {
         self.refresh_token().await
     }
 
+    pub(crate) async fn current_or_fetch_service_token(&self) -> Result<String, Status> {
+        self.current_or_fetch_token().await
+    }
+
     async fn refresh_token(&self) -> Result<String, Status> {
         let cached = self.fetch_service_token().await.map_err(|err| {
             tracing::error!(error = %err, "failed to fetch service token from Keycloak");
@@ -256,6 +267,10 @@ impl HpsTeamResolver {
         let token = cached.token.clone();
         *self.auth_token.write().await = Some(cached);
         Ok(token)
+    }
+
+    pub(crate) async fn refresh_service_token(&self) -> Result<String, Status> {
+        self.refresh_token().await
     }
 
     async fn fetch_service_token(&self) -> anyhow::Result<ServiceTokenCacheEntry> {
@@ -319,6 +334,105 @@ impl HpsTeamResolver {
     }
 }
 
+#[derive(Clone)]
+pub struct GameTokenIssuer {
+    channel: Channel,
+    origin: Uri,
+    team_resolver: Arc<HpsTeamResolver>,
+}
+
+impl GameTokenIssuer {
+    pub(crate) fn new(endpoint: &str, team_resolver: Arc<HpsTeamResolver>) -> anyhow::Result<Self> {
+        let endpoint_url = endpoint.trim();
+        if endpoint_url.is_empty() {
+            bail!("game-token issuer endpoint is empty");
+        }
+        let origin: Uri = endpoint_url
+            .parse()
+            .map_err(|err| anyhow!("invalid game-token issuer origin `{endpoint_url}`: {err}"))?;
+        let endpoint = Endpoint::from_shared(endpoint_url.to_string())
+            .map_err(|err| anyhow!("invalid game-token issuer endpoint `{endpoint_url}`: {err}"))?;
+        let endpoint = if endpoint_url.starts_with("https://") {
+            endpoint
+                .tls_config(ClientTlsConfig::new().with_enabled_roots())
+                .map_err(|err| {
+                    anyhow!(
+                        "invalid TLS config for game-token issuer endpoint `{endpoint_url}`: {err}"
+                    )
+                })?
+        } else {
+            endpoint
+        };
+        Ok(Self {
+            channel: endpoint.connect_lazy(),
+            origin,
+            team_resolver,
+        })
+    }
+
+    pub(crate) async fn issue_team_bot_token(&self, team_id: &str) -> Result<String, Status> {
+        let token = self.team_resolver.current_or_fetch_service_token().await?;
+        match self.issue_team_bot_token_with_cookie(team_id, &token).await {
+            Ok(value) => Ok(value),
+            Err(status)
+                if matches!(
+                    status.code(),
+                    Code::Unauthenticated | Code::PermissionDenied
+                ) =>
+            {
+                let refreshed = self.team_resolver.refresh_service_token().await?;
+                self.issue_team_bot_token_with_cookie(team_id, &refreshed)
+                    .await
+            }
+            Err(status) => Err(status),
+        }
+    }
+
+    async fn issue_team_bot_token_with_cookie(
+        &self,
+        team_id: &str,
+        service_token: &str,
+    ) -> Result<String, Status> {
+        let team_id = team_id.trim();
+        if team_id.is_empty() {
+            return Err(Status::failed_precondition("team_id is empty"));
+        }
+
+        let mut client =
+            GameTokenIssuerServiceClient::with_origin(self.channel.clone(), self.origin.clone());
+        let mut request = Request::new(IssueGameTokenRequest {
+            token_type: GameTokenIssueType::TeamBot as i32,
+        });
+        attach_auth_cookie(&mut request, service_token)?;
+        attach_team_id_header(&mut request, team_id)?;
+
+        let response =
+            tokio::time::timeout(GAME_TOKEN_RPC_TIMEOUT, client.issue_game_token(request))
+                .await
+                .map_err(|_| Status::deadline_exceeded("GameToken IssueGameToken timed out"))?
+                .map_err(|err| {
+                    Status::new(
+                        err.code(),
+                        format!("GameToken IssueGameToken failed: {err}"),
+                    )
+                })?;
+
+        let jwt = response
+            .into_inner()
+            .token
+            .map(|token| token.jwt)
+            .unwrap_or_default();
+        let jwt = jwt.trim();
+        if jwt.is_empty() {
+            return Err(Status::failed_precondition(
+                "IssueGameToken returned empty token",
+            ));
+        }
+
+        Ok(jwt.to_string())
+    }
+}
+
 /// gRPC SubmissionService implementation.
 #[derive(Clone)]
 pub struct SubmissionServiceImpl {
@@ -366,6 +480,8 @@ pub struct OfficialSandboxCommandServiceImpl {
     repo: SubmissionRepo,
     token_validator: Arc<TokenValidator>,
     team_resolver: Arc<HpsTeamResolver>,
+    game_token_issuer: Arc<GameTokenIssuer>,
+    wrapper_backend_endpoint: String,
     engine: EngineClient,
     runtime_store: Arc<RaceRuntimeStore>,
     slot_updates_tx: broadcast::Sender<String>,
@@ -397,6 +513,8 @@ impl OfficialSandboxCommandServiceImpl {
         repo: SubmissionRepo,
         token_validator: Arc<TokenValidator>,
         team_resolver: Arc<HpsTeamResolver>,
+        game_token_issuer: Arc<GameTokenIssuer>,
+        wrapper_backend_endpoint: String,
         engine: EngineClient,
         runtime_store: Arc<RaceRuntimeStore>,
         slot_updates_tx: broadcast::Sender<String>,
@@ -406,12 +524,139 @@ impl OfficialSandboxCommandServiceImpl {
             repo,
             token_validator,
             team_resolver,
+            game_token_issuer,
+            wrapper_backend_endpoint,
             engine,
             runtime_store,
             slot_updates_tx,
             join_registry,
             join_command_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    fn container_name_for_team(team_id: &str) -> anyhow::Result<String> {
+        let team_component = sanitize_tag_component(team_id)?;
+        Ok(format!("ha3-official-bot-team-{team_component}"))
+    }
+
+    async fn rollback_join_runtime(
+        &self,
+        team_id: &str,
+        sandbox_id: &str,
+        target: EngineCommandTarget,
+        public_car_id: u64,
+        engine_car_id: u64,
+        container_name: &str,
+    ) {
+        if let Err(err) = remove_bot_container(container_name).await {
+            tracing::warn!(
+                team_id = %team_id,
+                sandbox_id = %sandbox_id,
+                container_name = %container_name,
+                error = %err,
+                "failed to rollback bot container after join failure"
+            );
+        }
+        if let Err(err) = self.engine.despawn_car_in(target, engine_car_id).await {
+            tracing::warn!(
+                team_id = %team_id,
+                sandbox_id = %sandbox_id,
+                engine_car_id,
+                error = %err,
+                "failed to rollback spawned join car after bot container failure"
+            );
+        }
+        self.runtime_store.remove_car(public_car_id);
+    }
+
+    async fn cleanup_join_state_locked(
+        &self,
+        team_id: &str,
+        join_state: TeamSandboxJoinState,
+        reason: &str,
+    ) -> Result<(), Status> {
+        if let Err(err) = remove_bot_container(&join_state.container_name).await {
+            tracing::warn!(
+                team_id = %team_id,
+                sandbox_id = %join_state.sandbox_id,
+                container_name = %join_state.container_name,
+                error = %err,
+                "failed to remove bot container during join cleanup"
+            );
+        }
+
+        let target = EngineCommandTarget::Sandbox {
+            sandbox_id: join_state.sandbox_id.clone(),
+        };
+        self.engine
+            .despawn_car_in(target, join_state.engine_car_id)
+            .await
+            .map_err(map_worker_err)?;
+
+        self.runtime_store.remove_car(join_state.public_car_id);
+        self.join_registry.remove(team_id);
+        let _ = self.slot_updates_tx.send(team_id.to_string());
+
+        tracing::info!(
+            team_id = %team_id,
+            sandbox_id = %join_state.sandbox_id,
+            slot_index = join_state.slot_index,
+            public_car_id = join_state.public_car_id,
+            engine_car_id = join_state.engine_car_id,
+            container_name = %join_state.container_name,
+            container_id = %join_state.container_id,
+            reason,
+            "official sandbox join resources cleaned"
+        );
+        Ok(())
+    }
+
+    fn spawn_container_exit_monitor(&self, team_id: String, container_id: String) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let exit_code = match wait_bot_container_exit_code(&container_id).await {
+                Ok(exit_code) => exit_code,
+                Err(err) => {
+                    tracing::warn!(
+                        team_id = %team_id,
+                        container_id = %container_id,
+                        error = %err,
+                        "failed waiting for bot container exit"
+                    );
+                    return;
+                }
+            };
+            tracing::info!(
+                team_id = %team_id,
+                container_id = %container_id,
+                exit_code,
+                "bot container exited"
+            );
+
+            let _join_guard = service.join_command_lock.lock().await;
+            let Some(join_state) = service
+                .join_registry
+                .get(&team_id)
+                .map(|entry| entry.value().clone())
+            else {
+                return;
+            };
+            if join_state.container_id != container_id {
+                return;
+            }
+
+            if let Err(err) = service
+                .cleanup_join_state_locked(&team_id, join_state, "container-exit")
+                .await
+            {
+                tracing::warn!(
+                    team_id = %team_id,
+                    container_id = %container_id,
+                    error = %err,
+                    "failed to cleanup join after bot container exit"
+                );
+            }
+        });
     }
 }
 
@@ -655,6 +900,23 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
                 "requested slot does not contain succeeded submission",
             )));
         };
+        let Some(image_ref) = slot_submission
+            .image_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(Response::new(join_failed(
+                "requested slot submission is missing image_ref",
+            )));
+        };
+        let team_bot_token = self
+            .game_token_issuer
+            .issue_team_bot_token(&team_id)
+            .await?;
+        let container_name = Self::container_name_for_team(&team_id).map_err(|err| {
+            Status::failed_precondition(format!("invalid team_id for container name: {err}"))
+        })?;
 
         let target = EngineCommandTarget::Sandbox {
             sandbox_id: sandbox_id.clone(),
@@ -701,6 +963,36 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
             .car_targets()
             .insert(public_car_id, target.clone());
 
+        let container_id = match start_bot_container(
+            image_ref,
+            &container_name,
+            &self.wrapper_backend_endpoint,
+            &team_bot_token,
+            &team_id,
+            &slot_submission.submission_id,
+            &sandbox_id,
+            slot_index,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(err) => {
+                self.rollback_join_runtime(
+                    &team_id,
+                    &sandbox_id,
+                    target,
+                    public_car_id,
+                    engine_car_id,
+                    &container_name,
+                )
+                .await;
+                return Ok(Response::new(join_failed(format!(
+                    "failed to start bot container: {}",
+                    clip_for_error(&format!("{err:#}"))
+                ))));
+            }
+        };
+
         self.join_registry.insert(
             team_id.clone(),
             TeamSandboxJoinState {
@@ -708,9 +1000,12 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
                 slot_index,
                 public_car_id,
                 engine_car_id,
+                container_name: container_name.clone(),
+                container_id: container_id.clone(),
             },
         );
         let _ = self.slot_updates_tx.send(team_id.clone());
+        self.spawn_container_exit_monitor(team_id.clone(), container_id.clone());
 
         tracing::info!(
             team_id = %team_id,
@@ -719,6 +1014,8 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
             submission_id = %slot_submission.submission_id,
             public_car_id,
             engine_car_id,
+            container_name = %container_name,
+            container_id = %container_id,
             "official sandbox join succeeded"
         );
         Ok(Response::new(JoinOfficialSandboxResponse {
@@ -747,26 +1044,8 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
             }));
         };
 
-        let target = EngineCommandTarget::Sandbox {
-            sandbox_id: join_state.sandbox_id.clone(),
-        };
-        self.engine
-            .despawn_car_in(target, join_state.engine_car_id)
-            .await
-            .map_err(map_worker_err)?;
-
-        self.runtime_store.remove_car(join_state.public_car_id);
-        self.join_registry.remove(&team_id);
-        let _ = self.slot_updates_tx.send(team_id.clone());
-
-        tracing::info!(
-            team_id = %team_id,
-            sandbox_id = %join_state.sandbox_id,
-            slot_index = join_state.slot_index,
-            public_car_id = join_state.public_car_id,
-            engine_car_id = join_state.engine_car_id,
-            "official sandbox leave succeeded"
-        );
+        self.cleanup_join_state_locked(&team_id, join_state, "leave-request")
+            .await?;
         Ok(Response::new(LeaveOfficialSandboxResponse {
             status: OfficialSandboxCommandStatus::Ok as i32,
             message: "left official sandbox".to_string(),
@@ -1602,6 +1881,167 @@ fn wrapper_kind_to_db(kind: WrapperKind) -> &'static str {
     }
 }
 
+async fn start_bot_container(
+    image_ref: &str,
+    container_name: &str,
+    wrapper_backend_endpoint: &str,
+    team_token: &str,
+    team_id: &str,
+    submission_id: &str,
+    sandbox_id: &str,
+    slot_index: i16,
+) -> anyhow::Result<String> {
+    remove_bot_container(container_name).await?;
+    pull_bot_image(image_ref).await?;
+
+    let mut command = Command::new("docker");
+    command
+        .arg("run")
+        .arg("-d")
+        .arg("--name")
+        .arg(container_name)
+        .arg("--label")
+        .arg(format!("ha3.team_id={team_id}"))
+        .arg("--label")
+        .arg(format!("ha3.submission_id={submission_id}"))
+        .arg("--label")
+        .arg(format!("ha3.sandbox_id={sandbox_id}"))
+        .arg("--label")
+        .arg(format!("ha3.slot_index={slot_index}"))
+        .arg("--env")
+        .arg("HA3_WRAPPER_BACKEND_ENDPOINT")
+        .arg("--env")
+        .arg("HA3_WRAPPER_TEAM_TOKEN")
+        .arg(image_ref);
+    command.env("HA3_WRAPPER_BACKEND_ENDPOINT", wrapper_backend_endpoint);
+    command.env("HA3_WRAPPER_TEAM_TOKEN", team_token);
+    let (stdout, _stderr) =
+        run_command_capture(command, "docker/run", Some(BOT_DOCKER_TIMEOUT)).await?;
+
+    let container_id = stdout
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .unwrap_or_default();
+    if container_id.is_empty() {
+        bail!("docker/run returned empty container id");
+    }
+    Ok(container_id.to_string())
+}
+
+async fn pull_bot_image(image_ref: &str) -> anyhow::Result<()> {
+    let mut command = Command::new("docker");
+    command.arg("pull").arg(image_ref);
+    let _ = run_command_capture(command, "docker/pull", Some(BOT_DOCKER_TIMEOUT)).await?;
+    Ok(())
+}
+
+async fn wait_bot_container_exit_code(container_id: &str) -> anyhow::Result<i32> {
+    let mut command = Command::new("docker");
+    command.arg("wait").arg(container_id);
+    let (stdout, _stderr) = run_command_capture(command, "docker/wait", None).await?;
+    let code_raw = stdout
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .ok_or_else(|| anyhow!("docker/wait did not return exit code"))?;
+    code_raw
+        .parse::<i32>()
+        .with_context(|| format!("invalid exit code from docker/wait: `{code_raw}`"))
+}
+
+async fn remove_bot_container(container_name: &str) -> anyhow::Result<()> {
+    let mut command = Command::new("docker");
+    command.arg("rm").arg("-f").arg(container_name);
+    match run_command_capture(command, "docker/rm", Some(BOT_DOCKER_TIMEOUT)).await {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            let lower = err.to_string().to_ascii_lowercase();
+            if lower.contains("no such container") {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+async fn run_command_capture(
+    mut command: Command,
+    label: &str,
+    timeout: Option<Duration>,
+) -> anyhow::Result<(String, String)> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, command.output())
+            .await
+            .map_err(|_| anyhow!("{label} timed out after {}s", timeout.as_secs()))?
+            .with_context(|| format!("failed to execute {label}"))?,
+        None => command
+            .output()
+            .await
+            .with_context(|| format!("failed to execute {label}"))?,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if output.status.success() {
+        return Ok((stdout, stderr));
+    }
+
+    if let Some(hint) = docker_error_hint(&stderr) {
+        bail!(
+            "{label} failed: {hint} (status: {:?}, stderr: {})",
+            output.status.code(),
+            clip_for_error(&stderr)
+        );
+    }
+
+    bail!(
+        "{label} failed (status: {:?}, stdout: {}, stderr: {})",
+        output.status.code(),
+        clip_for_error(&stdout),
+        clip_for_error(&stderr)
+    );
+}
+
+fn docker_error_hint(stderr: &str) -> Option<&'static str> {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("no such container") {
+        return Some("Docker container does not exist");
+    }
+    if lower.contains("cannot connect to the docker daemon") {
+        return Some("Docker daemon is unavailable on backend host");
+    }
+    if lower.contains("pull access denied")
+        || lower.contains("insufficient_scope")
+        || lower.contains("requested access to the resource is denied")
+    {
+        return Some("Docker registry auth failed on backend host");
+    }
+    if lower.contains("manifest unknown")
+        || lower.contains("not found")
+        || lower.contains("no such image")
+    {
+        return Some("Docker image for selected slot was not found in registry");
+    }
+    None
+}
+
 fn add_common_ssh_options(command: &mut Command, cfg: &Config) {
     command
         .arg("-i")
@@ -1783,6 +2223,17 @@ fn attach_auth_cookie<T>(request: &mut Request<T>, token: &str) -> Result<(), St
     let value = MetadataValue::try_from(cookie.as_str())
         .map_err(|_| Status::unauthenticated("invalid auth token cookie"))?;
     request.metadata_mut().insert("cookie", value);
+    Ok(())
+}
+
+fn attach_team_id_header<T>(request: &mut Request<T>, team_id: &str) -> Result<(), Status> {
+    let team_id = team_id.trim();
+    if team_id.is_empty() {
+        return Err(Status::failed_precondition("x-team-id cannot be empty"));
+    }
+    let value = MetadataValue::try_from(team_id)
+        .map_err(|_| Status::failed_precondition("invalid x-team-id metadata"))?;
+    request.metadata_mut().insert("x-team-id", value);
     Ok(())
 }
 

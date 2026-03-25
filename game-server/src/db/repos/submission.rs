@@ -46,6 +46,7 @@ pub struct FilledTeamSlotRecord {
 #[derive(Debug, Clone)]
 pub struct SucceededTeamSlotSubmissionRecord {
     pub submission_id: String,
+    pub image_ref: Option<String>,
 }
 
 /// Succeeded submission not referenced by any team slot.
@@ -268,9 +269,9 @@ impl SubmissionRepo {
         team_id: &str,
         slot_index: i16,
     ) -> anyhow::Result<Option<SucceededTeamSlotSubmissionRecord>> {
-        let row = sqlx::query_as::<_, (String,)>(
+        let row = sqlx::query_as::<_, (String, Option<String>)>(
             r#"
-            SELECT submissions.submission_id
+            SELECT submissions.submission_id, submissions.image_ref
             FROM team_submission_slots AS slots
             JOIN submissions ON submissions.submission_id = slots.submission_id
             WHERE slots.team_id = $1
@@ -284,7 +285,12 @@ impl SubmissionRepo {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(submission_id,)| SucceededTeamSlotSubmissionRecord { submission_id }))
+        Ok(row.map(
+            |(submission_id, image_ref)| SucceededTeamSlotSubmissionRecord {
+                submission_id,
+                image_ref,
+            },
+        ))
     }
 
     /// Returns succeeded submissions for team that are not used in any slot.

@@ -36,6 +36,8 @@ use super::mappers::{
 use super::race::RuntimeCarIdentity;
 use super::race::runtime_store::RuntimePitTireType;
 use super::race::{FrameHub, RaceRuntimeStore};
+#[cfg(feature = "official")]
+use crate::services::submission::OfficialSandboxJoinRegistry;
 
 const PARTICIPANT_REQUESTED_HZ: u32 = 30;
 const MIN_STREAM_HZ: u32 = 1;
@@ -50,12 +52,14 @@ pub struct RaceParticipantServiceImpl {
     frame_hub: FrameHub,
     token_validator: Arc<GameTokenValidator>,
     next_stream_seq: Arc<AtomicU64>,
+    #[cfg(feature = "official")]
+    official_sandbox_joins: OfficialSandboxJoinRegistry,
     #[cfg(feature = "local")]
     local_sandbox_store: LocalSandboxConfigStore,
 }
 
 impl RaceParticipantServiceImpl {
-    pub fn new(
+    pub(crate) fn new(
         engine: EngineClient,
         simulation_hz: u32,
         game_token_jwks_endpoint: &str,
@@ -63,6 +67,7 @@ impl RaceParticipantServiceImpl {
         jwt_issuers: Vec<String>,
         runtime_store: Arc<RaceRuntimeStore>,
         frame_hub: FrameHub,
+        #[cfg(feature = "official")] official_sandbox_joins: OfficialSandboxJoinRegistry,
         #[cfg(feature = "local")] local_sandbox_store: LocalSandboxConfigStore,
     ) -> Self {
         Self {
@@ -76,6 +81,8 @@ impl RaceParticipantServiceImpl {
                 jwt_issuers,
             )),
             next_stream_seq: Arc::new(AtomicU64::new(100_000)),
+            #[cfg(feature = "official")]
+            official_sandbox_joins,
             #[cfg(feature = "local")]
             local_sandbox_store,
         }
@@ -269,17 +276,36 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
     ) -> Result<Response<Self::StreamStream>, Status> {
         let token = parse_game_token(request.metadata())?
             .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
-        let instance_uuid = self
+        let self_public_car_id = if let Some(instance_uuid) = self
             .token_validator
             .instance_uuid_from_token(&token)
             .await?
-            .ok_or_else(|| Status::unauthenticated("missing instance_uuid claim"))?;
-        let self_public_car_id = self
-            .runtime_store
-            .instance_cars()
-            .get(&instance_uuid)
-            .map(|entry| *entry.value())
-            .ok_or_else(|| Status::not_found("unknown instance_uuid"))?;
+        {
+            self.runtime_store
+                .instance_cars()
+                .get(&instance_uuid)
+                .map(|entry| *entry.value())
+                .ok_or_else(|| Status::not_found("unknown instance_uuid"))?
+        } else {
+            #[cfg(feature = "official")]
+            {
+                let team_id = self
+                    .token_validator
+                    .team_id_from_token(&token)
+                    .await?
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| Status::unauthenticated("missing team_id claim"))?;
+                self.official_sandbox_joins
+                    .get(&team_id)
+                    .map(|entry| entry.value().public_car_id)
+                    .ok_or_else(|| Status::not_found("no active official sandbox join for team"))?
+            }
+            #[cfg(not(feature = "official"))]
+            {
+                return Err(Status::unauthenticated("missing instance_uuid claim"));
+            }
+        };
         let self_target = self
             .runtime_store
             .car_target(self_public_car_id)
