@@ -14,13 +14,17 @@ use proto::race::v1::{
     BackToTrackRequest, BackToTrackResponse, EmergencyPitstopRequest, EmergencyPitstopResponse,
     FrontendSpectatorDebugInfo, FrontendSpectatorEvent, FrontendSpectatorSnapshot,
     GetFrontendSpectatorRequest, GetOfficialTeamBotLogsRequest, GetOfficialTeamBotLogsResponse,
-    OfficialTeamBotLogLine, OfficialTeamBotLogsSnapshot, QuickJoinDevRequest, QuickJoinDevResponse,
-    RequestPitstopRequest, RequestPitstopResponse, SetControlsDevRequest, SetControlsResponse,
-    SetNextPitTireTypeRequest, SetNextPitTireTypeResponse, SpectatorView, StreamClampReason,
-    StreamOfficialTeamBotLogsRequest, StreamOfficialTeamBotLogsResponse, StreamSettings,
-    ViewDowngradeReason, frontend_spectator_event::Payload as FrontendSpectatorPayload,
+    QuickJoinDevRequest, QuickJoinDevResponse, RequestPitstopRequest, RequestPitstopResponse,
+    SetControlsDevRequest, SetControlsResponse, SetNextPitTireTypeRequest,
+    SetNextPitTireTypeResponse, SpectatorView, StreamClampReason, StreamOfficialTeamBotLogsRequest,
+    StreamOfficialTeamBotLogsResponse, StreamSettings, ViewDowngradeReason,
+    frontend_spectator_event::Payload as FrontendSpectatorPayload,
     get_frontend_spectator_request::Target as FrontendSpectatorTarget,
     race_service_server::RaceService,
+};
+#[cfg(feature = "official")]
+use proto::race::v1::{
+    OfficialTeamBotLogLine, OfficialTeamBotLogsSnapshot,
     stream_official_team_bot_logs_response::Payload as OfficialTeamBotLogsPayload,
 };
 #[cfg(feature = "official")]
@@ -223,6 +227,17 @@ impl RaceService for RaceServiceImpl {
                 self.resolve_team_active_command_car(&auth).await?;
             let frame = self.frame_hub.latest();
             let applies_from_tick = frame.tick;
+            let cooldown_remaining_ms = self
+                .runtime_store
+                .back_to_track_cooldown_remaining_ms(public_car_id, frame.server_time_ms);
+            if cooldown_remaining_ms > 0 {
+                return Ok(Response::new(BackToTrackResponse {
+                    status: ParticipantCommandStatus::Rejected as i32,
+                    applies_from_tick,
+                    rejected_reason: ParticipantCommandRejectReason::CooldownActive as i32,
+                    cooldown_remaining_ms,
+                }));
+            }
             let response = match self
                 .engine
                 .set_car_back_to_track_in(target, engine_car_id)
@@ -235,6 +250,7 @@ impl RaceService for RaceServiceImpl {
                         status: ParticipantCommandStatus::Accepted as i32,
                         applies_from_tick,
                         rejected_reason: ParticipantCommandRejectReason::Unspecified as i32,
+                        cooldown_remaining_ms: 0,
                     }
                 }
                 Err(err) => {
@@ -247,6 +263,7 @@ impl RaceService for RaceServiceImpl {
                         status: ParticipantCommandStatus::Rejected as i32,
                         applies_from_tick,
                         rejected_reason: ParticipantCommandRejectReason::NotAllowed as i32,
+                        cooldown_remaining_ms: 0,
                     }
                 }
             };
@@ -302,6 +319,17 @@ impl RaceService for RaceServiceImpl {
                 self.resolve_team_active_command_car(&auth).await?;
             let frame = self.frame_hub.latest();
             let applies_from_tick = frame.tick;
+            let cooldown_remaining_ms = self
+                .runtime_store
+                .emergency_pitstop_cooldown_remaining_ms(public_car_id, frame.server_time_ms);
+            if cooldown_remaining_ms > 0 {
+                return Ok(Response::new(EmergencyPitstopResponse {
+                    status: ParticipantCommandStatus::Rejected as i32,
+                    applies_from_tick,
+                    rejected_reason: ParticipantCommandRejectReason::CooldownActive as i32,
+                    cooldown_remaining_ms,
+                }));
+            }
             let response = match self
                 .engine
                 .set_car_to_pitstop_in(target, engine_car_id)
@@ -314,6 +342,7 @@ impl RaceService for RaceServiceImpl {
                         status: ParticipantCommandStatus::Accepted as i32,
                         applies_from_tick,
                         rejected_reason: ParticipantCommandRejectReason::Unspecified as i32,
+                        cooldown_remaining_ms: 0,
                     }
                 }
                 Err(err) => {
@@ -327,6 +356,7 @@ impl RaceService for RaceServiceImpl {
                         status: ParticipantCommandStatus::Rejected as i32,
                         applies_from_tick,
                         rejected_reason: ParticipantCommandRejectReason::NotAllowed as i32,
+                        cooldown_remaining_ms: 0,
                     }
                 }
             };
@@ -876,6 +906,7 @@ impl RaceServiceImpl {
         }
     }
 
+    #[cfg(feature = "official")]
     fn resolve_team_official_race_car(&self, team_id: &str) -> Result<(u64, u64), Status> {
         let identity_map = self.runtime_store.car_identity_map();
         let mut matching_cars = Vec::new();

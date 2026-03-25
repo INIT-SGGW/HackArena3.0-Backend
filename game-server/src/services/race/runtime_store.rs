@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use crate::runtime::engine_worker::EngineCommandTarget;
 
 const PIT_HISTORY_MAX_ENTRIES: usize = 32;
+const COMMAND_COOLDOWN_MS: u64 = 30_000;
 const EMERGENCY_PIT_LOCK_MS: u64 = 30_000;
 const TELEPORT_IDLE_WINDOW_MS: u64 = 500;
 
@@ -50,6 +51,8 @@ pub struct RuntimePitHistoryEntry {
 pub struct RuntimePitStateSnapshot {
     pub pit_request_active: bool,
     pub emergency_lock_remaining_ms: u32,
+    pub back_to_track_remaining_ms: u32,
+    pub emergency_pitstop_remaining_ms: u32,
     pub force_idle: bool,
     pub last_pit_time_ms: u64,
     pub last_pit_source: RuntimePitEntrySource,
@@ -81,6 +84,8 @@ impl Default for RuntimeControlInputSnapshot {
 struct RuntimePitState {
     pit_request_active: bool,
     emergency_lock_until_ms: u64,
+    back_to_track_cooldown_until_ms: u64,
+    emergency_pitstop_cooldown_until_ms: u64,
     force_idle_until_ms: u64,
     last_pit_time_ms: u64,
     last_pit_source: RuntimePitEntrySource,
@@ -93,15 +98,16 @@ struct RuntimePitState {
 
 impl RuntimePitState {
     fn snapshot(&self, now_ms: u64) -> RuntimePitStateSnapshot {
-        let emergency_lock_remaining_ms = if self.emergency_lock_until_ms > now_ms {
-            let remaining = self.emergency_lock_until_ms - now_ms;
-            remaining.min(u64::from(u32::MAX)) as u32
-        } else {
-            0
-        };
+        let emergency_lock_remaining_ms = remaining_u32(self.emergency_lock_until_ms, now_ms);
+        let back_to_track_remaining_ms =
+            remaining_u32(self.back_to_track_cooldown_until_ms, now_ms);
+        let emergency_pitstop_remaining_ms =
+            remaining_u32(self.emergency_pitstop_cooldown_until_ms, now_ms);
         RuntimePitStateSnapshot {
             pit_request_active: self.pit_request_active,
             emergency_lock_remaining_ms,
+            back_to_track_remaining_ms,
+            emergency_pitstop_remaining_ms,
             force_idle: self.force_idle_until_ms > now_ms || emergency_lock_remaining_ms > 0,
             last_pit_time_ms: self.last_pit_time_ms,
             last_pit_source: self.last_pit_source,
@@ -288,14 +294,17 @@ impl RaceRuntimeStore {
 
     pub fn mark_back_to_track_applied(&self, car_id: u64, now_ms: u64) {
         let mut entry = self.car_pit_state.entry(car_id).or_default();
-        entry.force_idle_until_ms = entry
-            .force_idle_until_ms
-            .max(now_ms + TELEPORT_IDLE_WINDOW_MS);
+        entry.back_to_track_cooldown_until_ms = entry
+            .back_to_track_cooldown_until_ms
+            .max(now_ms.saturating_add(COMMAND_COOLDOWN_MS));
     }
 
     pub fn mark_emergency_pitstop_requested(&self, car_id: u64, now_ms: u64) {
         let mut entry = self.car_pit_state.entry(car_id).or_default();
         entry.emergency_intent_pending = true;
+        entry.emergency_pitstop_cooldown_until_ms = entry
+            .emergency_pitstop_cooldown_until_ms
+            .max(now_ms.saturating_add(COMMAND_COOLDOWN_MS));
         entry.emergency_lock_until_ms = entry
             .emergency_lock_until_ms
             .max(now_ms.saturating_add(EMERGENCY_PIT_LOCK_MS));
@@ -309,6 +318,20 @@ impl RaceRuntimeStore {
             .get(&car_id)
             .map(|entry| entry.snapshot(now_ms))
             .unwrap_or_default()
+    }
+
+    pub fn back_to_track_cooldown_remaining_ms(&self, car_id: u64, now_ms: u64) -> u32 {
+        self.car_pit_state
+            .get(&car_id)
+            .map(|entry| remaining_u32(entry.back_to_track_cooldown_until_ms, now_ms))
+            .unwrap_or(0)
+    }
+
+    pub fn emergency_pitstop_cooldown_remaining_ms(&self, car_id: u64, now_ms: u64) -> u32 {
+        self.car_pit_state
+            .get(&car_id)
+            .map(|entry| remaining_u32(entry.emergency_pitstop_cooldown_until_ms, now_ms))
+            .unwrap_or(0)
     }
 
     pub fn update_pit_state_from_runtime(
@@ -393,4 +416,12 @@ impl Default for RaceRuntimeStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn remaining_u32(until_ms: u64, now_ms: u64) -> u32 {
+    if until_ms <= now_ms {
+        return 0;
+    }
+    let remaining = until_ms - now_ms;
+    remaining.min(u64::from(u32::MAX)) as u32
 }

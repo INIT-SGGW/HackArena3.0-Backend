@@ -695,6 +695,7 @@ fn participant_command_ack(
     status: ParticipantCommandStatus,
     applies_from_tick: u64,
     rejected_reason: ParticipantCommandRejectReason,
+    cooldown_remaining_ms: u32,
 ) -> ParticipantCommandAck {
     ParticipantCommandAck {
         client_seq,
@@ -702,6 +703,7 @@ fn participant_command_ack(
         status: status as i32,
         applies_from_tick,
         rejected_reason: rejected_reason as i32,
+        cooldown_remaining_ms,
     }
 }
 
@@ -959,11 +961,50 @@ async fn run_participant_stream(
 
                         let frame = frame_hub.latest();
                         let applies_from_tick = frame.tick;
+                        #[cfg(feature = "official")]
+                        {
+                            let cooldown_remaining_ms = runtime_store
+                                .back_to_track_cooldown_remaining_ms(
+                                    self_public_car_id,
+                                    frame.server_time_ms,
+                                );
+                            if cooldown_remaining_ms > 0 {
+                                let ack = participant_command_ack(
+                                    command.client_seq,
+                                    ParticipantCommandType::BackToTrack,
+                                    ParticipantCommandStatus::Rejected,
+                                    applies_from_tick,
+                                    ParticipantCommandRejectReason::CooldownActive,
+                                    cooldown_remaining_ms,
+                                );
+
+                                if !send_participant_event(
+                                    &tx,
+                                    &mut server_seq,
+                                    ParticipantServerPayload::CommandAck(ack),
+                                )
+                                .await
+                                {
+                                    cleanup_participant_car(
+                                        "command-ack-send-failed",
+                                        &engine,
+                                        runtime_store.as_ref(),
+                                        self_public_car_id,
+                                        &self_target,
+                                        self_engine_car_id,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
                         let ack = match engine
                             .set_car_back_to_track_in(self_target.clone(), self_engine_car_id)
                             .await
                         {
                             Ok(()) => {
+                                #[cfg(feature = "official")]
                                 runtime_store.mark_back_to_track_applied(
                                     self_public_car_id,
                                     frame.server_time_ms,
@@ -974,6 +1015,7 @@ async fn run_participant_stream(
                                     ParticipantCommandStatus::Accepted,
                                     applies_from_tick,
                                     ParticipantCommandRejectReason::Unspecified,
+                                    0,
                                 )
                             }
                             Err(err) => {
@@ -990,6 +1032,7 @@ async fn run_participant_stream(
                                     ParticipantCommandStatus::Rejected,
                                     applies_from_tick,
                                     ParticipantCommandRejectReason::NotAllowed,
+                                    0,
                                 )
                             }
                         };
@@ -1033,11 +1076,50 @@ async fn run_participant_stream(
 
                         let frame = frame_hub.latest();
                         let applies_from_tick = frame.tick;
+                        #[cfg(feature = "official")]
+                        {
+                            let cooldown_remaining_ms = runtime_store
+                                .emergency_pitstop_cooldown_remaining_ms(
+                                    self_public_car_id,
+                                    frame.server_time_ms,
+                                );
+                            if cooldown_remaining_ms > 0 {
+                                let ack = participant_command_ack(
+                                    command.client_seq,
+                                    ParticipantCommandType::EmergencyPitstop,
+                                    ParticipantCommandStatus::Rejected,
+                                    applies_from_tick,
+                                    ParticipantCommandRejectReason::CooldownActive,
+                                    cooldown_remaining_ms,
+                                );
+
+                                if !send_participant_event(
+                                    &tx,
+                                    &mut server_seq,
+                                    ParticipantServerPayload::CommandAck(ack),
+                                )
+                                .await
+                                {
+                                    cleanup_participant_car(
+                                        "command-ack-send-failed",
+                                        &engine,
+                                        runtime_store.as_ref(),
+                                        self_public_car_id,
+                                        &self_target,
+                                        self_engine_car_id,
+                                    )
+                                    .await;
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
                         let ack = match engine
                             .set_car_to_pitstop_in(self_target.clone(), self_engine_car_id)
                             .await
                         {
                             Ok(()) => {
+                                #[cfg(feature = "official")]
                                 runtime_store.mark_emergency_pitstop_requested(
                                     self_public_car_id,
                                     frame.server_time_ms,
@@ -1048,6 +1130,7 @@ async fn run_participant_stream(
                                     ParticipantCommandStatus::Accepted,
                                     applies_from_tick,
                                     ParticipantCommandRejectReason::Unspecified,
+                                    0,
                                 )
                             }
                             Err(err) => {
@@ -1064,6 +1147,7 @@ async fn run_participant_stream(
                                     ParticipantCommandStatus::Rejected,
                                     applies_from_tick,
                                     ParticipantCommandRejectReason::NotAllowed,
+                                    0,
                                 )
                             }
                         };
@@ -1116,6 +1200,7 @@ async fn run_participant_stream(
                                     ParticipantCommandStatus::Accepted,
                                     applies_from_tick,
                                     ParticipantCommandRejectReason::Unspecified,
+                                    0,
                                 )
                             }
                             Err(()) => participant_command_ack(
@@ -1124,6 +1209,7 @@ async fn run_participant_stream(
                                 ParticipantCommandStatus::Rejected,
                                 applies_from_tick,
                                 ParticipantCommandRejectReason::NotAllowed,
+                                0,
                             ),
                         };
 

@@ -8,8 +8,8 @@ use boink::model::{
     GroundType, TrackData as EngineTrackData, TyreType, VehicleState,
 };
 use proto::race::v1::{
-    CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, FrontendCarFullState,
-    GearShift as ProtoGearShift, GhostModeBlocker as ProtoGhostModeBlocker,
+    CarKinematics, CarParticipantState, CarRenderState, CenterlineSample, CommandCooldownState,
+    FrontendCarFullState, GearShift as ProtoGearShift, GhostModeBlocker as ProtoGhostModeBlocker,
     GhostModePhase as ProtoGhostModePhase, GhostModeState, GroundType as ProtoGroundType,
     GroundWidth as ProtoGroundWidth, ParticipantOpponentState, ParticipantSelfState,
     PitEntrySource as ProtoPitEntrySource, PitHistoryEntry as ProtoPitHistoryEntry,
@@ -195,6 +195,7 @@ pub(crate) fn participant_telemetry_from_state(
         pit_history: Some(pit_history_from_snapshot(pit_state)),
         next_pit_tire_type: runtime_tire_type_to_proto(pit_state.next_pit_tire_type),
         tire_slip,
+        command_cooldowns: Some(command_cooldowns_from_snapshot(pit_state)),
     }
 }
 
@@ -392,6 +393,13 @@ fn pit_history_from_snapshot(snapshot: &RuntimePitStateSnapshot) -> ProtoPitHist
                 new_tire_type: runtime_tire_type_to_proto(entry.new_tire_type),
             })
             .collect(),
+    }
+}
+
+fn command_cooldowns_from_snapshot(snapshot: &RuntimePitStateSnapshot) -> CommandCooldownState {
+    CommandCooldownState {
+        back_to_track_remaining_ms: snapshot.back_to_track_remaining_ms,
+        emergency_pitstop_remaining_ms: snapshot.emergency_pitstop_remaining_ms,
     }
 }
 
