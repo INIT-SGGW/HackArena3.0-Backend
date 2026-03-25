@@ -2,6 +2,10 @@
 
 #[cfg(feature = "official")]
 use std::collections::VecDeque;
+#[cfg(feature = "official")]
+use std::io::SeekFrom;
+#[cfg(feature = "official")]
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,12 +14,14 @@ use proto::race::v1::{
     BackToTrackRequest, BackToTrackResponse, EmergencyPitstopRequest, EmergencyPitstopResponse,
     FrontendSpectatorDebugInfo, FrontendSpectatorEvent, FrontendSpectatorSnapshot,
     GetFrontendSpectatorRequest, GetOfficialTeamBotLogsRequest, GetOfficialTeamBotLogsResponse,
-    QuickJoinDevRequest, QuickJoinDevResponse, RequestPitstopRequest, RequestPitstopResponse,
-    SetControlsDevRequest, SetControlsResponse, SetNextPitTireTypeRequest,
-    SetNextPitTireTypeResponse, SpectatorView, StreamClampReason, StreamSettings,
+    OfficialTeamBotLogLine, OfficialTeamBotLogsSnapshot, QuickJoinDevRequest, QuickJoinDevResponse,
+    RequestPitstopRequest, RequestPitstopResponse, SetControlsDevRequest, SetControlsResponse,
+    SetNextPitTireTypeRequest, SetNextPitTireTypeResponse, SpectatorView, StreamClampReason,
+    StreamOfficialTeamBotLogsRequest, StreamOfficialTeamBotLogsResponse, StreamSettings,
     ViewDowngradeReason, frontend_spectator_event::Payload as FrontendSpectatorPayload,
     get_frontend_spectator_request::Target as FrontendSpectatorTarget,
     race_service_server::RaceService,
+    stream_official_team_bot_logs_response::Payload as OfficialTeamBotLogsPayload,
 };
 #[cfg(feature = "official")]
 use proto::race::v1::{
@@ -28,7 +34,8 @@ use tokio::time::Duration;
 #[cfg(feature = "official")]
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader},
+    time::MissedTickBehavior,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, server::NamedService};
@@ -63,6 +70,17 @@ const FRONTEND_STREAM_CHANNEL_CAPACITY: usize = 4;
 const OFFICIAL_BOT_LOG_MAX_LINES: usize = 5_000;
 #[cfg(feature = "official")]
 const OFFICIAL_BOT_LOG_MAX_CHARS: usize = 200_000;
+#[cfg(feature = "official")]
+const OFFICIAL_BOT_LOG_STREAM_CHANNEL_CAPACITY: usize = 64;
+#[cfg(feature = "official")]
+const OFFICIAL_BOT_LOG_STREAM_POLL_INTERVAL_MS: u64 = 200;
+
+#[cfg(feature = "official")]
+struct BotLogsSnapshot {
+    lines: Vec<String>,
+    truncated: bool,
+    file_size_bytes: u64,
+}
 
 /// gRPC RaceService implementation backed by a single engine world.
 #[derive(Clone)]
@@ -133,6 +151,8 @@ impl NamedService for RaceServiceImpl {
 #[tonic::async_trait]
 impl RaceService for RaceServiceImpl {
     type StreamFrontendSpectatorStream = ReceiverStream<Result<FrontendSpectatorEvent, Status>>;
+    type StreamOfficialTeamBotLogsStream =
+        ReceiverStream<Result<StreamOfficialTeamBotLogsResponse, Status>>;
 
     async fn quick_join_dev(
         &self,
@@ -377,7 +397,7 @@ impl RaceService for RaceServiceImpl {
                 .map(|entry| entry.value().clone())
                 .ok_or_else(|| Status::not_found("no active official sandbox bot for team"))?;
 
-            let (lines, truncated) = read_tail_bot_logs(&join_state.log_file_path)
+            let snapshot = read_tail_bot_logs_snapshot(&join_state.log_file_path)
                 .await
                 .map_err(|err| {
                     tracing::warn!(
@@ -390,9 +410,122 @@ impl RaceService for RaceServiceImpl {
                 })?;
 
             Ok(Response::new(GetOfficialTeamBotLogsResponse {
-                lines,
-                truncated,
+                lines: snapshot.lines,
+                truncated: snapshot.truncated,
             }))
+        }
+    }
+
+    async fn stream_official_team_bot_logs(
+        &self,
+        request: Request<StreamOfficialTeamBotLogsRequest>,
+    ) -> Result<Response<Self::StreamOfficialTeamBotLogsStream>, Status> {
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "StreamOfficialTeamBotLogs is supported only in official backend mode",
+            ));
+        }
+        #[cfg(feature = "official")]
+        {
+            let auth = parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            let team_id = self
+                .token_validator
+                .team_id_from_token(&auth)
+                .await?
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| Status::unauthenticated("missing team_id claim"))?;
+
+            let join_state = self
+                .official_sandbox_joins
+                .get(team_id.as_str())
+                .map(|entry| entry.value().clone())
+                .ok_or_else(|| Status::not_found("no active official sandbox bot for team"))?;
+
+            let snapshot = read_tail_bot_logs_snapshot(&join_state.log_file_path)
+                .await
+                .map_err(|err| {
+                    tracing::warn!(
+                        team_id = %team_id,
+                        log_file = %join_state.log_file_path.display(),
+                        error = %err,
+                        "failed to read official team bot log snapshot"
+                    );
+                    Status::internal("failed to read official team bot logs")
+                })?;
+
+            let (tx, rx) = mpsc::channel(OFFICIAL_BOT_LOG_STREAM_CHANNEL_CAPACITY);
+            let joins = self.official_sandbox_joins.clone();
+            let team_id_for_task = team_id.clone();
+            let log_path = join_state.log_file_path.clone();
+            let mut offset = snapshot.file_size_bytes;
+            let mut pending_tail = String::new();
+
+            tokio::spawn(async move {
+                let snapshot_event = StreamOfficialTeamBotLogsResponse {
+                    payload: Some(OfficialTeamBotLogsPayload::Snapshot(
+                        OfficialTeamBotLogsSnapshot {
+                            lines: snapshot.lines,
+                            truncated: snapshot.truncated,
+                        },
+                    )),
+                };
+                if tx.send(Ok(snapshot_event)).await.is_err() {
+                    return;
+                }
+
+                let mut interval = tokio::time::interval(Duration::from_millis(
+                    OFFICIAL_BOT_LOG_STREAM_POLL_INTERVAL_MS,
+                ));
+                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                interval.tick().await;
+
+                loop {
+                    if tx.is_closed() {
+                        break;
+                    }
+                    interval.tick().await;
+
+                    let current_log_path = joins
+                        .get(team_id_for_task.as_str())
+                        .map(|entry| entry.value().log_file_path.clone());
+                    let Some(current_log_path) = current_log_path else {
+                        break;
+                    };
+                    if current_log_path != log_path {
+                        break;
+                    }
+
+                    match read_appended_bot_log_lines(&log_path, &mut offset, &mut pending_tail)
+                        .await
+                    {
+                        Ok(lines) => {
+                            for line in lines {
+                                let event = StreamOfficialTeamBotLogsResponse {
+                                    payload: Some(OfficialTeamBotLogsPayload::Line(
+                                        OfficialTeamBotLogLine { line },
+                                    )),
+                                };
+                                if tx.send(Ok(event)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let _ = tx
+                                .send(Err(Status::internal(format!(
+                                    "failed to read official team bot logs: {err}"
+                                ))))
+                                .await;
+                            break;
+                        }
+                    }
+                }
+            });
+
+            Ok(Response::new(ReceiverStream::new(rx)))
         }
     }
 
@@ -457,8 +590,9 @@ impl RaceService for RaceServiceImpl {
 }
 
 #[cfg(feature = "official")]
-async fn read_tail_bot_logs(path: &std::path::Path) -> Result<(Vec<String>, bool), std::io::Error> {
+async fn read_tail_bot_logs_snapshot(path: &Path) -> Result<BotLogsSnapshot, std::io::Error> {
     let file = File::open(path).await?;
+    let file_size_bytes = file.metadata().await?.len();
     let mut lines_reader = BufReader::new(file).lines();
     let mut window: VecDeque<(String, usize)> = VecDeque::new();
     let mut total_chars = 0usize;
@@ -484,10 +618,49 @@ async fn read_tail_bot_logs(path: &std::path::Path) -> Result<(Vec<String>, bool
         }
     }
 
-    Ok((
-        window.into_iter().map(|(line, _line_chars)| line).collect(),
+    Ok(BotLogsSnapshot {
+        lines: window.into_iter().map(|(line, _line_chars)| line).collect(),
         truncated,
-    ))
+        file_size_bytes,
+    })
+}
+
+#[cfg(feature = "official")]
+async fn read_appended_bot_log_lines(
+    path: &Path,
+    offset: &mut u64,
+    pending_tail: &mut String,
+) -> Result<Vec<String>, std::io::Error> {
+    let mut file = File::open(path).await?;
+    let file_size_bytes = file.metadata().await?.len();
+    if file_size_bytes < *offset {
+        *offset = 0;
+        pending_tail.clear();
+    }
+
+    file.seek(SeekFrom::Start(*offset)).await?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await?;
+    *offset = offset.saturating_add(bytes.len() as u64);
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    pending_tail.push_str(&String::from_utf8_lossy(&bytes));
+    let mut lines = Vec::new();
+    while let Some(line_end_idx) = pending_tail.find('\n') {
+        let mut line = pending_tail[..line_end_idx].to_string();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        let (line, _line_chars, _line_was_truncated) =
+            truncate_line_tail(line, OFFICIAL_BOT_LOG_MAX_CHARS);
+        lines.push(line);
+
+        pending_tail.drain(..=line_end_idx);
+    }
+
+    Ok(lines)
 }
 
 #[cfg(feature = "official")]

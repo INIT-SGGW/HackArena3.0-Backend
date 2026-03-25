@@ -124,7 +124,11 @@ fn split_wrapping_quotes(value: &str) -> (&str, &str, &str) {
     let first = value.as_bytes()[0];
     let last = value.as_bytes()[value.len() - 1];
     if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-        (&value[..1], &value[1..value.len() - 1], &value[value.len() - 1..])
+        (
+            &value[..1],
+            &value[1..value.len() - 1],
+            &value[value.len() - 1..],
+        )
     } else {
         ("", value, "")
     }
