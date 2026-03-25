@@ -8,7 +8,8 @@ use boink::model::{Controls, GearShift as EngineGearShift};
 use proto::race::v1::{
     LocalSandboxJoinRequest, LocalSandboxJoinResponse, ParticipantCommandAck,
     ParticipantCommandRejectReason, ParticipantCommandStatus, ParticipantCommandType,
-    ParticipantServerEvent, ParticipantSnapshot, SpectatorView, StreamClampReason, StreamSettings,
+    ParticipantServerEvent, ParticipantSnapshot, PrepareOfficialJoinRequest,
+    PrepareOfficialJoinResponse, SpectatorView, StreamClampReason, StreamSettings,
     TireType as ProtoTireType, ViewDowngradeReason,
     participant_client_message::Payload as ParticipantClientPayload,
     participant_server_event::Payload as ParticipantServerPayload,
@@ -16,6 +17,8 @@ use proto::race::v1::{
 };
 #[cfg(feature = "local")]
 use rand::Rng;
+#[cfg(feature = "official")]
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -23,6 +26,8 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::auth::game_token::{GameTokenValidator, parse_game_token};
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
+#[cfg(feature = "official")]
+use crate::runtime::engine_worker::EngineActivityKind;
 #[cfg(feature = "local")]
 use crate::runtime::engine_worker::{EngineActiveSandboxState, EngineRuntimeState};
 use crate::runtime::engine_worker::{EngineClient, EngineCommandTarget};
@@ -32,7 +37,6 @@ use super::mappers::{
     engine_gear_shift_to_proto, participant_opponent_state, participant_self_state,
     proto_participant_controls_to_controls,
 };
-#[cfg(feature = "local")]
 use super::race::RuntimeCarIdentity;
 use super::race::runtime_store::RuntimePitTireType;
 use super::race::{FrameHub, RaceRuntimeStore};
@@ -54,6 +58,8 @@ pub struct RaceParticipantServiceImpl {
     next_stream_seq: Arc<AtomicU64>,
     #[cfg(feature = "official")]
     official_sandbox_joins: OfficialSandboxJoinRegistry,
+    #[cfg(feature = "official")]
+    prepare_command_lock: Arc<Mutex<()>>,
     #[cfg(feature = "local")]
     local_sandbox_store: LocalSandboxConfigStore,
 }
@@ -83,6 +89,8 @@ impl RaceParticipantServiceImpl {
             next_stream_seq: Arc::new(AtomicU64::new(100_000)),
             #[cfg(feature = "official")]
             official_sandbox_joins,
+            #[cfg(feature = "official")]
+            prepare_command_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "local")]
             local_sandbox_store,
         }
@@ -233,6 +241,65 @@ impl RaceParticipantServiceImpl {
             }
         }
     }
+
+    #[cfg(feature = "official")]
+    async fn required_team_id_from_token(&self, token: &str) -> Result<String, Status> {
+        self.token_validator
+            .team_id_from_token(token)
+            .await?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| Status::unauthenticated("missing team_id claim"))
+    }
+
+    #[cfg(feature = "official")]
+    fn resolve_team_official_race_car(&self, team_id: &str) -> Result<Option<(u64, u64)>, Status> {
+        let team_id = team_id.trim();
+        if team_id.is_empty() {
+            return Err(Status::unauthenticated("missing team_id claim"));
+        }
+
+        let identities = self.runtime_store.car_identity_map();
+        let targets = self.runtime_store.car_targets();
+        let engine_ids = self.runtime_store.car_engine_ids();
+
+        let mut matching = Vec::new();
+        for identity_entry in identities.iter() {
+            if identity_entry.value().team_id.as_deref() != Some(team_id) {
+                continue;
+            }
+
+            let public_car_id = *identity_entry.key();
+            let is_official_race = targets
+                .get(&public_car_id)
+                .map(|entry| matches!(entry.value(), EngineCommandTarget::OfficialRace))
+                .unwrap_or(false);
+            if !is_official_race {
+                continue;
+            }
+
+            let Some(engine_car_id) = engine_ids.get(&public_car_id).map(|entry| *entry.value())
+            else {
+                continue;
+            };
+
+            matching.push((public_car_id, engine_car_id));
+        }
+
+        match matching.len() {
+            0 => Ok(None),
+            1 => Ok(matching.pop()),
+            _ => Err(Status::failed_precondition(
+                "multiple active official-race cars found for team",
+            )),
+        }
+    }
+
+    #[cfg(feature = "official")]
+    fn require_team_official_race_car(&self, team_id: &str) -> Result<(u64, u64), Status> {
+        self.resolve_team_official_race_car(team_id)?
+            .ok_or_else(|| Status::not_found("no active official-race car for team"))
+    }
 }
 
 #[cfg(feature = "local")]
@@ -289,17 +356,23 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
         } else {
             #[cfg(feature = "official")]
             {
-                let team_id = self
-                    .token_validator
-                    .team_id_from_token(&token)
-                    .await?
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| Status::unauthenticated("missing team_id claim"))?;
-                self.official_sandbox_joins
-                    .get(&team_id)
-                    .map(|entry| entry.value().public_car_id)
-                    .ok_or_else(|| Status::not_found("no active official sandbox join for team"))?
+                let team_id = self.required_team_id_from_token(&token).await?;
+                let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
+                match runtime_state.activity_kind {
+                    EngineActivityKind::OfficialRace => {
+                        self.require_team_official_race_car(&team_id)?.0
+                    }
+                    EngineActivityKind::Sandbox => self
+                        .official_sandbox_joins
+                        .get(&team_id)
+                        .map(|entry| entry.value().public_car_id)
+                        .ok_or_else(|| {
+                            Status::not_found("no active official sandbox join for team")
+                        })?,
+                    EngineActivityKind::None => {
+                        return Err(Status::failed_precondition("runtime is not active"));
+                    }
+                }
             }
             #[cfg(not(feature = "official"))]
             {
@@ -343,6 +416,114 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn prepare_official_join(
+        &self,
+        request: Request<PrepareOfficialJoinRequest>,
+    ) -> Result<Response<PrepareOfficialJoinResponse>, Status> {
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "PrepareOfficialJoin is supported only in official backend mode",
+            ));
+        }
+        #[cfg(feature = "official")]
+        {
+            let token = parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            let _ = request.into_inner();
+            let team_id = self.required_team_id_from_token(&token).await?;
+
+            let _prepare_guard = self.prepare_command_lock.lock().await;
+            let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
+
+            match runtime_state.activity_kind {
+                EngineActivityKind::OfficialRace => {
+                    let map_id = runtime_state.map_id.clone();
+                    if let Some((public_car_id, engine_car_id)) =
+                        self.resolve_team_official_race_car(&team_id)?
+                    {
+                        tracing::info!(
+                            team_id = %team_id,
+                            public_car_id,
+                            engine_car_id,
+                            map_id = %map_id,
+                            "prepare official join: reused official-race car"
+                        );
+                        return Ok(Response::new(PrepareOfficialJoinResponse {
+                            car_id: public_car_id,
+                            map_id,
+                        }));
+                    }
+
+                    let engine_car_id = self.engine.spawn_car().await.map_err(map_worker_err)?;
+                    let public_car_id = self.runtime_store.allocate_public_car_id();
+                    let mut identity = RuntimeCarIdentity::default();
+                    identity.team_id = Some(team_id.clone());
+                    self.runtime_store.set_car_identity(public_car_id, identity);
+                    self.runtime_store.known_cars().insert(public_car_id, ());
+                    self.runtime_store
+                        .last_client_seq()
+                        .insert(public_car_id, 0);
+                    self.runtime_store
+                        .car_engine_ids()
+                        .insert(public_car_id, engine_car_id);
+                    self.runtime_store
+                        .car_targets()
+                        .insert(public_car_id, EngineCommandTarget::OfficialRace);
+
+                    tracing::info!(
+                        team_id = %team_id,
+                        public_car_id,
+                        engine_car_id,
+                        map_id = %map_id,
+                        "prepare official join: spawned official-race car"
+                    );
+                    Ok(Response::new(PrepareOfficialJoinResponse {
+                        car_id: public_car_id,
+                        map_id,
+                    }))
+                }
+                EngineActivityKind::Sandbox => {
+                    let join_state = self
+                        .official_sandbox_joins
+                        .get(&team_id)
+                        .map(|entry| entry.value().clone())
+                        .ok_or_else(|| {
+                            Status::not_found("no active official sandbox join for team")
+                        })?;
+
+                    let map_id = runtime_state
+                        .active_sandboxes
+                        .iter()
+                        .find(|entry| entry.sandbox_id == join_state.sandbox_id)
+                        .map(|entry| entry.map_id.clone())
+                        .ok_or_else(|| {
+                            Status::failed_precondition(
+                                "sandbox runtime is not active for team join",
+                            )
+                        })?;
+
+                    tracing::info!(
+                        team_id = %team_id,
+                        sandbox_id = %join_state.sandbox_id,
+                        slot_index = join_state.slot_index,
+                        public_car_id = join_state.public_car_id,
+                        map_id = %map_id,
+                        "prepare official join: resolved sandbox join"
+                    );
+                    Ok(Response::new(PrepareOfficialJoinResponse {
+                        car_id: join_state.public_car_id,
+                        map_id,
+                    }))
+                }
+                EngineActivityKind::None => {
+                    Err(Status::failed_precondition("runtime is not active"))
+                }
+            }
+        }
     }
 
     async fn local_sandbox_join(
