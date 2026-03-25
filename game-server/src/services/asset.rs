@@ -26,11 +26,19 @@ use tonic::{Request, Response, Status};
 use crate::auth::auth_claims::TokenValidator;
 #[cfg(feature = "local")]
 use crate::local::map_assets::LocalMapAssetsSync;
+#[cfg(feature = "official")]
+use std::collections::HashMap;
+#[cfg(feature = "official")]
+use std::time::{Duration, Instant};
+#[cfg(feature = "official")]
+use tokio::sync::RwLock;
 
 type BoxStream<T> = Pin<Box<dyn tokio_stream::Stream<Item = Result<T, Status>> + Send + 'static>>;
 
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 const MAX_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB
+#[cfg(feature = "official")]
+const MAP_BUNDLE_META_CACHE_TTL: Duration = Duration::from_secs(120);
 #[cfg(feature = "official")]
 const LOCAL_MARKER_FILE: &str = ".local";
 
@@ -148,6 +156,8 @@ pub struct AssetServiceImpl {
     tracks_dir: PathBuf,
     hash_cache: HashCache,
     #[cfg(feature = "official")]
+    map_bundle_meta_cache: RwLock<HashMap<String, CachedMapBundleMeta>>,
+    #[cfg(feature = "official")]
     admin_token_validator: Option<Arc<TokenValidator>>,
     #[cfg(feature = "local")]
     local_sync: Option<Arc<LocalMapAssetsSync>>,
@@ -165,6 +175,13 @@ struct MapBundlePaths {
     minimap_metadata_path: PathBuf,
     map_metadata_path: PathBuf,
     local_marker_path: PathBuf,
+}
+
+#[cfg(feature = "official")]
+#[derive(Debug, Clone)]
+struct CachedMapBundleMeta {
+    bundle: MapAssetBundleMeta,
+    cached_at: Instant,
 }
 
 impl AssetServiceImpl {
@@ -186,6 +203,8 @@ impl AssetServiceImpl {
             serving_enabled,
             tracks_dir,
             hash_cache,
+            #[cfg(feature = "official")]
+            map_bundle_meta_cache: RwLock::new(HashMap::new()),
             #[cfg(feature = "official")]
             admin_token_validator,
             #[cfg(feature = "local")]
@@ -749,6 +768,40 @@ impl AssetServiceImpl {
         }
         Ok(())
     }
+
+    #[cfg(feature = "official")]
+    async fn try_get_cached_bundle_meta(&self, map_id: &str) -> Option<MapAssetBundleMeta> {
+        let now = Instant::now();
+        {
+            let cache = self.map_bundle_meta_cache.read().await;
+            if let Some(entry) = cache.get(map_id) {
+                if now.duration_since(entry.cached_at) < MAP_BUNDLE_META_CACHE_TTL {
+                    return Some(entry.bundle.clone());
+                }
+            }
+        }
+
+        let mut cache = self.map_bundle_meta_cache.write().await;
+        if let Some(entry) = cache.get(map_id) {
+            if now.duration_since(entry.cached_at) < MAP_BUNDLE_META_CACHE_TTL {
+                return Some(entry.bundle.clone());
+            }
+            cache.remove(map_id);
+        }
+        None
+    }
+
+    #[cfg(feature = "official")]
+    async fn store_cached_bundle_meta(&self, map_id: String, bundle: MapAssetBundleMeta) {
+        let mut cache = self.map_bundle_meta_cache.write().await;
+        cache.insert(
+            map_id,
+            CachedMapBundleMeta {
+                bundle,
+                cached_at: Instant::now(),
+            },
+        );
+    }
 }
 
 #[tonic::async_trait]
@@ -803,6 +856,13 @@ impl AssetService for AssetServiceImpl {
         self.ensure_local_map_cached_if_needed(&map_id).await?;
         if !self.serving_enabled {
             return Err(Status::not_found("map asset bundle not found"));
+        }
+        #[cfg(feature = "official")]
+        if let Some(bundle) = self.try_get_cached_bundle_meta(&map_id).await {
+            tracing::debug!(%map_id, "map asset bundle meta cache hit");
+            return Ok(Response::new(GetMapAssetBundleMetaResponse {
+                bundle: Some(bundle),
+            }));
         }
 
         #[cfg(feature = "official")]
@@ -872,7 +932,10 @@ impl AssetService for AssetServiceImpl {
             map_metadata: Some(map_metadata),
         };
 
-        tracing::info!(%map_id, "map asset bundle meta resolved");
+        #[cfg(feature = "official")]
+        self.store_cached_bundle_meta(map_id.clone(), bundle.clone())
+            .await;
+        tracing::debug!(%map_id, "map asset bundle meta resolved");
         Ok(Response::new(GetMapAssetBundleMetaResponse {
             bundle: Some(bundle),
         }))
