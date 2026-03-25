@@ -258,9 +258,10 @@ impl Config {
             .map_err(|e| format!("Failed to resolve LOCAL_TRACKS_DIR: {e}"))?;
         #[cfg(feature = "official")]
         if let Some(path) = &local_tracks_dir {
-            tracing::info!(path = %path.display(), "using local tracks directory for AssetService");
-        } else {
-            tracing::warn!("LOCAL_TRACKS_DIR is not configured; local map assets are disabled");
+            tracing::warn!(
+                path = %path.display(),
+                "LOCAL_TRACKS_DIR is deprecated/ignored in official backend; AssetService uses TRACKS_DIR bundle layout"
+            );
         }
 
         #[cfg(feature = "official")]

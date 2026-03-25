@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(feature = "official")]
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1967,6 +1969,22 @@ fn current_unix_ms() -> i64 {
     seconds.saturating_mul(1000).saturating_add(nanos_ms)
 }
 
+#[cfg(feature = "official")]
+fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
+    if map_id.trim().is_empty() {
+        return Err(EngineWorkerError::InvalidArgument(
+            "map_id must be non-empty".to_string(),
+        ));
+    }
+    if !map_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(EngineWorkerError::InvalidArgument(
+            "map_id(storage_key) must be alphanumeric".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "official"))]
 fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
     if map_id.trim().is_empty() {
         return Err(EngineWorkerError::InvalidArgument(
@@ -1988,7 +2006,7 @@ fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
 fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError> {
     validate_map_id(map_id)?;
     #[cfg(feature = "official")]
-    let track_glb = cfg.tracks_dir.join(format!("{map_id}.glb"));
+    let track_glb = resolve_official_track_glb_path(&cfg.tracks_dir, map_id)?;
     #[cfg(feature = "local")]
     let track_glb = cfg.local_tracks_cache_dir.join(format!("{map_id}.glb"));
     tracing::info!(
@@ -2020,4 +2038,84 @@ fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError>
     let builder =
         EngineBuilder::new(track_glb, vehicle_model).with_debug_drawer(cfg.debug_drawer_enabled);
     builder.build().map_err(EngineWorkerError::Engine)
+}
+
+#[cfg(feature = "official")]
+fn resolve_official_track_glb_path(
+    tracks_dir: &Path,
+    storage_key: &str,
+) -> Result<PathBuf, EngineWorkerError> {
+    let bundle_dir = tracks_dir.join(storage_key);
+    let bundle_meta = std::fs::metadata(&bundle_dir).map_err(|e| {
+        EngineWorkerError::InvalidArgument(format!(
+            "map bundle directory for storage key '{storage_key}' cannot be read: {e}"
+        ))
+    })?;
+    if !bundle_meta.is_dir() {
+        return Err(EngineWorkerError::InvalidArgument(format!(
+            "map bundle directory for storage key '{storage_key}' does not exist"
+        )));
+    }
+
+    let mut main_candidates: Vec<String> = Vec::new();
+    let entries = std::fs::read_dir(&bundle_dir).map_err(|e| {
+        EngineWorkerError::InvalidArgument(format!(
+            "map bundle directory for storage key '{storage_key}' cannot be listed: {e}"
+        ))
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            EngineWorkerError::InvalidArgument(format!(
+                "map bundle directory for storage key '{storage_key}' contains unreadable entry: {e}"
+            ))
+        })?;
+        let file_type = entry.file_type().map_err(|e| {
+            EngineWorkerError::InvalidArgument(format!(
+                "map bundle directory for storage key '{storage_key}' contains unsupported entry: {e}"
+            ))
+        })?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.ends_with(".glb") || file_name.ends_with(".animation.glb") {
+            continue;
+        }
+        let Some(internal_map_id) = file_name.strip_suffix(".glb") else {
+            continue;
+        };
+        if internal_map_id.is_empty()
+            || !internal_map_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            continue;
+        }
+        main_candidates.push(internal_map_id.to_string());
+    }
+
+    if main_candidates.is_empty() {
+        return Err(EngineWorkerError::InvalidArgument(format!(
+            "map bundle for storage key '{storage_key}' has no main glb"
+        )));
+    }
+    if main_candidates.len() > 1 {
+        return Err(EngineWorkerError::InvalidArgument(format!(
+            "map bundle for storage key '{storage_key}' has multiple main glb files"
+        )));
+    }
+
+    let internal_map_id = &main_candidates[0];
+    let track_glb = bundle_dir.join(format!("{internal_map_id}.glb"));
+    if !track_glb.is_file() {
+        return Err(EngineWorkerError::InvalidArgument(format!(
+            "map bundle for storage key '{storage_key}' is missing main glb file"
+        )));
+    }
+    Ok(track_glb)
 }

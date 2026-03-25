@@ -3,7 +3,6 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-#[cfg(feature = "local")]
 use std::sync::Arc;
 
 use async_stream::try_stream;
@@ -13,15 +12,18 @@ use proto::race::v1::asset_service_server::AssetService;
 use proto::race::v1::{
     GetMapAssetBundleMetaRequest, GetMapAssetBundleMetaResponse, GetMapAssetRequest,
     GetMapAssetResponse, GetMapAssetSyncMetaRequest, GetMapAssetSyncMetaResponse,
-    HelicopterViewMetadata, ListMapsRequest, ListMapsResponse, MapAssetBundleMeta, MapAssetKind,
-    MapAssetMeta, MapCatalogEntry, MapGlbKind, MapMetadata, MimeType, MinimapMetadata,
-    StreamMapAssetGlbRequest, StreamMapAssetGlbResponse, Vector3,
+    HelicopterViewMetadata, ListAllMapsRequest, ListAllMapsResponse, ListMapsRequest,
+    ListMapsResponse, MapAssetBundleMeta, MapAssetKind, MapAssetMeta, MapCatalogEntry, MapGlbKind,
+    MapMetadata, MimeType, MinimapMetadata, StreamMapAssetGlbRequest, StreamMapAssetGlbResponse,
+    Vector3,
 };
 use serde::Deserialize;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use tonic::{Request, Response, Status};
 
+#[cfg(feature = "official")]
+use crate::auth::auth_claims::TokenValidator;
 #[cfg(feature = "local")]
 use crate::local::map_assets::LocalMapAssetsSync;
 
@@ -29,6 +31,8 @@ type BoxStream<T> = Pin<Box<dyn tokio_stream::Stream<Item = Result<T, Status>> +
 
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 const MAX_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB
+#[cfg(feature = "official")]
+const LOCAL_MARKER_FILE: &str = ".local";
 
 #[derive(Debug, Deserialize)]
 struct MinimapMetadataJson {
@@ -52,7 +56,6 @@ struct MinimapMetadataJson {
 
 #[derive(Debug, Deserialize)]
 struct MapMetadataJson {
-    id: String,
     name: String,
     #[serde(alias = "lapLengthMeters")]
     lap_length_meters: f32,
@@ -126,7 +129,7 @@ impl From<MinimapMetadataJson> for MinimapMetadata {
 impl From<MapMetadataJson> for MapMetadata {
     fn from(value: MapMetadataJson) -> Self {
         Self {
-            map_id: value.id,
+            map_id: String::new(),
             map_name: value.name,
             total_length_m: value.lap_length_meters,
             follow_camera_anchor_positions: value
@@ -144,94 +147,127 @@ pub struct AssetServiceImpl {
     serving_enabled: bool,
     tracks_dir: PathBuf,
     hash_cache: HashCache,
+    #[cfg(feature = "official")]
+    admin_token_validator: Option<Arc<TokenValidator>>,
     #[cfg(feature = "local")]
     local_sync: Option<Arc<LocalMapAssetsSync>>,
+}
+
+#[cfg(feature = "official")]
+#[derive(Debug, Clone)]
+struct MapBundlePaths {
+    storage_key: String,
+    internal_map_id: String,
+    bundle_dir: PathBuf,
+    main_glb_path: PathBuf,
+    animation_glb_path: PathBuf,
+    minimap_svg_path: PathBuf,
+    minimap_metadata_path: PathBuf,
+    map_metadata_path: PathBuf,
+    local_marker_path: PathBuf,
 }
 
 impl AssetServiceImpl {
     fn new_internal(
         tracks_dir: PathBuf,
         serving_enabled: bool,
+        #[cfg(feature = "official")] admin_token_validator: Option<Arc<TokenValidator>>,
+        use_tracks_hash_sidecar_dir: bool,
         #[cfg(feature = "local")] local_sync: Option<Arc<LocalMapAssetsSync>>,
     ) -> Self {
-        let sidecars = tracks_dir.join(".hashes");
-        let hash_cache = HashCache::new(Some(sidecars));
+        let hash_cache = if use_tracks_hash_sidecar_dir {
+            let sidecars = tracks_dir.join(".hashes");
+            HashCache::new(Some(sidecars))
+        } else {
+            // Nested bundle layout can reuse internal map ids, so flat sidecar dir would collide.
+            HashCache::new(None)
+        };
         Self {
             serving_enabled,
             tracks_dir,
             hash_cache,
+            #[cfg(feature = "official")]
+            admin_token_validator,
             #[cfg(feature = "local")]
             local_sync,
         }
     }
 
     #[cfg(feature = "official")]
-    pub fn for_official(local_tracks_dir: Option<PathBuf>) -> Self {
-        match local_tracks_dir {
-            Some(path) => Self::new_internal(path, true),
-            None => Self::new_internal(PathBuf::new(), false),
-        }
+    pub fn for_official(tracks_dir: PathBuf, admin_token_validator: Arc<TokenValidator>) -> Self {
+        Self::new_internal(tracks_dir, true, Some(admin_token_validator), false)
     }
 
     #[cfg(feature = "local")]
     pub fn for_local(tracks_cache_dir: PathBuf, local_sync: Arc<LocalMapAssetsSync>) -> Self {
-        Self::new_internal(tracks_cache_dir, true, Some(local_sync))
+        Self::new_internal(tracks_cache_dir, true, true, Some(local_sync))
     }
 
-    fn sanitize_id(id: &str) -> Result<(), Status> {
+    fn sanitize_internal_map_id(id: &str) -> Result<(), Status> {
         if !id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
-            Err(Status::invalid_argument("Invalid ID"))
+            Err(Status::invalid_argument("invalid internal map id"))
         } else {
             Ok(())
         }
     }
 
-    fn validate_map_id(raw_map_id: &str) -> Result<String, Status> {
+    #[cfg(feature = "official")]
+    fn is_valid_storage_key(storage_key: &str) -> bool {
+        storage_key.chars().all(|c| c.is_ascii_alphanumeric())
+    }
+
+    fn validate_requested_map_id(raw_map_id: &str) -> Result<String, Status> {
         let map_id = raw_map_id.trim();
         if map_id.is_empty() {
             return Err(Status::invalid_argument("map_id is required"));
         }
-        Self::sanitize_id(map_id)?;
+        #[cfg(feature = "official")]
+        if !Self::is_valid_storage_key(map_id) {
+            return Err(Status::invalid_argument(
+                "map_id(storage_key) must be alphanumeric",
+            ));
+        }
+        #[cfg(feature = "local")]
+        Self::sanitize_internal_map_id(map_id)?;
         Ok(map_id.to_string())
     }
 
-    fn resolve_main_glb_path(root: &Path, map_id: &str) -> PathBuf {
-        root.join(format!("{map_id}.glb"))
+    fn resolve_main_glb_path(root: &Path, internal_map_id: &str) -> PathBuf {
+        root.join(format!("{internal_map_id}.glb"))
     }
 
-    fn resolve_animation_glb_path(root: &Path, map_id: &str) -> PathBuf {
-        root.join(format!("{map_id}.animation.glb"))
+    fn resolve_animation_glb_path(root: &Path, internal_map_id: &str) -> PathBuf {
+        root.join(format!("{internal_map_id}.animation.glb"))
     }
 
-    fn resolve_minimap_svg_path(root: &Path, map_id: &str) -> PathBuf {
-        root.join(format!("{map_id}.minimap.svg"))
+    fn resolve_minimap_svg_path(root: &Path, internal_map_id: &str) -> PathBuf {
+        root.join(format!("{internal_map_id}.minimap.svg"))
     }
 
-    fn resolve_minimap_metadata_path(root: &Path, map_id: &str) -> PathBuf {
-        root.join(format!("{map_id}.minimap.json"))
+    fn resolve_minimap_metadata_path(root: &Path, internal_map_id: &str) -> PathBuf {
+        root.join(format!("{internal_map_id}.minimap.json"))
     }
 
-    fn resolve_map_metadata_path(root: &Path, map_id: &str) -> PathBuf {
-        root.join(format!("{map_id}.json"))
+    fn resolve_map_metadata_path(root: &Path, internal_map_id: &str) -> PathBuf {
+        root.join(format!("{internal_map_id}.json"))
     }
 
     fn resolve_path_for_glb_kind(
         root: &Path,
-        map_id: &str,
+        internal_map_id: &str,
         kind: MapGlbKind,
     ) -> Result<PathBuf, Status> {
         match kind {
-            MapGlbKind::Main => Ok(Self::resolve_main_glb_path(root, map_id)),
-            MapGlbKind::Animation => Ok(Self::resolve_animation_glb_path(root, map_id)),
+            MapGlbKind::Main => Ok(Self::resolve_main_glb_path(root, internal_map_id)),
+            MapGlbKind::Animation => Ok(Self::resolve_animation_glb_path(root, internal_map_id)),
             MapGlbKind::Unspecified => Err(Status::invalid_argument("glb kind is required")),
         }
     }
 
-    fn map_id_from_glb_entry(path: &Path) -> Option<String> {
-        let file_name = path.file_name()?.to_str()?;
+    fn internal_map_id_from_main_glb_name(file_name: &str) -> Option<String> {
         if !file_name.ends_with(".glb") || file_name.ends_with(".animation.glb") {
             return None;
         }
@@ -239,11 +275,12 @@ impl AssetServiceImpl {
         Some(map_id.to_string())
     }
 
-    fn has_required_bundle_assets(root: &Path, map_id: &str) -> bool {
-        let main = Self::resolve_main_glb_path(root, map_id);
-        let minimap_svg = Self::resolve_minimap_svg_path(root, map_id);
-        let minimap_metadata = Self::resolve_minimap_metadata_path(root, map_id);
-        let map_metadata = Self::resolve_map_metadata_path(root, map_id);
+    #[cfg(feature = "local")]
+    fn has_required_bundle_assets(root: &Path, internal_map_id: &str) -> bool {
+        let main = Self::resolve_main_glb_path(root, internal_map_id);
+        let minimap_svg = Self::resolve_minimap_svg_path(root, internal_map_id);
+        let minimap_metadata = Self::resolve_minimap_metadata_path(root, internal_map_id);
+        let map_metadata = Self::resolve_map_metadata_path(root, internal_map_id);
         main.is_file()
             && minimap_svg.is_file()
             && minimap_metadata.is_file()
@@ -275,17 +312,146 @@ impl AssetServiceImpl {
 
     fn resolve_path_for_kind(
         root: &Path,
-        map_id: &str,
+        internal_map_id: &str,
         kind: MapAssetKind,
     ) -> Result<PathBuf, Status> {
         match kind {
-            MapAssetKind::MainGlb => Ok(Self::resolve_main_glb_path(root, map_id)),
-            MapAssetKind::AnimationGlb => Ok(Self::resolve_animation_glb_path(root, map_id)),
-            MapAssetKind::MinimapSvg => Ok(Self::resolve_minimap_svg_path(root, map_id)),
+            MapAssetKind::MainGlb => Ok(Self::resolve_main_glb_path(root, internal_map_id)),
+            MapAssetKind::AnimationGlb => {
+                Ok(Self::resolve_animation_glb_path(root, internal_map_id))
+            }
+            MapAssetKind::MinimapSvg => Ok(Self::resolve_minimap_svg_path(root, internal_map_id)),
             MapAssetKind::Unspecified => {
                 Err(Status::invalid_argument("map asset kind is required"))
             }
         }
+    }
+
+    #[cfg(feature = "official")]
+    fn bundle_paths(
+        storage_key: &str,
+        internal_map_id: &str,
+        bundle_dir: PathBuf,
+    ) -> MapBundlePaths {
+        MapBundlePaths {
+            storage_key: storage_key.to_string(),
+            internal_map_id: internal_map_id.to_string(),
+            main_glb_path: Self::resolve_main_glb_path(&bundle_dir, internal_map_id),
+            animation_glb_path: Self::resolve_animation_glb_path(&bundle_dir, internal_map_id),
+            minimap_svg_path: Self::resolve_minimap_svg_path(&bundle_dir, internal_map_id),
+            minimap_metadata_path: Self::resolve_minimap_metadata_path(
+                &bundle_dir,
+                internal_map_id,
+            ),
+            map_metadata_path: Self::resolve_map_metadata_path(&bundle_dir, internal_map_id),
+            local_marker_path: bundle_dir.join(LOCAL_MARKER_FILE),
+            bundle_dir,
+        }
+    }
+
+    #[cfg(feature = "official")]
+    fn bundle_is_complete(bundle: &MapBundlePaths) -> bool {
+        bundle.main_glb_path.is_file()
+            && bundle.minimap_svg_path.is_file()
+            && bundle.minimap_metadata_path.is_file()
+            && bundle.map_metadata_path.is_file()
+    }
+
+    #[cfg(feature = "official")]
+    async fn resolve_official_bundle_paths(
+        &self,
+        storage_key: &str,
+    ) -> Result<MapBundlePaths, Status> {
+        let bundle_dir = self.tracks_dir.join(storage_key);
+        let bundle_meta = fs::metadata(&bundle_dir)
+            .await
+            .map_err(|e| match e.kind() {
+                ErrorKind::NotFound => Status::not_found("map asset bundle not found"),
+                _ => {
+                    tracing::error!(
+                        error = ?e,
+                        storage_key = %storage_key,
+                        path = %bundle_dir.display(),
+                        "failed to read map bundle directory metadata"
+                    );
+                    Status::internal("failed to inspect map asset bundle")
+                }
+            })?;
+        if !bundle_meta.is_dir() {
+            return Err(Status::not_found("map asset bundle not found"));
+        }
+
+        let mut entries = fs::read_dir(&bundle_dir).await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                storage_key = %storage_key,
+                path = %bundle_dir.display(),
+                "failed to list map bundle directory"
+            );
+            Status::internal("failed to inspect map asset bundle")
+        })?;
+
+        let mut internal_map_id: Option<String> = None;
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                storage_key = %storage_key,
+                path = %bundle_dir.display(),
+                "failed to read map bundle directory entry"
+            );
+            Status::internal("failed to inspect map asset bundle")
+        })? {
+            let file_type = entry.file_type().await.map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    storage_key = %storage_key,
+                    path = %bundle_dir.display(),
+                    "failed to inspect map bundle entry file type"
+                );
+                Status::internal("failed to inspect map asset bundle")
+            })?;
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let file_name = entry.file_name();
+            let file_name = match file_name.to_str() {
+                Some(value) => value,
+                None => continue,
+            };
+            let Some(candidate) = Self::internal_map_id_from_main_glb_name(file_name) else {
+                continue;
+            };
+
+            if Self::sanitize_internal_map_id(&candidate).is_err() {
+                tracing::warn!(storage_key = %storage_key, internal_map_id = %candidate, "skipping invalid internal map id candidate");
+                continue;
+            }
+
+            if let Some(existing) = &internal_map_id {
+                tracing::warn!(
+                    storage_key = %storage_key,
+                    existing_internal_map_id = %existing,
+                    conflicting_internal_map_id = %candidate,
+                    "map bundle has multiple main glb files"
+                );
+                return Err(Status::failed_precondition(
+                    "map bundle contains multiple main glb files",
+                ));
+            }
+            internal_map_id = Some(candidate);
+        }
+
+        let internal_map_id = internal_map_id.ok_or_else(|| {
+            tracing::warn!(storage_key = %storage_key, path = %bundle_dir.display(), "map bundle has no main glb file");
+            Status::failed_precondition("map bundle does not contain main glb")
+        })?;
+        let bundle = Self::bundle_paths(storage_key, &internal_map_id, bundle_dir);
+        if !Self::bundle_is_complete(&bundle) {
+            tracing::warn!(storage_key = %storage_key, internal_map_id = %bundle.internal_map_id, path = %bundle.bundle_dir.display(), "map bundle is incomplete");
+            return Err(Status::failed_precondition("map bundle is incomplete"));
+        }
+        Ok(bundle)
     }
 
     async fn build_asset_meta(
@@ -365,16 +531,20 @@ impl AssetServiceImpl {
         Ok(parsed.into())
     }
 
-    async fn read_map_metadata(&self, map_id: &str, path: &Path) -> Result<MapMetadata, Status> {
+    async fn read_map_metadata(
+        &self,
+        public_map_id: &str,
+        path: &Path,
+    ) -> Result<MapMetadata, Status> {
         let raw = fs::read_to_string(path).await.map_err(|e| match e.kind() {
             ErrorKind::NotFound => {
-                tracing::warn!(%map_id, file = %path.display(), "map metadata file missing");
+                tracing::warn!(map_id = %public_map_id, file = %path.display(), "map metadata file missing");
                 Status::not_found("map metadata not found")
             }
             _ => {
                 tracing::error!(
                     error = ?e,
-                    %map_id,
+                    map_id = %public_map_id,
                     file = %path.display(),
                     "failed to read map metadata file"
                 );
@@ -385,31 +555,23 @@ impl AssetServiceImpl {
         let parsed: MapMetadataJson = serde_json::from_str(&raw).map_err(|e| {
             tracing::warn!(
                 error = ?e,
-                %map_id,
+                map_id = %public_map_id,
                 file = %path.display(),
                 "invalid map metadata json"
             );
             Status::failed_precondition("invalid map metadata json")
         })?;
 
-        if parsed.id.trim() != map_id {
-            tracing::warn!(
-                expected_map_id = %map_id,
-                actual_map_id = %parsed.id,
-                file = %path.display(),
-                "map metadata map_id mismatch"
-            );
-            return Err(Status::failed_precondition("map metadata map_id mismatch"));
-        }
-
         if parsed.name.trim().is_empty() {
-            tracing::warn!(%map_id, file = %path.display(), "map metadata map_name is empty");
+            tracing::warn!(map_id = %public_map_id, file = %path.display(), "map metadata map_name is empty");
             return Err(Status::failed_precondition(
                 "map metadata map_name must be non-empty",
             ));
         }
 
-        Ok(parsed.into())
+        let mut map_metadata: MapMetadata = parsed.into();
+        map_metadata.map_id = public_map_id.to_string();
+        Ok(map_metadata)
     }
 
     #[cfg(feature = "local")]
@@ -424,6 +586,167 @@ impl AssetServiceImpl {
 
     #[cfg(not(feature = "local"))]
     async fn ensure_local_map_cached_if_needed(&self, _map_id: &str) -> Result<(), Status> {
+        Ok(())
+    }
+
+    #[cfg(feature = "local")]
+    async fn list_maps_from_dir(&self, root: &Path) -> Result<Vec<MapCatalogEntry>, Status> {
+        let mut maps = Vec::new();
+        let mut entries = fs::read_dir(root).await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                path = %root.display(),
+                "failed to list tracks directory"
+            );
+            Status::internal("failed to list maps")
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                path = %root.display(),
+                "failed to read tracks directory entry"
+            );
+            Status::internal("failed to list maps")
+        })? {
+            let file_name = entry.file_name();
+            let file_name = match file_name.to_str() {
+                Some(value) => value,
+                None => continue,
+            };
+            let Some(map_id) = Self::internal_map_id_from_main_glb_name(file_name) else {
+                continue;
+            };
+
+            if Self::sanitize_internal_map_id(&map_id).is_err() {
+                tracing::warn!(%map_id, "skipping invalid map id");
+                continue;
+            }
+
+            if !Self::has_required_bundle_assets(root, &map_id) {
+                tracing::warn!(%map_id, "skipping incomplete map asset bundle");
+                continue;
+            }
+
+            maps.push(MapCatalogEntry {
+                map_id: map_id.clone(),
+                display_name: map_id,
+            });
+        }
+
+        maps.sort_by(|a, b| a.map_id.cmp(&b.map_id));
+        Ok(maps)
+    }
+
+    #[cfg(feature = "official")]
+    async fn list_official_maps(
+        &self,
+        only_local_marked: bool,
+    ) -> Result<Vec<MapCatalogEntry>, Status> {
+        let mut maps = Vec::new();
+        let mut entries = fs::read_dir(&self.tracks_dir).await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                path = %self.tracks_dir.display(),
+                "failed to list tracks directory"
+            );
+            Status::internal("failed to list maps")
+        })?;
+
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                path = %self.tracks_dir.display(),
+                "failed to read tracks directory entry"
+            );
+            Status::internal("failed to list maps")
+        })? {
+            let file_type = entry.file_type().await.map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    path = %self.tracks_dir.display(),
+                    "failed to inspect tracks directory entry type"
+                );
+                Status::internal("failed to list maps")
+            })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let storage_key = entry.file_name();
+            let storage_key = match storage_key.to_str() {
+                Some(value) => value.trim(),
+                None => continue,
+            };
+
+            if !Self::is_valid_storage_key(storage_key) {
+                tracing::warn!(storage_key = %storage_key, "skipping invalid storage key");
+                continue;
+            }
+
+            let bundle = match self.resolve_official_bundle_paths(storage_key).await {
+                Ok(bundle) => bundle,
+                Err(status)
+                    if matches!(
+                        status.code(),
+                        tonic::Code::NotFound | tonic::Code::FailedPrecondition
+                    ) =>
+                {
+                    tracing::warn!(
+                        storage_key = %storage_key,
+                        error = %status.message(),
+                        "skipping incomplete or invalid map bundle"
+                    );
+                    continue;
+                }
+                Err(status) => return Err(status),
+            };
+
+            if only_local_marked && !bundle.local_marker_path.is_file() {
+                continue;
+            }
+
+            let map_metadata = match self
+                .read_map_metadata(&bundle.storage_key, &bundle.map_metadata_path)
+                .await
+            {
+                Ok(metadata) => metadata,
+                Err(status)
+                    if matches!(
+                        status.code(),
+                        tonic::Code::NotFound | tonic::Code::FailedPrecondition
+                    ) =>
+                {
+                    tracing::warn!(
+                        storage_key = %bundle.storage_key,
+                        error = %status.message(),
+                        "skipping map bundle with invalid metadata"
+                    );
+                    continue;
+                }
+                Err(status) => return Err(status),
+            };
+
+            maps.push(MapCatalogEntry {
+                map_id: bundle.storage_key.clone(),
+                display_name: map_metadata.map_name,
+            });
+        }
+
+        maps.sort_by(|a, b| a.map_id.cmp(&b.map_id));
+        Ok(maps)
+    }
+
+    #[cfg(feature = "official")]
+    async fn require_admin(&self, metadata: &tonic::metadata::MetadataMap) -> Result<(), Status> {
+        let validator = self
+            .admin_token_validator
+            .as_ref()
+            .ok_or_else(|| Status::internal("asset admin validator is not configured"))?;
+        let is_admin = validator.is_admin(metadata).await?;
+        if !is_admin {
+            return Err(Status::permission_denied("admin role required"));
+        }
         Ok(())
     }
 }
@@ -444,47 +767,31 @@ impl AssetService for AssetServiceImpl {
             return Ok(Response::new(ListMapsResponse { maps: Vec::new() }));
         }
 
-        let mut maps = Vec::new();
-        let mut entries = fs::read_dir(&self.tracks_dir).await.map_err(|e| {
-            tracing::error!(
-                error = ?e,
-                path = %self.tracks_dir.display(),
-                "failed to list tracks directory"
-            );
-            Status::internal("failed to list maps")
-        })?;
-
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            tracing::error!(
-                error = ?e,
-                path = %self.tracks_dir.display(),
-                "failed to read tracks directory entry"
-            );
-            Status::internal("failed to list maps")
-        })? {
-            let path = entry.path();
-            let Some(map_id) = Self::map_id_from_glb_entry(&path) else {
-                continue;
-            };
-
-            if Self::sanitize_id(&map_id).is_err() {
-                tracing::warn!(%map_id, "skipping invalid map id");
-                continue;
-            }
-
-            if !Self::has_required_bundle_assets(&self.tracks_dir, &map_id) {
-                tracing::warn!(%map_id, "skipping incomplete map asset bundle");
-                continue;
-            }
-
-            maps.push(MapCatalogEntry {
-                map_id: map_id.clone(),
-                display_name: map_id,
-            });
-        }
-
-        maps.sort_by(|a, b| a.map_id.cmp(&b.map_id));
+        #[cfg(feature = "official")]
+        let maps = self.list_official_maps(true).await?;
+        #[cfg(feature = "local")]
+        let maps = self.list_maps_from_dir(&self.tracks_dir).await?;
         Ok(Response::new(ListMapsResponse { maps }))
+    }
+
+    async fn list_all_maps(
+        &self,
+        request: Request<ListAllMapsRequest>,
+    ) -> Result<Response<ListAllMapsResponse>, Status> {
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "ListAllMaps is supported only in official backend mode",
+            ));
+        }
+        #[cfg(feature = "official")]
+        {
+            self.require_admin(request.metadata()).await?;
+            let _ = request.into_inner();
+            let maps = self.list_official_maps(false).await?;
+            Ok(Response::new(ListAllMapsResponse { maps }))
+        }
     }
 
     async fn get_map_asset_bundle_meta(
@@ -492,17 +799,38 @@ impl AssetService for AssetServiceImpl {
         request: Request<GetMapAssetBundleMetaRequest>,
     ) -> Result<Response<GetMapAssetBundleMetaResponse>, Status> {
         let GetMapAssetBundleMetaRequest { map_id } = request.into_inner();
-        let map_id = Self::validate_map_id(&map_id)?;
+        let map_id = Self::validate_requested_map_id(&map_id)?;
         self.ensure_local_map_cached_if_needed(&map_id).await?;
         if !self.serving_enabled {
             return Err(Status::not_found("map asset bundle not found"));
         }
 
+        #[cfg(feature = "official")]
+        let bundle_paths = self.resolve_official_bundle_paths(&map_id).await?;
+        #[cfg(feature = "local")]
         let main_glb_path = Self::resolve_main_glb_path(&self.tracks_dir, &map_id);
+        #[cfg(feature = "official")]
+        let main_glb_path = bundle_paths.main_glb_path.clone();
+
+        #[cfg(feature = "local")]
         let animation_glb_path = Self::resolve_animation_glb_path(&self.tracks_dir, &map_id);
+        #[cfg(feature = "official")]
+        let animation_glb_path = bundle_paths.animation_glb_path.clone();
+
+        #[cfg(feature = "local")]
         let minimap_svg_path = Self::resolve_minimap_svg_path(&self.tracks_dir, &map_id);
+        #[cfg(feature = "official")]
+        let minimap_svg_path = bundle_paths.minimap_svg_path.clone();
+
+        #[cfg(feature = "local")]
         let minimap_metadata_path = Self::resolve_minimap_metadata_path(&self.tracks_dir, &map_id);
+        #[cfg(feature = "official")]
+        let minimap_metadata_path = bundle_paths.minimap_metadata_path.clone();
+
+        #[cfg(feature = "local")]
         let map_metadata_path = Self::resolve_map_metadata_path(&self.tracks_dir, &map_id);
+        #[cfg(feature = "official")]
+        let map_metadata_path = bundle_paths.map_metadata_path.clone();
 
         let main_glb = self
             .build_asset_meta(&map_id, MapAssetKind::MainGlb, &main_glb_path)
@@ -513,6 +841,9 @@ impl AssetService for AssetServiceImpl {
         let minimap_metadata = self
             .read_minimap_metadata(&map_id, &minimap_metadata_path)
             .await?;
+        #[cfg(feature = "official")]
+        let map_metadata = self.read_map_metadata(&map_id, &map_metadata_path).await?;
+        #[cfg(feature = "local")]
         let map_metadata = self.read_map_metadata(&map_id, &map_metadata_path).await?;
 
         let animation_glb = match fs::metadata(&animation_glb_path).await {
@@ -561,13 +892,22 @@ impl AssetService for AssetServiceImpl {
             if_match_hash,
         } = request.into_inner();
 
-        let map_id = Self::validate_map_id(&map_id)?;
+        let map_id = Self::validate_requested_map_id(&map_id)?;
         self.ensure_local_map_cached_if_needed(&map_id).await?;
         if !self.serving_enabled {
             return Err(Status::not_found("map asset not found"));
         }
         let kind = MapAssetKind::try_from(kind).unwrap_or(MapAssetKind::Unspecified);
+        #[cfg(feature = "official")]
+        let bundle_paths = self.resolve_official_bundle_paths(&map_id).await?;
+        #[cfg(feature = "local")]
         let path = Self::resolve_path_for_kind(&self.tracks_dir, &map_id, kind)?;
+        #[cfg(feature = "official")]
+        let path = Self::resolve_path_for_kind(
+            &bundle_paths.bundle_dir,
+            &bundle_paths.internal_map_id,
+            kind,
+        )?;
 
         tracing::debug!(%map_id, kind = ?kind, file = %path.display(), "asset requested");
 
@@ -677,14 +1017,27 @@ impl AssetService for AssetServiceImpl {
         }
 
         let GetMapAssetSyncMetaRequest { map_id } = request.into_inner();
-        let map_id = Self::validate_map_id(&map_id)?;
+        let map_id = Self::validate_requested_map_id(&map_id)?;
         if !self.serving_enabled {
             return Err(Status::not_found("map sync metadata not found"));
         }
 
+        #[cfg(feature = "official")]
+        let bundle_paths = self.resolve_official_bundle_paths(&map_id).await?;
+        #[cfg(feature = "local")]
         let minimap_svg_path = Self::resolve_minimap_svg_path(&self.tracks_dir, &map_id);
+        #[cfg(feature = "official")]
+        let minimap_svg_path = bundle_paths.minimap_svg_path.clone();
+
+        #[cfg(feature = "local")]
         let map_metadata_path = Self::resolve_map_metadata_path(&self.tracks_dir, &map_id);
+        #[cfg(feature = "official")]
+        let map_metadata_path = bundle_paths.map_metadata_path.clone();
+
+        #[cfg(feature = "local")]
         let minimap_metadata_path = Self::resolve_minimap_metadata_path(&self.tracks_dir, &map_id);
+        #[cfg(feature = "official")]
+        let minimap_metadata_path = bundle_paths.minimap_metadata_path.clone();
 
         let minimap_svg = fs::read(&minimap_svg_path)
             .await
@@ -733,12 +1086,21 @@ impl AssetService for AssetServiceImpl {
             offset,
             limit,
         } = request.into_inner();
-        let map_id = Self::validate_map_id(&map_id)?;
+        let map_id = Self::validate_requested_map_id(&map_id)?;
         if !self.serving_enabled {
             return Err(Status::not_found("map glb not found"));
         }
         let kind = MapGlbKind::try_from(kind).unwrap_or(MapGlbKind::Unspecified);
+        #[cfg(feature = "official")]
+        let bundle_paths = self.resolve_official_bundle_paths(&map_id).await?;
+        #[cfg(feature = "local")]
         let path = Self::resolve_path_for_glb_kind(&self.tracks_dir, &map_id, kind)?;
+        #[cfg(feature = "official")]
+        let path = Self::resolve_path_for_glb_kind(
+            &bundle_paths.bundle_dir,
+            &bundle_paths.internal_map_id,
+            kind,
+        )?;
 
         let meta = fs::metadata(&path).await.map_err(|e| match e.kind() {
             ErrorKind::NotFound => Status::not_found("map glb not found"),

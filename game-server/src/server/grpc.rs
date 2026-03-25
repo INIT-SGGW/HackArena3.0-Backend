@@ -213,7 +213,8 @@ pub async fn serve_grpc(
     );
 
     #[cfg(feature = "official")]
-    let asset_impl = AssetServiceImpl::for_official(cfg.local_tracks_dir.clone());
+    let asset_impl =
+        AssetServiceImpl::for_official(cfg.tracks_dir.clone(), token_validator.clone());
     #[cfg(feature = "local")]
     let local_map_sync = Arc::new(
         LocalMapAssetsSync::new(
