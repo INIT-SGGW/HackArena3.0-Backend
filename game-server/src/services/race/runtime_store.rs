@@ -297,6 +297,10 @@ impl RaceRuntimeStore {
         entry.back_to_track_cooldown_until_ms = entry
             .back_to_track_cooldown_until_ms
             .max(now_ms.saturating_add(COMMAND_COOLDOWN_MS));
+        // Brief idle window after teleport ensures car state is neutralized.
+        entry.force_idle_until_ms = entry
+            .force_idle_until_ms
+            .max(now_ms.saturating_add(TELEPORT_IDLE_WINDOW_MS));
     }
 
     pub fn mark_emergency_pitstop_requested(&self, car_id: u64, now_ms: u64) {
