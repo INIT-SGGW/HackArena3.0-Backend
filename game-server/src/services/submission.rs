@@ -48,6 +48,7 @@ use crate::config::Config;
 use crate::db::repos::submission::{NewSubmissionRecord, SubmissionRepo};
 use crate::runtime::engine_worker::{EngineClient, EngineCommandTarget, EngineWorkerError};
 use crate::services::error_map::map_worker_err;
+use crate::services::log_redaction::redact_log_line;
 use crate::services::race::{RaceRuntimeStore, RuntimeCarIdentity};
 
 const TEAM_EDITION: &str = "3";
@@ -2595,9 +2596,10 @@ where
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
+                let redacted = redact_log_line(&line);
                 let mut guard = writer.lock().await;
                 if let Err(err) = guard
-                    .write_all(format!("[{channel}] {line}\n").as_bytes())
+                    .write_all(format!("[{channel}] {redacted}\n").as_bytes())
                     .await
                 {
                     tracing::warn!(channel, error = %err, "failed writing bot log line");

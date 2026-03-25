@@ -8,6 +8,8 @@ pub mod connect;
 mod error_map;
 #[cfg(feature = "local")]
 pub mod local_sandbox_admin;
+#[cfg(feature = "official")]
+pub(crate) mod log_redaction;
 mod mappers;
 #[cfg(feature = "official")]
 pub mod public_menu;
