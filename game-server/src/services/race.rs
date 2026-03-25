@@ -1,5 +1,7 @@
 //! gRPC RaceService implementation and transport mapping.
 
+#[cfg(feature = "official")]
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -7,8 +9,9 @@ use dashmap::DashMap;
 use proto::race::v1::{
     BackToTrackRequest, BackToTrackResponse, EmergencyPitstopRequest, EmergencyPitstopResponse,
     FrontendSpectatorDebugInfo, FrontendSpectatorEvent, FrontendSpectatorSnapshot,
-    GetFrontendSpectatorRequest, QuickJoinDevRequest, QuickJoinDevResponse, RequestPitstopRequest,
-    RequestPitstopResponse, SetControlsDevRequest, SetControlsResponse, SetNextPitTireTypeRequest,
+    GetFrontendSpectatorRequest, GetOfficialTeamBotLogsRequest, GetOfficialTeamBotLogsResponse,
+    QuickJoinDevRequest, QuickJoinDevResponse, RequestPitstopRequest, RequestPitstopResponse,
+    SetControlsDevRequest, SetControlsResponse, SetNextPitTireTypeRequest,
     SetNextPitTireTypeResponse, SpectatorView, StreamClampReason, StreamSettings,
     ViewDowngradeReason, frontend_spectator_event::Payload as FrontendSpectatorPayload,
     get_frontend_spectator_request::Target as FrontendSpectatorTarget,
@@ -22,6 +25,11 @@ use proto::race::v1::{
 use rand::Rng;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
+#[cfg(feature = "official")]
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, BufReader},
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, server::NamedService};
 
@@ -33,6 +41,8 @@ use crate::runtime::engine_worker::{
     EngineActiveSandboxState, EngineActivityKind, EngineClient, EngineCommandTarget,
     EngineRuntimeState,
 };
+#[cfg(feature = "official")]
+use crate::services::submission::OfficialSandboxJoinRegistry;
 
 pub mod frame_hub;
 pub mod runtime_store;
@@ -49,6 +59,10 @@ const DEFAULT_STREAM_HZ: u32 = 20;
 const MIN_STREAM_HZ: u32 = 1;
 const MAX_STREAM_HZ: u32 = 120;
 const FRONTEND_STREAM_CHANNEL_CAPACITY: usize = 4;
+#[cfg(feature = "official")]
+const OFFICIAL_BOT_LOG_MAX_LINES: usize = 5_000;
+#[cfg(feature = "official")]
+const OFFICIAL_BOT_LOG_MAX_CHARS: usize = 200_000;
 
 /// gRPC RaceService implementation backed by a single engine world.
 #[derive(Clone)]
@@ -66,13 +80,15 @@ pub struct RaceServiceImpl {
     car_engine_ids: Arc<DashMap<u64, u64>>,
     car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
     token_validator: Arc<GameTokenValidator>,
+    #[cfg(feature = "official")]
+    official_sandbox_joins: OfficialSandboxJoinRegistry,
     #[cfg(feature = "local")]
     local_sandbox_store: LocalSandboxConfigStore,
 }
 
 impl RaceServiceImpl {
     /// Build a Race service that talks to the engine worker.
-    pub fn new(
+    pub(crate) fn new(
         engine: EngineClient,
         simulation_hz: u32,
         app_env: AppEnv,
@@ -81,6 +97,7 @@ impl RaceServiceImpl {
         jwt_issuers: Vec<String>,
         runtime_store: Arc<RaceRuntimeStore>,
         frame_hub: FrameHub,
+        #[cfg(feature = "official")] official_sandbox_joins: OfficialSandboxJoinRegistry,
         #[cfg(feature = "local")] local_sandbox_store: LocalSandboxConfigStore,
     ) -> Self {
         Self {
@@ -101,6 +118,8 @@ impl RaceServiceImpl {
                 jwt_audience,
                 jwt_issuers,
             )),
+            #[cfg(feature = "official")]
+            official_sandbox_joins,
             #[cfg(feature = "local")]
             local_sandbox_store,
         }
@@ -330,6 +349,53 @@ impl RaceService for RaceServiceImpl {
         }
     }
 
+    async fn get_official_team_bot_logs(
+        &self,
+        request: Request<GetOfficialTeamBotLogsRequest>,
+    ) -> Result<Response<GetOfficialTeamBotLogsResponse>, Status> {
+        #[cfg(not(feature = "official"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "GetOfficialTeamBotLogs is supported only in official backend mode",
+            ));
+        }
+        #[cfg(feature = "official")]
+        {
+            let auth = parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            let team_id = self
+                .token_validator
+                .team_id_from_token(&auth)
+                .await?
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| Status::unauthenticated("missing team_id claim"))?;
+
+            let join_state = self
+                .official_sandbox_joins
+                .get(team_id.as_str())
+                .map(|entry| entry.value().clone())
+                .ok_or_else(|| Status::not_found("no active official sandbox bot for team"))?;
+
+            let (lines, truncated) = read_tail_bot_logs(&join_state.log_file_path)
+                .await
+                .map_err(|err| {
+                    tracing::warn!(
+                        team_id = %team_id,
+                        log_file = %join_state.log_file_path.display(),
+                        error = %err,
+                        "failed to read official team bot logs"
+                    );
+                    Status::internal("failed to read official team bot logs")
+                })?;
+
+            Ok(Response::new(GetOfficialTeamBotLogsResponse {
+                lines,
+                truncated,
+            }))
+        }
+    }
+
     async fn stream_frontend_spectator(
         &self,
         request: Request<GetFrontendSpectatorRequest>,
@@ -388,6 +454,58 @@ impl RaceService for RaceServiceImpl {
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+}
+
+#[cfg(feature = "official")]
+async fn read_tail_bot_logs(path: &std::path::Path) -> Result<(Vec<String>, bool), std::io::Error> {
+    let file = File::open(path).await?;
+    let mut lines_reader = BufReader::new(file).lines();
+    let mut window: VecDeque<(String, usize)> = VecDeque::new();
+    let mut total_chars = 0usize;
+    let mut truncated = false;
+
+    while let Some(raw_line) = lines_reader.next_line().await? {
+        let (line, line_chars, line_was_truncated) =
+            truncate_line_tail(raw_line, OFFICIAL_BOT_LOG_MAX_CHARS);
+        if line_was_truncated {
+            truncated = true;
+        }
+        window.push_back((line, line_chars));
+        total_chars = total_chars.saturating_add(line_chars);
+
+        while window.len() > OFFICIAL_BOT_LOG_MAX_LINES || total_chars > OFFICIAL_BOT_LOG_MAX_CHARS
+        {
+            if let Some((_, removed_chars)) = window.pop_front() {
+                total_chars = total_chars.saturating_sub(removed_chars);
+                truncated = true;
+            } else {
+                break;
+            }
+        }
+    }
+
+    Ok((
+        window.into_iter().map(|(line, _line_chars)| line).collect(),
+        truncated,
+    ))
+}
+
+#[cfg(feature = "official")]
+fn truncate_line_tail(line: String, max_chars: usize) -> (String, usize, bool) {
+    let char_count = line.chars().count();
+    if char_count <= max_chars {
+        return (line, char_count, false);
+    }
+
+    let start_char_index = char_count - max_chars;
+    let start_byte_index = line
+        .char_indices()
+        .nth(start_char_index)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(line.len());
+
+    let tail = line[start_byte_index..].to_string();
+    (tail, max_chars, true)
 }
 
 impl RaceServiceImpl {

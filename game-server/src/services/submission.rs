@@ -22,10 +22,11 @@ use proto::submission::v1::slot_query_service_server::SlotQueryService;
 use proto::submission::v1::submission_service_server::SubmissionService;
 use proto::submission::v1::{
     BuildFinished, BuildLog, BuildStarted, GetSlotsRequest, GetSlotsResponse,
-    JoinOfficialSandboxRequest, JoinOfficialSandboxResponse, LeaveOfficialSandboxRequest,
-    LeaveOfficialSandboxResponse, OfficialSandboxCommandStatus, SlotDto, SlotSummaryDto,
-    StreamSlotsRequest, StreamSlotsResponse, SubmitBuildRequest, SubmitBuildStreamResponse,
-    WrapperKind, submit_build_stream_response,
+    GetSubmissionArchiveRequest, GetSubmissionArchiveResponse, JoinOfficialSandboxRequest,
+    JoinOfficialSandboxResponse, LeaveOfficialSandboxRequest, LeaveOfficialSandboxResponse,
+    ListRecentSubmissionsRequest, ListRecentSubmissionsResponse, OfficialSandboxCommandStatus,
+    RecentSubmissionDto, SlotDto, SlotSummaryDto, StreamSlotsRequest, StreamSlotsResponse,
+    SubmitBuildRequest, SubmitBuildStreamResponse, WrapperKind, submit_build_stream_response,
 };
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -62,6 +63,7 @@ const SUBMISSION_QUEUE_CAPACITY: usize = 64;
 const SLOT_UPDATE_CHANNEL_CAPACITY: usize = 128;
 const SLOT_STREAM_CHANNEL_CAPACITY: usize = 8;
 const BUILD_EVENT_CHANNEL_CAPACITY: usize = 128;
+const LIST_RECENT_SUBMISSIONS_LIMIT: i64 = 1000;
 const SUBMISSIONS_ROOT: &str = ".submissions";
 const BOT_LOGS_SUBDIR: &str = "bot-logs";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
@@ -1090,6 +1092,83 @@ impl SubmissionService for SubmissionServiceImpl {
         emit_build_started(&events_tx, &submission_id).await;
 
         Ok(Response::new(ReceiverStream::new(events_rx)))
+    }
+
+    async fn list_recent_submissions(
+        &self,
+        request: Request<ListRecentSubmissionsRequest>,
+    ) -> Result<Response<ListRecentSubmissionsResponse>, Status> {
+        let user_id = self.token_validator.subject(request.metadata()).await?;
+        let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
+
+        let records = self
+            .repo
+            .list_recent_submissions(&team_id, LIST_RECENT_SUBMISSIONS_LIMIT)
+            .await
+            .map_err(|err| Status::internal(format!("failed to list recent submissions: {err}")))?;
+
+        let mut submissions = Vec::with_capacity(records.len());
+        for record in records {
+            let archive_size_bytes = match fs::metadata(Path::new(&record.archive_path)).await {
+                Ok(metadata) => metadata.len(),
+                Err(err) => {
+                    tracing::warn!(
+                        team_id = %team_id,
+                        submission_id = %record.submission_id,
+                        archive_path = %record.archive_path,
+                        error = %err,
+                        "recent submission archive metadata unavailable"
+                    );
+                    0
+                }
+            };
+
+            submissions.push(RecentSubmissionDto {
+                submission_id: record.submission_id,
+                submitted_at: Some(prost_types::Timestamp {
+                    seconds: record.created_at_unix_seconds,
+                    nanos: 0,
+                }),
+                archive_size_bytes,
+                description: record.description,
+            });
+        }
+
+        Ok(Response::new(ListRecentSubmissionsResponse { submissions }))
+    }
+
+    async fn get_submission_archive(
+        &self,
+        request: Request<GetSubmissionArchiveRequest>,
+    ) -> Result<Response<GetSubmissionArchiveResponse>, Status> {
+        let user_id = self.token_validator.subject(request.metadata()).await?;
+        let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
+        let req = request.into_inner();
+        let submission_id = req.submission_id.trim();
+        if submission_id.is_empty() {
+            return Err(Status::invalid_argument("submission_id must be non-empty"));
+        }
+
+        let archive_path = self
+            .repo
+            .get_submission_archive_path(&team_id, submission_id)
+            .await
+            .map_err(|err| {
+                Status::internal(format!("failed to load submission archive path: {err}"))
+            })?
+            .ok_or_else(|| Status::not_found("submission not found for team"))?;
+
+        let user_archive_tar_gz =
+            fs::read(&archive_path)
+                .await
+                .map_err(|err| match err.kind() {
+                    ErrorKind::NotFound => Status::not_found("submission archive not found"),
+                    _ => Status::internal(format!("failed to read submission archive: {err}")),
+                })?;
+
+        Ok(Response::new(GetSubmissionArchiveResponse {
+            user_archive_tar_gz: user_archive_tar_gz.into(),
+        }))
     }
 }
 

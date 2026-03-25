@@ -274,6 +274,8 @@ pub async fn serve_grpc(
         cfg.jwt_issuers.clone(),
         race_runtime_store.clone(),
         frame_hub.clone(),
+        #[cfg(feature = "official")]
+        official_sandbox_joins.clone(),
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
     );

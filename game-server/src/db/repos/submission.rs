@@ -42,6 +42,15 @@ pub struct FilledTeamSlotRecord {
     pub description: Option<String>,
 }
 
+/// Recent submission view for frontend listing.
+#[derive(Debug, Clone)]
+pub struct RecentSubmissionRecord {
+    pub submission_id: String,
+    pub created_at_unix_seconds: i64,
+    pub description: Option<String>,
+    pub archive_path: String,
+}
+
 /// Succeeded submission assigned to requested team slot.
 #[derive(Debug, Clone)]
 pub struct SucceededTeamSlotSubmissionRecord {
@@ -261,6 +270,67 @@ impl SubmissionRepo {
                 },
             )
             .collect())
+    }
+
+    /// Returns newest submissions for team.
+    pub async fn list_recent_submissions(
+        &self,
+        team_id: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<RecentSubmissionRecord>> {
+        let rows = sqlx::query_as::<_, (String, i64, Option<String>, String)>(
+            r#"
+            SELECT
+                submission_id,
+                EXTRACT(EPOCH FROM created_at)::BIGINT AS created_at_unix_seconds,
+                description,
+                archive_path
+            FROM submissions
+            WHERE team_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(team_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(submission_id, created_at_unix_seconds, description, archive_path)| {
+                    RecentSubmissionRecord {
+                        submission_id,
+                        created_at_unix_seconds,
+                        description,
+                        archive_path,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    /// Returns archive path for submission in team scope.
+    pub async fn get_submission_archive_path(
+        &self,
+        team_id: &str,
+        submission_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let archive_path = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT archive_path
+            FROM submissions
+            WHERE team_id = $1
+              AND submission_id = $2
+            LIMIT 1
+            "#,
+        )
+        .bind(team_id)
+        .bind(submission_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(archive_path)
     }
 
     /// Returns succeeded submission currently assigned to team slot.
