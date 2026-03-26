@@ -23,6 +23,8 @@ use crate::runtime::engine_worker::{EngineActivityKind, EngineCommandTarget, Eng
 use super::race::FrameHub;
 use super::race::frame_hub::RuntimeFrame;
 use super::race::runtime_store::{RaceRuntimeStore, RuntimeCarIdentity};
+#[cfg(feature = "official")]
+use super::submission::HpsTeamResolver;
 
 const STREAM_CHANNEL_CAPACITY: usize = 1;
 const SNAPSHOT_TICK_MS: u64 = 2000;
@@ -31,6 +33,8 @@ const GAP_DISABLED_LAPS_BEHIND_THRESHOLD: u32 = 1;
 const TRAJECTORY_MIN_PROGRESS_DELTA_M: f64 = 0.1;
 const TRAJECTORY_PROGRESS_EPSILON_M: f64 = 1e-3;
 const TRAJECTORY_RESET_BACKTRACK_M: f64 = 5.0;
+#[cfg(feature = "official")]
+const TEAM_NAME_FETCH_FAILED: &str = "failed to fetch";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ParsedRaceTableTarget {
@@ -88,14 +92,22 @@ struct TrajectorySample {
 pub struct RaceTableQueryServiceImpl {
     runtime_store: Arc<RaceRuntimeStore>,
     frame_hub: FrameHub,
+    #[cfg(feature = "official")]
+    team_resolver: Arc<HpsTeamResolver>,
     cache: Arc<Mutex<RaceTableCache>>,
 }
 
 impl RaceTableQueryServiceImpl {
-    pub fn new(runtime_store: Arc<RaceRuntimeStore>, frame_hub: FrameHub) -> Self {
+    pub fn new(
+        runtime_store: Arc<RaceRuntimeStore>,
+        frame_hub: FrameHub,
+        #[cfg(feature = "official")] team_resolver: Arc<HpsTeamResolver>,
+    ) -> Self {
         Self {
             runtime_store,
             frame_hub,
+            #[cfg(feature = "official")]
+            team_resolver,
             cache: Arc::new(Mutex::new(RaceTableCache::default())),
         }
     }
@@ -113,7 +125,8 @@ impl RaceTableQueryServiceImpl {
             .ok_or_else(|| Status::not_found("runtime state is unavailable"))?;
         ensure_target_active(runtime_state, &target)?;
 
-        match target {
+        #[cfg(feature = "official")]
+        let mut snapshot = match target {
             ParsedRaceTableTarget::Sandbox { sandbox_id } => {
                 self.build_sandbox_snapshot(sandbox_id).await
             }
@@ -121,7 +134,23 @@ impl RaceTableQueryServiceImpl {
                 self.build_official_race_snapshot(runtime_state, &frame)
                     .await
             }
-        }
+        }?;
+
+        #[cfg(feature = "official")]
+        self.apply_team_names(&mut snapshot).await;
+
+        #[cfg(not(feature = "official"))]
+        let snapshot = match target {
+            ParsedRaceTableTarget::Sandbox { sandbox_id } => {
+                self.build_sandbox_snapshot(sandbox_id).await
+            }
+            ParsedRaceTableTarget::OfficialRace => {
+                self.build_official_race_snapshot(runtime_state, &frame)
+                    .await
+            }
+        }?;
+
+        Ok(snapshot)
     }
 
     async fn build_sandbox_snapshot(
@@ -338,6 +367,51 @@ impl RaceTableQueryServiceImpl {
 
         rows
     }
+
+    #[cfg(feature = "official")]
+    async fn apply_team_names(&self, snapshot: &mut RaceTableSnapshot) {
+        let team_names = match self.team_resolver.resolve_team_names_map().await {
+            Ok(value) => Some(value),
+            Err(status) => {
+                tracing::warn!(
+                    code = ?status.code(),
+                    error = %status,
+                    "race table: failed to fetch team names from HPS"
+                );
+                None
+            }
+        };
+
+        match snapshot.snapshot.as_mut() {
+            Some(race_table_snapshot::Snapshot::OfficialRace(official)) => {
+                for entry in &mut official.entries {
+                    let Some(team) = entry.team.as_mut() else {
+                        continue;
+                    };
+                    team.team_name = resolve_team_name(&team.team_id, team_names.as_ref());
+                }
+            }
+            Some(race_table_snapshot::Snapshot::Sandbox(sandbox)) => {
+                for entry in &mut sandbox.entries {
+                    let Some(sandbox_race_table_entry::Identity::Team(team)) =
+                        entry.identity.as_mut()
+                    else {
+                        continue;
+                    };
+                    team.team_name = resolve_team_name(&team.team_id, team_names.as_ref());
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+#[cfg(feature = "official")]
+fn resolve_team_name(team_id: &str, team_names: Option<&HashMap<String, String>>) -> String {
+    team_names
+        .and_then(|value| value.get(team_id))
+        .cloned()
+        .unwrap_or_else(|| TEAM_NAME_FETCH_FAILED.to_string())
 }
 
 #[tonic::async_trait]
@@ -480,13 +554,28 @@ fn identity_for_sandbox_entry(
     public_car_id: u64,
     identity: Option<RuntimeCarIdentity>,
 ) -> sandbox_race_table_entry::Identity {
-    if let Some(team_id) = identity.as_ref().and_then(|entry| entry.team_id.clone()) {
-        return sandbox_race_table_entry::Identity::Team(TeamIdentity {
-            team_id: team_id.clone(),
-            team_name: team_id,
-        });
+    #[cfg(all(feature = "local", not(feature = "official")))]
+    {
+        return local_bot_identity(public_car_id, &identity);
     }
 
+    #[cfg(not(all(feature = "local", not(feature = "official"))))]
+    {
+        if let Some(team_id) = identity.as_ref().and_then(|entry| entry.team_id.clone()) {
+            return sandbox_race_table_entry::Identity::Team(TeamIdentity {
+                team_id: team_id.clone(),
+                team_name: team_id,
+            });
+        }
+
+        return local_bot_identity(public_car_id, &identity);
+    }
+}
+
+fn local_bot_identity(
+    public_car_id: u64,
+    identity: &Option<RuntimeCarIdentity>,
+) -> sandbox_race_table_entry::Identity {
     let user_id = identity
         .as_ref()
         .and_then(|entry| entry.subject.clone())
@@ -495,9 +584,10 @@ fn identity_for_sandbox_entry(
         .as_ref()
         .and_then(|entry| entry.local_bot_index)
         .unwrap_or_else(|| public_car_id.min(u32::MAX as u64) as u32);
+    let username = user_id.clone();
     sandbox_race_table_entry::Identity::LocalBot(LocalBotIdentity {
         user_id: user_id.clone(),
-        username: user_id,
+        username,
         bot_index,
     })
 }

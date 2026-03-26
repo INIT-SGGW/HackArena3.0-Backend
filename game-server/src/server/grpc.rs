@@ -301,8 +301,12 @@ pub async fn serve_grpc(
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
     );
-    let race_table_impl =
-        RaceTableQueryServiceImpl::new(race_runtime_store.clone(), frame_hub.clone());
+    let race_table_impl = RaceTableQueryServiceImpl::new(
+        race_runtime_store.clone(),
+        frame_hub.clone(),
+        #[cfg(feature = "official")]
+        team_resolver.clone(),
+    );
     #[cfg(feature = "official")]
     let achievement_stream_impl =
         AchievementStreamServiceImpl::new(engine.clone(), frame_hub, cfg.simulation_hz);

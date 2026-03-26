@@ -1,5 +1,6 @@
 //! gRPC SubmissionService implementation with async remote build worker.
 
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -19,7 +20,9 @@ use proto::auth::v1::game_token_issuer_service_client::GameTokenIssuerServiceCli
 use proto::auth::v1::{GameTokenIssueType, IssueGameTokenRequest};
 use proto::hackarena::platform::common::v1::Uuid as PlatformUuid;
 use proto::hackarena::platform::teams::v1::teams_service_client::TeamsServiceClient;
-use proto::hackarena::platform::teams::v1::{GetTeamByUserRequest, Team};
+use proto::hackarena::platform::teams::v1::{
+    GetEventTeamsRequest, GetTeamByUserRequest, Team, TeamEvent,
+};
 use proto::submission::v1::official_sandbox_command_service_server::OfficialSandboxCommandService;
 use proto::submission::v1::slot_query_service_server::SlotQueryService;
 use proto::submission::v1::submission_service_server::SubmissionService;
@@ -113,6 +116,12 @@ struct TeamCacheEntry {
 }
 
 #[derive(Debug, Clone)]
+struct TeamNamesCacheEntry {
+    team_names: HashMap<String, String>,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
 struct ServiceTokenCacheEntry {
     token: String,
     expires_at: Instant,
@@ -181,6 +190,7 @@ pub struct HpsTeamResolver {
     keycloak_client_id: String,
     keycloak_client_secret: String,
     team_cache: Arc<DashMap<String, TeamCacheEntry>>,
+    team_names_cache: Arc<RwLock<Option<TeamNamesCacheEntry>>>,
     auth_token: Arc<RwLock<Option<ServiceTokenCacheEntry>>>,
 }
 
@@ -213,6 +223,7 @@ impl HpsTeamResolver {
             keycloak_client_id,
             keycloak_client_secret,
             team_cache: Arc::new(DashMap::new()),
+            team_names_cache: Arc::new(RwLock::new(None)),
             auth_token: Arc::new(RwLock::new(None)),
         })
     }
@@ -273,6 +284,55 @@ impl HpsTeamResolver {
             .map_err(|_| Status::deadline_exceeded("HPS GetTeamByUser timed out"))?
             .map_err(|err| Status::new(err.code(), format!("HPS GetTeamByUser failed: {err}")))?;
         team_id_from_team(response.into_inner().team)
+    }
+
+    pub(crate) async fn resolve_team_names_map(&self) -> Result<HashMap<String, String>, Status> {
+        if let Some(cached) = self.team_names_cache.read().await.clone()
+            && cached.expires_at > Instant::now()
+        {
+            return Ok(cached.team_names);
+        }
+
+        let team_names = self.fetch_team_names_with_retry().await?;
+        *self.team_names_cache.write().await = Some(TeamNamesCacheEntry {
+            team_names: team_names.clone(),
+            expires_at: Instant::now() + TEAM_CACHE_TTL,
+        });
+        Ok(team_names)
+    }
+
+    async fn fetch_team_names_with_retry(&self) -> Result<HashMap<String, String>, Status> {
+        let token = self.current_or_fetch_token().await?;
+        match self.fetch_team_names_with_token(&token).await {
+            Ok(team_names) => Ok(team_names),
+            Err(status)
+                if matches!(
+                    status.code(),
+                    Code::Unauthenticated | Code::PermissionDenied
+                ) =>
+            {
+                let refreshed = self.refresh_token().await?;
+                self.fetch_team_names_with_token(&refreshed).await
+            }
+            Err(status) => Err(status),
+        }
+    }
+
+    async fn fetch_team_names_with_token(
+        &self,
+        token: &str,
+    ) -> Result<HashMap<String, String>, Status> {
+        let mut client = TeamsServiceClient::new(self.channel.clone());
+        let mut request = Request::new(GetEventTeamsRequest {
+            edition: TEAM_EDITION.to_string(),
+        });
+        attach_auth_cookie(&mut request, token)?;
+
+        let response = tokio::time::timeout(HPS_RPC_TIMEOUT, client.get_event_teams(request))
+            .await
+            .map_err(|_| Status::deadline_exceeded("HPS GetEventTeams timed out"))?
+            .map_err(|err| Status::new(err.code(), format!("HPS GetEventTeams failed: {err}")))?;
+        Ok(team_name_map_from_events(response.into_inner().teams))
     }
 
     async fn current_or_fetch_token(&self) -> Result<String, Status> {
@@ -3130,6 +3190,26 @@ fn team_id_from_team(team: Option<Team>) -> Result<String, Status> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| Status::failed_precondition("GetTeamByUser returned empty team id"))?;
     Ok(team_id.to_string())
+}
+
+fn team_name_map_from_events(teams: Vec<TeamEvent>) -> HashMap<String, String> {
+    let mut team_names = HashMap::new();
+    for team in teams {
+        let Some(team_id) = team
+            .id
+            .as_ref()
+            .map(|value| value.value.trim())
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let team_name = team.name.trim();
+        if team_name.is_empty() {
+            continue;
+        }
+        team_names.insert(team_id.to_string(), team_name.to_string());
+    }
+    team_names
 }
 
 fn ssh_error_hint(stderr: &str) -> Option<&'static str> {
