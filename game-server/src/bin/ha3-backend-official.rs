@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    game_server::init_tracing();
+    let _tracing_guard = game_server::init_tracing("ha3-backend-official")?;
 
     if let Some(err) = env_official_fallback {
         tracing::warn!(

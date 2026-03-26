@@ -18,9 +18,12 @@ use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+use time::{OffsetDateTime, format_description};
 use tokio::sync::broadcast;
 use tokio::task::{JoinHandle, LocalSet};
 use tracing::{error, info};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use runtime::engine_worker::EngineClient;
 
@@ -33,11 +36,29 @@ pub async fn run(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
     local.run_until(async move { run_app(cfg).await }).await
 }
 
-/// Initialize tracing with environment-configured filters.
-pub fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+/// Initialize tracing with environment-configured filters and file persistence.
+pub fn init_tracing(binary_name: &str) -> Result<WorkerGuard, Box<dyn Error>> {
+    let logs_dir = std::path::PathBuf::from(".logs");
+    std::fs::create_dir_all(&logs_dir)?;
+    let now = OffsetDateTime::now_utc();
+    let timestamp_format =
+        format_description::parse("[year]-[month]-[day]_[hour]-[minute]-[second]")?;
+    let timestamp = now.format(&timestamp_format)?;
+    let filename = format!("{binary_name}_{timestamp}_{:03}.log", now.millisecond());
+    let file_appender = tracing_appender::rolling::never(logs_dir, filename);
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer),
+        )
+        .try_init()?;
+
+    Ok(guard)
 }
 
 async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
