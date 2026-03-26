@@ -1165,6 +1165,27 @@ impl OfficialSandboxCommandServiceImpl {
             );
         }
         self.stop_log_capture_for_team(team_id).await;
+        match compress_bot_log_file_if_exists(&join_state.log_file_path).await {
+            Ok(Some(archive_path)) => {
+                tracing::info!(
+                    team_id = %team_id,
+                    sandbox_id = %join_state.sandbox_id,
+                    source_log = %join_state.log_file_path.display(),
+                    archived_log = %archive_path.display(),
+                    "compressed bot log file"
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(
+                    team_id = %team_id,
+                    sandbox_id = %join_state.sandbox_id,
+                    log_file = %join_state.log_file_path.display(),
+                    error = %err,
+                    "failed to compress bot log file"
+                );
+            }
+        }
 
         let target = EngineCommandTarget::Sandbox {
             sandbox_id: join_state.sandbox_id.clone(),
@@ -3189,11 +3210,7 @@ async fn collect_submission_log_files(
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        let is_log_file = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("log"));
-        if !is_log_file || !file_name.contains(submission_marker) {
+        if !is_submission_log_artifact(file_name) || !file_name.contains(submission_marker) {
             continue;
         }
 
@@ -3205,6 +3222,11 @@ async fn collect_submission_log_files(
     }
 
     Ok(files)
+}
+
+fn is_submission_log_artifact(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    lower.ends_with(".log") || lower.ends_with(".log.tar.gz")
 }
 
 fn package_submission_logs_tar_gz(log_files: &[SubmissionLogFile]) -> anyhow::Result<Vec<u8>> {
@@ -3391,6 +3413,86 @@ async fn remove_bot_container(container_name: &str) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+async fn compress_bot_log_file_if_exists(log_file_path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    if !log_file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".log"))
+    {
+        return Ok(None);
+    }
+
+    match fs::metadata(log_file_path).await {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Ok(None);
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("failed to stat bot log file {}", log_file_path.display())
+            });
+        }
+    }
+
+    let archive_path = compressed_bot_log_archive_path(log_file_path)?;
+    let source_path = log_file_path.to_path_buf();
+    let archive_path_for_task = archive_path.clone();
+
+    tokio::task::spawn_blocking(move || {
+        compress_bot_log_file_blocking(&source_path, &archive_path_for_task)
+    })
+    .await
+    .context("bot log compression task panicked")??;
+
+    Ok(Some(archive_path))
+}
+
+fn compressed_bot_log_archive_path(log_file_path: &Path) -> anyhow::Result<PathBuf> {
+    let file_name = log_file_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("bot log file path must end with valid UTF-8 file name"))?;
+    Ok(log_file_path.with_file_name(format!("{file_name}.tar.gz")))
+}
+
+fn compress_bot_log_file_blocking(source_path: &Path, archive_path: &Path) -> anyhow::Result<()> {
+    let source_file_name = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("bot log file path must end with valid UTF-8 file name"))?;
+
+    let result = (|| {
+        let output_file = std::fs::File::create(archive_path).with_context(|| {
+            format!(
+                "failed to create compressed bot log {}",
+                archive_path.display()
+            )
+        })?;
+        let encoder = GzEncoder::new(output_file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        builder
+            .append_path_with_name(source_path, Path::new(source_file_name))
+            .with_context(|| format!("failed to append bot log {}", source_path.display()))?;
+        let encoder = builder
+            .into_inner()
+            .context("failed to finalize bot log tar archive")?;
+        encoder
+            .finish()
+            .context("failed to finalize bot log gzip archive")?;
+        std::fs::remove_file(source_path).with_context(|| {
+            format!("failed to remove source bot log {}", source_path.display())
+        })?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(archive_path);
+    }
+    result
 }
 
 async fn stream_bot_logs_to_file<R>(
