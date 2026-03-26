@@ -39,6 +39,8 @@ use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::Deserialize;
 use tar::{Archive, Builder};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -985,10 +987,13 @@ impl OfficialSandboxCommandServiceImpl {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
+        let started_at_utc = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "unknown".to_string());
         log_file
             .write_all(
                 format!(
-                    "# team_id={team_id}\n# submission_id={submission_id}\n# sandbox_id={sandbox_id}\n# slot_index={slot_index}\n# container_id={container_id}\n# started_at_unix_ms={started_at_ms}\n"
+                    "# team_id={team_id}\n# submission_id={submission_id}\n# sandbox_id={sandbox_id}\n# slot_index={slot_index}\n# container_id={container_id}\n# started_at_unix_ms={started_at_ms}\n# started_at_utc={started_at_utc}\n"
                 )
                 .as_bytes(),
             )
