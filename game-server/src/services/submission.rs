@@ -81,12 +81,14 @@ const GITHUB_API_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRY_API_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTRY_MANIFEST_V2_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json";
 const REGISTRY_DIGEST_HEADER: &str = "docker-content-digest";
+const DEFAULT_CSHARP_DOTNET_RUNTIME_VERSION: &str = "8.0";
 
 #[derive(Debug, Clone)]
 pub(crate) struct SubmissionBuildJob {
     submission_id: String,
     team_id: String,
     slot_index: i16,
+    wrapper_kind: WrapperKind,
     wrapper_version: String,
     archive_path: PathBuf,
     events_tx: mpsc::Sender<Result<SubmitBuildStreamResponse, Status>>,
@@ -157,15 +159,35 @@ struct PythonRunConfig {
     source_dir: String,
 }
 
+#[derive(Debug, Clone)]
+struct CsharpRunConfig {
+    entrypoint: Vec<String>,
+    source_dir: String,
+    runtime_version: String,
+    csproj_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum BuildContextPreparation {
+    Python(PythonRunConfig),
+    Csharp(CsharpRunConfig),
+}
+
 #[derive(Debug, Deserialize)]
 struct WrapperManifestToml {
     run: Option<WrapperRunToml>,
+    runtime: Option<WrapperRuntimeToml>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WrapperRunToml {
     entrypoint: Option<Vec<String>>,
     source_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WrapperRuntimeToml {
+    version: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1256,9 +1278,9 @@ impl SubmissionService for SubmissionServiceImpl {
         let req = request.into_inner();
         let wrapper_kind = WrapperKind::try_from(req.wrapper_kind)
             .map_err(|_| Status::invalid_argument("invalid wrapper_kind"))?;
-        if wrapper_kind != WrapperKind::Python {
+        if !matches!(wrapper_kind, WrapperKind::Python | WrapperKind::Csharp) {
             return Err(Status::invalid_argument(
-                "only WRAPPER_KIND_PYTHON is supported in MVP",
+                "only WRAPPER_KIND_PYTHON and WRAPPER_KIND_CSHARP are supported in MVP",
             ));
         }
 
@@ -1327,6 +1349,7 @@ impl SubmissionService for SubmissionServiceImpl {
                 submission_id: submission_id.clone(),
                 team_id,
                 slot_index,
+                wrapper_kind,
                 wrapper_version: wrapper_version.to_string(),
                 archive_path,
                 events_tx: events_tx.clone(),
@@ -1889,27 +1912,54 @@ async fn run_remote_build_pipeline(
     let context_dir = temp_dir.path().join("build-context");
     let archive_path = job.archive_path.clone();
     let prepare_context_dir = context_dir.clone();
-    let python_run_config = tokio::task::spawn_blocking(move || {
-        prepare_build_context(&archive_path, &prepare_context_dir)
+    let wrapper_kind = job.wrapper_kind;
+    let build_context = tokio::task::spawn_blocking(move || {
+        prepare_build_context(&archive_path, &prepare_context_dir, wrapper_kind)
     })
     .await
     .context("build-context task join error")??;
-    emit_build_log_line(
-        events_tx,
-        format!(
-            "[context] resolved run config: source_dir={}, entrypoint={:?}",
-            python_run_config.source_dir, python_run_config.entrypoint
-        ),
-    )
-    .await;
-    prepare_wrapper_wheel(
-        cfg,
-        &job.wrapper_version,
-        &context_dir,
-        &python_run_config,
-        events_tx,
-    )
-    .await?;
+
+    match &build_context {
+        BuildContextPreparation::Python(run_config) => {
+            emit_build_log_line(
+                events_tx,
+                format!(
+                    "[context/python] resolved run config: source_dir={}, entrypoint={:?}",
+                    run_config.source_dir, run_config.entrypoint
+                ),
+            )
+            .await;
+            prepare_python_wrapper_wheel(
+                cfg,
+                &job.wrapper_version,
+                &context_dir,
+                run_config,
+                events_tx,
+            )
+            .await?;
+        }
+        BuildContextPreparation::Csharp(run_config) => {
+            emit_build_log_line(
+                events_tx,
+                format!(
+                    "[context/csharp] resolved run config: source_dir={}, runtime_version={}, entrypoint={:?}, projects={}",
+                    run_config.source_dir,
+                    run_config.runtime_version,
+                    run_config.entrypoint,
+                    run_config.csproj_paths.len()
+                ),
+            )
+            .await;
+            prepare_csharp_wrapper_package(
+                cfg,
+                &job.wrapper_version,
+                &context_dir,
+                run_config,
+                events_tx,
+            )
+            .await?;
+        }
+    }
 
     let local_context_tar = temp_dir.path().join("context.tar.gz");
     let package_context_dir = context_dir.clone();
@@ -2255,54 +2305,22 @@ async fn run_ssh_script(
     run_command_streaming(ssh_cmd, label, events_tx).await
 }
 
-async fn prepare_wrapper_wheel(
+async fn prepare_python_wrapper_wheel(
     cfg: &Config,
     wrapper_version: &str,
     context_dir: &Path,
     run_config: &PythonRunConfig,
     events_tx: &mpsc::Sender<Result<SubmitBuildStreamResponse, Status>>,
 ) -> anyhow::Result<()> {
-    emit_build_log_line(events_tx, "[wrapper-fetch] resolving release asset").await;
+    emit_build_log_line(events_tx, "[wrapper-fetch/python] resolving release asset").await;
     let (release_tag, asset_version) = normalize_wrapper_version(wrapper_version)?;
     let asset_name = format!("hackarena3-{asset_version}-py3-none-any.whl");
-    let release_url = format!(
-        "{}/repos/{}/{}/releases/tags/{}",
-        GITHUB_API_BASE_URL, cfg.wrapper_gh_owner, cfg.wrapper_gh_repo, release_tag
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(GITHUB_API_TIMEOUT)
-        .build()
-        .context("failed to build GitHub HTTP client")?;
-
-    let mut release_request = client
-        .get(&release_url)
-        .header(USER_AGENT, "ha3-game-server")
-        .header(ACCEPT, "application/vnd.github+json");
-    if let Some(token) = cfg.gh_token.as_deref()
-        && !token.trim().is_empty()
-    {
-        release_request = release_request.header(AUTHORIZATION, format!("Bearer {token}"));
-    }
-    let release_response = release_request
-        .send()
-        .await
-        .context("wrapper-fetch: failed to query GitHub release by tag")?;
-    if !release_response.status().is_success() {
-        bail!(
-            "{}",
-            github_release_error_message(release_response.status().as_u16(), &release_tag)
-        );
-    }
-
-    let release: GitHubReleaseResponse = release_response
-        .json()
-        .await
-        .context("wrapper-fetch: failed to decode GitHub release payload")?;
+    let release =
+        fetch_github_release_by_tag(cfg, &cfg.wrapper_python_gh_repo, &release_tag).await?;
     let asset = release
         .assets
         .into_iter()
-        .find(|entry| entry.name == asset_name)
+        .find(|entry| entry.name.eq_ignore_ascii_case(&asset_name))
         .ok_or_else(|| {
             anyhow!("wrapper-fetch: release `{release_tag}` does not contain asset `{asset_name}`")
         })?;
@@ -2310,39 +2328,14 @@ async fn prepare_wrapper_wheel(
     emit_build_log_line(
         events_tx,
         format!(
-            "[wrapper-fetch] downloading `{}` from {}/{}",
-            asset.name, cfg.wrapper_gh_owner, cfg.wrapper_gh_repo
+            "[wrapper-fetch/python] downloading `{}` from {}/{}",
+            asset.name, cfg.wrapper_gh_owner, cfg.wrapper_python_gh_repo
         ),
     )
     .await;
 
-    let asset_download_url = format!(
-        "{}/repos/{}/{}/releases/assets/{}",
-        GITHUB_API_BASE_URL, cfg.wrapper_gh_owner, cfg.wrapper_gh_repo, asset.id
-    );
-    let mut asset_request = client
-        .get(&asset_download_url)
-        .header(USER_AGENT, "ha3-game-server")
-        .header(ACCEPT, "application/octet-stream");
-    if let Some(token) = cfg.gh_token.as_deref()
-        && !token.trim().is_empty()
-    {
-        asset_request = asset_request.header(AUTHORIZATION, format!("Bearer {token}"));
-    }
-    let asset_response = asset_request
-        .send()
-        .await
-        .context("wrapper-fetch: failed to download release asset")?;
-    if !asset_response.status().is_success() {
-        bail!(
-            "{}",
-            github_asset_error_message(asset_response.status().as_u16(), &asset.name)
-        );
-    }
-    let wheel_bytes = asset_response
-        .bytes()
-        .await
-        .context("wrapper-fetch: failed to read wheel bytes")?;
+    let wheel_bytes =
+        download_github_release_asset(cfg, &cfg.wrapper_python_gh_repo, &asset).await?;
 
     let wheels_dir = context_dir.join("wheels");
     fs::create_dir_all(&wheels_dir)
@@ -2367,8 +2360,185 @@ async fn prepare_wrapper_wheel(
             )
         })?;
 
-    emit_build_log_line(events_tx, "[wrapper-fetch] wrapper wheel prepared").await;
+    emit_build_log_line(events_tx, "[wrapper-fetch/python] wrapper wheel prepared").await;
     Ok(())
+}
+
+async fn prepare_csharp_wrapper_package(
+    cfg: &Config,
+    wrapper_version: &str,
+    context_dir: &Path,
+    run_config: &CsharpRunConfig,
+    events_tx: &mpsc::Sender<Result<SubmitBuildStreamResponse, Status>>,
+) -> anyhow::Result<()> {
+    emit_build_log_line(events_tx, "[wrapper-fetch/csharp] resolving release asset").await;
+    let (release_tag, asset_version) = normalize_wrapper_version(wrapper_version)?;
+    let release =
+        fetch_github_release_by_tag(cfg, &cfg.wrapper_csharp_gh_repo, &release_tag).await?;
+    let asset = select_csharp_release_asset(release.assets, &asset_version, &release_tag)?;
+
+    emit_build_log_line(
+        events_tx,
+        format!(
+            "[wrapper-fetch/csharp] downloading `{}` from {}/{}",
+            asset.name, cfg.wrapper_gh_owner, cfg.wrapper_csharp_gh_repo
+        ),
+    )
+    .await;
+
+    let package_bytes =
+        download_github_release_asset(cfg, &cfg.wrapper_csharp_gh_repo, &asset).await?;
+
+    let wrappers_dir = context_dir.join("wrappers");
+    fs::create_dir_all(&wrappers_dir).await.with_context(|| {
+        format!(
+            "failed to create wrappers directory {}",
+            wrappers_dir.display()
+        )
+    })?;
+    if asset.name.contains('/') || asset.name.contains('\\') {
+        bail!("wrapper-fetch: asset name contains invalid path separators");
+    }
+    let package_path = wrappers_dir.join(&asset.name);
+    fs::write(&package_path, package_bytes)
+        .await
+        .with_context(|| format!("failed to write wrapper package {}", package_path.display()))?;
+
+    let dockerfile_path = context_dir.join("Dockerfile");
+    let dockerfile = build_csharp_dockerfile(&asset.name, run_config)?;
+    fs::write(&dockerfile_path, dockerfile)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to write Dockerfile at {}",
+                dockerfile_path.display()
+            )
+        })?;
+
+    emit_build_log_line(events_tx, "[wrapper-fetch/csharp] wrapper package prepared").await;
+    Ok(())
+}
+
+async fn fetch_github_release_by_tag(
+    cfg: &Config,
+    repo: &str,
+    release_tag: &str,
+) -> anyhow::Result<GitHubReleaseResponse> {
+    let release_url = format!(
+        "{}/repos/{}/{}/releases/tags/{}",
+        GITHUB_API_BASE_URL, cfg.wrapper_gh_owner, repo, release_tag
+    );
+    let client = reqwest::Client::builder()
+        .timeout(GITHUB_API_TIMEOUT)
+        .build()
+        .context("failed to build GitHub HTTP client")?;
+
+    let mut release_request = client
+        .get(&release_url)
+        .header(USER_AGENT, "ha3-game-server")
+        .header(ACCEPT, "application/vnd.github+json");
+    if let Some(token) = cfg.gh_token.as_deref()
+        && !token.trim().is_empty()
+    {
+        release_request = release_request.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let release_response = release_request
+        .send()
+        .await
+        .context("wrapper-fetch: failed to query GitHub release by tag")?;
+    if !release_response.status().is_success() {
+        bail!(
+            "{}",
+            github_release_error_message(release_response.status().as_u16(), release_tag)
+        );
+    }
+
+    release_response
+        .json()
+        .await
+        .context("wrapper-fetch: failed to decode GitHub release payload")
+}
+
+async fn download_github_release_asset(
+    cfg: &Config,
+    repo: &str,
+    asset: &GitHubReleaseAsset,
+) -> anyhow::Result<Vec<u8>> {
+    let asset_download_url = format!(
+        "{}/repos/{}/{}/releases/assets/{}",
+        GITHUB_API_BASE_URL, cfg.wrapper_gh_owner, repo, asset.id
+    );
+    let client = reqwest::Client::builder()
+        .timeout(GITHUB_API_TIMEOUT)
+        .build()
+        .context("failed to build GitHub HTTP client")?;
+    let mut asset_request = client
+        .get(&asset_download_url)
+        .header(USER_AGENT, "ha3-game-server")
+        .header(ACCEPT, "application/octet-stream");
+    if let Some(token) = cfg.gh_token.as_deref()
+        && !token.trim().is_empty()
+    {
+        asset_request = asset_request.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let asset_response = asset_request
+        .send()
+        .await
+        .context("wrapper-fetch: failed to download release asset")?;
+    if !asset_response.status().is_success() {
+        bail!(
+            "{}",
+            github_asset_error_message(asset_response.status().as_u16(), &asset.name)
+        );
+    }
+
+    let bytes = asset_response
+        .bytes()
+        .await
+        .context("wrapper-fetch: failed to read release asset bytes")?;
+    Ok(bytes.to_vec())
+}
+
+fn select_csharp_release_asset(
+    assets: Vec<GitHubReleaseAsset>,
+    asset_version: &str,
+    release_tag: &str,
+) -> anyhow::Result<GitHubReleaseAsset> {
+    let asset_version = asset_version.to_ascii_lowercase();
+    let expected_legacy_prefix = format!("hackarena3-{asset_version}");
+    let expected_dotted_name = format!("hackarena3.wrapper.csharp.{asset_version}.nupkg");
+    let mut matches: Vec<GitHubReleaseAsset> = assets
+        .into_iter()
+        .filter(|entry| {
+            let name = entry.name.to_ascii_lowercase();
+            name.ends_with(".nupkg")
+                && (name.starts_with(&expected_legacy_prefix) || name == expected_dotted_name)
+        })
+        .collect();
+
+    match matches.len() {
+        0 => bail!(
+            "wrapper-fetch: release `{}` does not contain a C# package matching `hackarena3-{}*.nupkg` or `HackArena3.Wrapper.CSharp.{}.nupkg`",
+            release_tag,
+            asset_version,
+            asset_version
+        ),
+        1 => Ok(matches.swap_remove(0)),
+        _ => {
+            let candidates = matches
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "wrapper-fetch: release `{}` has multiple matching C# packages: {}",
+                release_tag,
+                candidates
+            )
+        }
+    }
 }
 
 fn normalize_wrapper_version(raw: &str) -> anyhow::Result<(String, String)> {
@@ -2410,6 +2580,53 @@ ENTRYPOINT {cmd_json}
     ))
 }
 
+fn build_csharp_dockerfile(
+    package_file_name: &str,
+    run_config: &CsharpRunConfig,
+) -> anyhow::Result<String> {
+    if run_config.entrypoint.is_empty() {
+        bail!("manifest run.entrypoint must be non-empty");
+    }
+    let cmd_json = serde_json::to_string(&run_config.entrypoint)
+        .context("failed to serialize manifest run.entrypoint to Docker ENTRYPOINT")?;
+    let restore_chain = run_config
+        .csproj_paths
+        .iter()
+        .map(|project| {
+            let absolute_project_path = format!("/app/user/{}/{}", run_config.source_dir, project);
+            format!(
+                "dotnet restore {} --source /app/wrappers --source https://api.nuget.org/v3/index.json",
+                shell_escape_single(&absolute_project_path)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && \\\n    ");
+    let build_chain = run_config
+        .csproj_paths
+        .iter()
+        .map(|project| {
+            let absolute_project_path = format!("/app/user/{}/{}", run_config.source_dir, project);
+            format!(
+                "dotnet build {} -c Release --no-restore",
+                shell_escape_single(&absolute_project_path)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && \\\n    ");
+
+    Ok(format!(
+        r#"FROM mcr.microsoft.com/dotnet/sdk:{runtime_version}
+WORKDIR /app
+COPY wrappers/{package_file_name} /app/wrappers/{package_file_name}
+COPY user /app/user
+RUN {restore_chain}
+RUN {build_chain}
+ENTRYPOINT {cmd_json}
+"#,
+        runtime_version = run_config.runtime_version
+    ))
+}
+
 fn github_release_error_message(status: u16, release_tag: &str) -> String {
     match status {
         401 | 403 => "wrapper-fetch: GitHub token missing or insufficient permissions".to_string(),
@@ -2429,60 +2646,49 @@ fn github_asset_error_message(status: u16, asset_name: &str) -> String {
 fn prepare_build_context(
     archive_path: &Path,
     context_dir: &Path,
-) -> anyhow::Result<PythonRunConfig> {
+    wrapper_kind: WrapperKind,
+) -> anyhow::Result<BuildContextPreparation> {
     std::fs::create_dir_all(context_dir).context("failed to create build context directory")?;
     let user_dir = context_dir.join("user");
     std::fs::create_dir_all(&user_dir).context("failed to create user directory")?;
     let extracted_entries = extract_archive_secure(archive_path, &user_dir)?;
-    let requirements = user_dir.join("requirements.txt");
-    if !requirements.is_file() {
-        let sample = format_path_sample(&extracted_entries, 20);
-        let nested_requirements = user_dir.join("user").join("requirements.txt").is_file();
-        let extra_hint = if nested_requirements {
-            " Found nested `user/requirements.txt`; archive likely has extra top-level `user/` folder."
-        } else {
-            ""
-        };
-        bail!(
-            "archive validation failed: expected `requirements.txt` at archive root (mapped to build-context/user/requirements.txt). Extracted entries sample: {sample}.{extra_hint}"
-        );
-    }
 
-    let run_config = resolve_python_run_config(&user_dir)?;
-    Ok(run_config)
+    match wrapper_kind {
+        WrapperKind::Python => {
+            let requirements = user_dir.join("requirements.txt");
+            if !requirements.is_file() {
+                let sample = format_path_sample(&extracted_entries, 20);
+                let nested_requirements = user_dir.join("user").join("requirements.txt").is_file();
+                let extra_hint = if nested_requirements {
+                    " Found nested `user/requirements.txt`; archive likely has extra top-level `user/` folder."
+                } else {
+                    ""
+                };
+                bail!(
+                    "archive validation failed: expected `requirements.txt` at archive root (mapped to build-context/user/requirements.txt). Extracted entries sample: {sample}.{extra_hint}"
+                );
+            }
+            let run_config = resolve_python_run_config(&user_dir)?;
+            Ok(BuildContextPreparation::Python(run_config))
+        }
+        WrapperKind::Csharp => {
+            let run_config = resolve_csharp_run_config(&user_dir, &extracted_entries)?;
+            Ok(BuildContextPreparation::Csharp(run_config))
+        }
+        _ => bail!("unsupported wrapper_kind in build worker: {wrapper_kind:?}"),
+    }
 }
 
 fn resolve_python_run_config(user_dir: &Path) -> anyhow::Result<PythonRunConfig> {
-    let manifest_path = user_dir.join("manifest.toml");
     let mut source_dir = "src".to_string();
     let mut manifest_entrypoint: Option<Vec<String>> = None;
-    if manifest_path.is_file() {
-        let manifest_raw = std::fs::read_to_string(&manifest_path).with_context(|| {
-            format!(
-                "failed to read wrapper manifest {}",
-                manifest_path.display()
-            )
-        })?;
-        let manifest: WrapperManifestToml = toml::from_str(&manifest_raw).with_context(|| {
-            format!(
-                "failed to parse wrapper manifest {}",
-                manifest_path.display()
-            )
-        })?;
+    if let Some(manifest) = read_wrapper_manifest(user_dir)? {
         if let Some(run) = manifest.run {
             if let Some(source_dir_raw) = run.source_dir {
                 source_dir = normalize_manifest_source_dir(&source_dir_raw)?;
             }
             if let Some(entrypoint) = run.entrypoint {
-                let trimmed_entrypoint: Vec<String> = entrypoint
-                    .into_iter()
-                    .map(|arg| arg.trim().to_string())
-                    .filter(|arg| !arg.is_empty())
-                    .collect();
-                if trimmed_entrypoint.is_empty() {
-                    bail!("manifest run.entrypoint must not be empty");
-                }
-                manifest_entrypoint = Some(trimmed_entrypoint);
+                manifest_entrypoint = Some(normalize_manifest_entrypoint(entrypoint)?);
             }
         }
     }
@@ -2523,10 +2729,122 @@ fn resolve_python_run_config(user_dir: &Path) -> anyhow::Result<PythonRunConfig>
     }
 
     bail!(
-        "cannot resolve bot entrypoint: provide manifest.toml with [run].entrypoint or include {}/bot/__main__.py or {}/main.py",
+        "cannot resolve bot entrypoint: set optional manifest [run].entrypoint or include {}/bot/__main__.py or {}/main.py",
         source_dir,
         source_dir
     )
+}
+
+fn resolve_csharp_run_config(
+    user_dir: &Path,
+    extracted_entries: &[String],
+) -> anyhow::Result<CsharpRunConfig> {
+    let mut source_dir = "src".to_string();
+    let mut source_dir_from_manifest = false;
+    let mut manifest_entrypoint: Option<Vec<String>> = None;
+    let mut runtime_version: Option<String> = None;
+    if let Some(manifest) = read_wrapper_manifest(user_dir)? {
+        if let Some(run) = manifest.run {
+            if let Some(source_dir_raw) = run.source_dir {
+                source_dir = normalize_manifest_source_dir(&source_dir_raw)?;
+                source_dir_from_manifest = true;
+            }
+            if let Some(entrypoint) = run.entrypoint {
+                manifest_entrypoint = Some(normalize_manifest_entrypoint(entrypoint)?);
+            }
+        }
+        if let Some(runtime_version_raw) = manifest.runtime.and_then(|runtime| runtime.version) {
+            runtime_version = Some(normalize_dotnet_runtime_version(&runtime_version_raw)?);
+        }
+    }
+    let runtime_version =
+        runtime_version.unwrap_or_else(|| DEFAULT_CSHARP_DOTNET_RUNTIME_VERSION.to_string());
+
+    let source_path = user_dir.join(&source_dir);
+    if !source_path.is_dir() {
+        bail!(
+            "run.source_dir `{}` does not exist in archive (expected `{}`)",
+            source_dir,
+            source_path.display()
+        );
+    }
+
+    let mut csproj_paths = discover_csproj_relative_paths(&source_path)?;
+    if csproj_paths.is_empty() && !source_dir_from_manifest {
+        let root_csproj_paths = discover_csproj_relative_paths(user_dir)?;
+        if !root_csproj_paths.is_empty() {
+            source_dir = ".".to_string();
+            csproj_paths = root_csproj_paths;
+        }
+    }
+    if csproj_paths.is_empty() {
+        let sample = format_path_sample(extracted_entries, 20);
+        if source_dir_from_manifest {
+            bail!(
+                "archive validation failed: no .csproj files found under run.source_dir `{}`. Extracted entries sample: {}",
+                source_dir,
+                sample
+            );
+        }
+        bail!(
+            "archive validation failed: no .csproj files found under default run.source_dir `src` or archive root. Extracted entries sample: {}",
+            sample
+        );
+    }
+
+    let entrypoint = if let Some(entrypoint) = manifest_entrypoint {
+        entrypoint
+    } else {
+        let selected_csproj = csproj_paths.first().ok_or_else(|| {
+            anyhow!("internal error: missing .csproj despite non-empty project list")
+        })?;
+        vec![
+            "dotnet".to_string(),
+            "run".to_string(),
+            "--project".to_string(),
+            format!("/app/user/{source_dir}/{selected_csproj}"),
+        ]
+    };
+
+    Ok(CsharpRunConfig {
+        entrypoint,
+        source_dir,
+        runtime_version,
+        csproj_paths,
+    })
+}
+
+fn read_wrapper_manifest(user_dir: &Path) -> anyhow::Result<Option<WrapperManifestToml>> {
+    let manifest_path = user_dir.join("manifest.toml");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+
+    let manifest_raw = std::fs::read_to_string(&manifest_path).with_context(|| {
+        format!(
+            "failed to read wrapper manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: WrapperManifestToml = toml::from_str(&manifest_raw).with_context(|| {
+        format!(
+            "failed to parse wrapper manifest {}",
+            manifest_path.display()
+        )
+    })?;
+    Ok(Some(manifest))
+}
+
+fn normalize_manifest_entrypoint(entrypoint: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let trimmed_entrypoint: Vec<String> = entrypoint
+        .into_iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect();
+    if trimmed_entrypoint.is_empty() {
+        bail!("manifest run.entrypoint must not be empty");
+    }
+    Ok(trimmed_entrypoint)
 }
 
 fn normalize_manifest_source_dir(raw: &str) -> anyhow::Result<String> {
@@ -2577,6 +2895,66 @@ fn normalize_manifest_source_dir(raw: &str) -> anyhow::Result<String> {
         bail!("manifest run.source_dir must not be empty");
     }
     Ok(parts.join("/"))
+}
+
+fn normalize_dotnet_runtime_version(raw: &str) -> anyhow::Result<String> {
+    let version = raw.trim();
+    if version.is_empty() {
+        bail!("manifest runtime.version must not be empty when provided");
+    }
+    if !version
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-')
+    {
+        bail!("manifest runtime.version contains unsupported characters");
+    }
+    Ok(version.to_string())
+}
+
+fn discover_csproj_relative_paths(source_dir: &Path) -> anyhow::Result<Vec<String>> {
+    let mut paths = Vec::new();
+    discover_csproj_relative_paths_inner(source_dir, source_dir, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn discover_csproj_relative_paths_inner(
+    root_dir: &Path,
+    current_dir: &Path,
+    output: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(current_dir)
+        .with_context(|| format!("failed to read directory {}", current_dir.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in {}", current_dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect entry {}", path.display()))?;
+        if file_type.is_dir() {
+            discover_csproj_relative_paths_inner(root_dir, &path, output)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let is_csproj = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csproj"));
+        if !is_csproj {
+            continue;
+        }
+        let relative = path.strip_prefix(root_dir).with_context(|| {
+            format!(
+                "failed to compute project path relative to {}",
+                root_dir.display()
+            )
+        })?;
+        output.push(relative.to_string_lossy().replace('\\', "/"));
+    }
+    Ok(())
 }
 
 fn extract_archive_secure(archive_path: &Path, user_dir: &Path) -> anyhow::Result<Vec<String>> {

@@ -104,7 +104,9 @@ pub struct Config {
     #[cfg(feature = "official")]
     pub wrapper_gh_owner: String,
     #[cfg(feature = "official")]
-    pub wrapper_gh_repo: String,
+    pub wrapper_python_gh_repo: String,
+    #[cfg(feature = "official")]
+    pub wrapper_csharp_gh_repo: String,
     #[cfg(feature = "official")]
     pub gh_token: Option<String>,
 }
@@ -328,8 +330,11 @@ impl Config {
         let wrapper_gh_owner = read_env_string("WRAPPER_GH_OWNER")
             .ok_or("WRAPPER_GH_OWNER must be set for official backend")?;
         #[cfg(feature = "official")]
-        let wrapper_gh_repo = read_env_string("WRAPPER_GH_REPO")
-            .ok_or("WRAPPER_GH_REPO must be set for official backend")?;
+        let wrapper_python_gh_repo = read_env_string("WRAPPER_PYTHON_GH_REPO")
+            .ok_or("WRAPPER_PYTHON_GH_REPO must be set for official backend")?;
+        #[cfg(feature = "official")]
+        let wrapper_csharp_gh_repo = read_env_string("WRAPPER_CSHARP_GH_REPO")
+            .ok_or("WRAPPER_CSHARP_GH_REPO must be set for official backend")?;
         #[cfg(feature = "official")]
         let gh_token = read_env_string("GH_TOKEN");
         #[cfg(feature = "official")]
@@ -406,7 +411,9 @@ impl Config {
             #[cfg(feature = "official")]
             wrapper_gh_owner,
             #[cfg(feature = "official")]
-            wrapper_gh_repo,
+            wrapper_python_gh_repo,
+            #[cfg(feature = "official")]
+            wrapper_csharp_gh_repo,
             #[cfg(feature = "official")]
             gh_token,
         })
