@@ -300,8 +300,6 @@ async fn collect_frame(
             }
         };
 
-        let mut pit_temperature_after_celsius: Option<[f32; 4]> = None;
-
         #[cfg(feature = "official")]
         {
             let in_stationary_fix = state.pitstop_state.has_zone(PitstopZone::Fix)
@@ -318,32 +316,8 @@ async fn collect_frame(
                         .set_car_tyre_type_in(target.clone(), engine_car_id, engine_tire_type)
                         .await
                     {
-                        Ok(()) => {
-                            runtime_store
-                                .mark_pit_fix_tire_applied(public_car_id, desired_tire_type);
-                            match engine
-                                .read_car_state_in(target.clone(), engine_car_id)
-                                .await
-                            {
-                                Ok(refreshed_state) => {
-                                    pit_temperature_after_celsius =
-                                        Some(refreshed_state.tyre_temperature_celsius);
-                                }
-                                Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
-                                    runtime_store.remove_car(public_car_id);
-                                    continue;
-                                }
-                                Err(err) => {
-                                    tracing::warn!(
-                                        public_car_id,
-                                        engine_car_id,
-                                        target = ?target,
-                                        error = %err,
-                                        "frame hub: failed to read car state after pit-fix tyre apply"
-                                    );
-                                }
-                            }
-                        }
+                        Ok(()) => runtime_store
+                            .mark_pit_fix_tire_applied(public_car_id, desired_tire_type),
                         Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
                             runtime_store.remove_car(public_car_id);
                             continue;
@@ -375,7 +349,6 @@ async fn collect_frame(
             public_car_id,
             &state,
             race_metrics.as_ref(),
-            pit_temperature_after_celsius,
             frame.server_time_ms,
         );
 

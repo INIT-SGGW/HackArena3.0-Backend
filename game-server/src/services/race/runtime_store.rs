@@ -60,6 +60,18 @@ pub struct RuntimePitHistoryEntry {
     pub bot_slot_after: u32,
 }
 
+#[cfg(feature = "official")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RuntimeActiveFixSession {
+    entry_time_ms: u64,
+    entry_lap: u32,
+    source: RuntimePitEntrySource,
+    tire_type_before: RuntimePitTireType,
+    tire_wear_before_repair: [f32; 4],
+    tire_temperature_before_celsius: [f32; 4],
+    bot_slot_before: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RuntimePitStateSnapshot {
     pub pit_request_active: bool,
@@ -108,6 +120,10 @@ struct RuntimePitState {
     active_next_tire_type: RuntimePitTireType,
     next_pit_tire_revision: u64,
     history: VecDeque<RuntimePitHistoryEntry>,
+    #[cfg(feature = "official")]
+    was_in_fix_zone: bool,
+    #[cfg(feature = "official")]
+    active_fix_session: Option<RuntimeActiveFixSession>,
     was_fix_stationary_full_pit: bool,
     last_applied_tyre_in_current_fix: Option<RuntimePitTireType>,
     last_applied_tire_revision_in_current_fix: Option<u64>,
@@ -413,47 +429,103 @@ impl RaceRuntimeStore {
         car_id: u64,
         vehicle_state: &VehicleState,
         race_metrics: Option<&VehicleRaceMetrics>,
-        tire_temperature_after_celsius: Option<[f32; 4]>,
         now_ms: u64,
     ) -> RuntimePitStateSnapshot {
         let mut entry = self.car_pit_state.entry(car_id).or_default();
+        #[cfg(feature = "official")]
+        let in_fix_zone = vehicle_state.pitstop_state.has_zone(PitstopZone::Fix);
         let completed_pit = vehicle_state.pitstop_state.has_zone(PitstopZone::Fix)
             && vehicle_state.pitstop_state.wheels_in_pitstop == 4
             && vehicle_state.speed == 0.0;
 
-        if completed_pit && !entry.was_fix_stationary_full_pit {
-            let source = if entry.emergency_intent_pending {
-                RuntimePitEntrySource::Emergency
-            } else if entry.pit_request_active {
-                RuntimePitEntrySource::Requested
-            } else {
-                RuntimePitEntrySource::BotDecision
-            };
-            let lap = race_metrics
-                .map(|metrics| metrics.completed_laps)
-                .unwrap_or(0);
-            let history_entry = RuntimePitHistoryEntry {
-                pit_time_ms: now_ms,
-                lap,
-                source,
-                tire_type_after: entry.active_next_tire_type,
-                tire_type_before: runtime_tire_type_from_engine(vehicle_state.tyre_type),
-                tire_wear_before_repair: vehicle_state.tyre_health,
-                tire_temperature_before_celsius: vehicle_state.tyre_temperature_celsius,
-                tire_temperature_after_celsius: tire_temperature_after_celsius
-                    .unwrap_or(vehicle_state.tyre_temperature_celsius),
-                bot_slot_before: 1,
-                bot_slot_after: 1,
-            };
-            entry.history.push_front(history_entry);
-            while entry.history.len() > PIT_HISTORY_MAX_ENTRIES {
-                entry.history.pop_back();
+        #[cfg(feature = "official")]
+        {
+            if in_fix_zone && !entry.was_in_fix_zone {
+                let source = if entry.emergency_intent_pending {
+                    RuntimePitEntrySource::Emergency
+                } else if entry.pit_request_active {
+                    RuntimePitEntrySource::Requested
+                } else {
+                    RuntimePitEntrySource::BotDecision
+                };
+                let entry_lap = race_metrics
+                    .map(|metrics| metrics.completed_laps)
+                    .unwrap_or(entry.last_pit_lap);
+                entry.active_fix_session = Some(RuntimeActiveFixSession {
+                    entry_time_ms: now_ms,
+                    entry_lap,
+                    source,
+                    tire_type_before: runtime_tire_type_from_engine(vehicle_state.tyre_type),
+                    tire_wear_before_repair: vehicle_state.tyre_health,
+                    tire_temperature_before_celsius: vehicle_state.tyre_temperature_celsius,
+                    bot_slot_before: current_bot_slot_for_history(),
+                });
+                entry.emergency_intent_pending = false;
+                entry.pit_request_active = false;
             }
-            entry.last_pit_time_ms = now_ms;
-            entry.last_pit_source = source;
-            entry.last_pit_lap = lap;
-            entry.emergency_intent_pending = false;
-            entry.pit_request_active = false;
+
+            if !in_fix_zone && entry.was_in_fix_zone {
+                if let Some(session) = entry.active_fix_session.take() {
+                    let history_entry = RuntimePitHistoryEntry {
+                        pit_time_ms: session.entry_time_ms,
+                        lap: session.entry_lap,
+                        source: session.source,
+                        tire_type_after: runtime_tire_type_from_engine(vehicle_state.tyre_type),
+                        tire_type_before: session.tire_type_before,
+                        tire_wear_before_repair: session.tire_wear_before_repair,
+                        tire_temperature_before_celsius: session.tire_temperature_before_celsius,
+                        tire_temperature_after_celsius: vehicle_state.tyre_temperature_celsius,
+                        bot_slot_before: session.bot_slot_before,
+                        bot_slot_after: current_bot_slot_for_history(),
+                    };
+                    entry.history.push_front(history_entry);
+                    while entry.history.len() > PIT_HISTORY_MAX_ENTRIES {
+                        entry.history.pop_back();
+                    }
+                    entry.last_pit_time_ms = now_ms;
+                    entry.last_pit_source = session.source;
+                    entry.last_pit_lap = session.entry_lap;
+                }
+            }
+
+            entry.was_in_fix_zone = in_fix_zone;
+        }
+
+        #[cfg(not(feature = "official"))]
+        {
+            if completed_pit && !entry.was_fix_stationary_full_pit {
+                let source = if entry.emergency_intent_pending {
+                    RuntimePitEntrySource::Emergency
+                } else if entry.pit_request_active {
+                    RuntimePitEntrySource::Requested
+                } else {
+                    RuntimePitEntrySource::BotDecision
+                };
+                let lap = race_metrics
+                    .map(|metrics| metrics.completed_laps)
+                    .unwrap_or(0);
+                let history_entry = RuntimePitHistoryEntry {
+                    pit_time_ms: now_ms,
+                    lap,
+                    source,
+                    tire_type_after: entry.active_next_tire_type,
+                    tire_type_before: runtime_tire_type_from_engine(vehicle_state.tyre_type),
+                    tire_wear_before_repair: vehicle_state.tyre_health,
+                    tire_temperature_before_celsius: vehicle_state.tyre_temperature_celsius,
+                    tire_temperature_after_celsius: vehicle_state.tyre_temperature_celsius,
+                    bot_slot_before: 1,
+                    bot_slot_after: 1,
+                };
+                entry.history.push_front(history_entry);
+                while entry.history.len() > PIT_HISTORY_MAX_ENTRIES {
+                    entry.history.pop_back();
+                }
+                entry.last_pit_time_ms = now_ms;
+                entry.last_pit_source = source;
+                entry.last_pit_lap = lap;
+                entry.emergency_intent_pending = false;
+                entry.pit_request_active = false;
+            }
         }
 
         if !completed_pit {
@@ -516,4 +588,9 @@ fn runtime_tire_type_from_engine(value: TyreType) -> RuntimePitTireType {
         TyreType::Soft => RuntimePitTireType::Soft,
         TyreType::Wet => RuntimePitTireType::Wet,
     }
+}
+
+#[cfg(feature = "official")]
+fn current_bot_slot_for_history() -> u32 {
+    1
 }
