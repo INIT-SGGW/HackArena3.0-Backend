@@ -28,11 +28,12 @@ use proto::submission::v1::slot_query_service_server::SlotQueryService;
 use proto::submission::v1::submission_service_server::SubmissionService;
 use proto::submission::v1::{
     BuildFinished, BuildLog, BuildStarted, GetSlotsRequest, GetSlotsResponse,
-    GetSubmissionArchiveRequest, GetSubmissionArchiveResponse, JoinOfficialSandboxRequest,
-    JoinOfficialSandboxResponse, LeaveOfficialSandboxRequest, LeaveOfficialSandboxResponse,
-    ListRecentSubmissionsRequest, ListRecentSubmissionsResponse, OfficialSandboxCommandStatus,
-    RecentSubmissionDto, SlotDto, SlotSummaryDto, StreamSlotsRequest, StreamSlotsResponse,
-    SubmitBuildRequest, SubmitBuildStreamResponse, WrapperKind, submit_build_stream_response,
+    GetSubmissionArchiveRequest, GetSubmissionArchiveResponse, GetSubmissionLogsRequest,
+    GetSubmissionLogsResponse, JoinOfficialSandboxRequest, JoinOfficialSandboxResponse,
+    LeaveOfficialSandboxRequest, LeaveOfficialSandboxResponse, ListRecentSubmissionsRequest,
+    ListRecentSubmissionsResponse, OfficialSandboxCommandStatus, RecentSubmissionDto, SlotDto,
+    SlotSummaryDto, StreamSlotsRequest, StreamSlotsResponse, SubmitBuildRequest,
+    SubmitBuildStreamResponse, WrapperKind, submit_build_stream_response,
 };
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -75,6 +76,7 @@ const SLOT_STREAM_CHANNEL_CAPACITY: usize = 8;
 const BUILD_EVENT_CHANNEL_CAPACITY: usize = 128;
 const LIST_RECENT_SUBMISSIONS_LIMIT: i64 = 1000;
 const SUBMISSIONS_ROOT: &str = ".submissions";
+const LEGACY_BOT_LOGS_SUBDIR: &str = "bot-logs";
 const TEAM_SUBMISSIONS_SUBDIR: &str = "submissions";
 const TEAM_LOGS_SUBDIR: &str = "logs";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
@@ -1426,6 +1428,78 @@ impl SubmissionService for SubmissionServiceImpl {
 
         Ok(Response::new(GetSubmissionArchiveResponse {
             user_archive_tar_gz: user_archive_tar_gz.into(),
+        }))
+    }
+
+    async fn get_submission_logs(
+        &self,
+        request: Request<GetSubmissionLogsRequest>,
+    ) -> Result<Response<GetSubmissionLogsResponse>, Status> {
+        let user_id = self.token_validator.subject(request.metadata()).await?;
+        let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
+        let req = request.into_inner();
+        let submission_id = req.submission_id.trim();
+        if submission_id.is_empty() {
+            return Err(Status::invalid_argument("submission_id must be non-empty"));
+        }
+
+        let _archive_path = self
+            .repo
+            .get_submission_archive_path(&team_id, submission_id)
+            .await
+            .map_err(|err| {
+                Status::internal(format!("failed to load submission archive path: {err}"))
+            })?
+            .ok_or_else(|| Status::not_found("submission not found for team"))?;
+
+        let team_logs_dir = self
+            .submissions_root
+            .join(sanitize_storage_component(&team_id))
+            .join(TEAM_LOGS_SUBDIR);
+        let legacy_logs_dir = self.submissions_root.join(LEGACY_BOT_LOGS_SUBDIR);
+        let submission_marker = format!("submission-{}", sanitize_storage_component(submission_id));
+
+        let mut log_files = collect_submission_log_files(
+            &team_logs_dir,
+            SubmissionLogSource::Current,
+            &submission_marker,
+        )
+        .await
+        .map_err(|err| Status::internal(format!("failed to list submission log files: {err}")))?;
+        log_files.extend(
+            collect_submission_log_files(
+                &legacy_logs_dir,
+                SubmissionLogSource::Legacy,
+                &submission_marker,
+            )
+            .await
+            .map_err(|err| {
+                Status::internal(format!("failed to list legacy submission log files: {err}"))
+            })?,
+        );
+
+        log_files.sort_by(|left, right| {
+            left.file_name
+                .cmp(&right.file_name)
+                .then_with(|| left.source.cmp(&right.source))
+        });
+
+        if log_files.is_empty() {
+            return Err(Status::not_found("submission logs not found"));
+        }
+
+        let build_logs_tar_gz =
+            tokio::task::spawn_blocking(move || package_submission_logs_tar_gz(&log_files))
+                .await
+                .map_err(|err| {
+                    Status::internal(format!("failed to package submission logs: {err}"))
+                })?
+                .map_err(|err| {
+                    Status::internal(format!("failed to package submission logs: {err}"))
+                })?;
+
+        Ok(Response::new(GetSubmissionLogsResponse {
+            build_logs_tar_gz: build_logs_tar_gz.into(),
         }))
     }
 }
@@ -3051,6 +3125,108 @@ fn package_context_as_tar_gz(context_dir: &Path, out_tar_gz: &Path) -> anyhow::R
         .finish()
         .context("failed to finalize gzip archive")?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SubmissionLogSource {
+    Current,
+    Legacy,
+}
+
+impl SubmissionLogSource {
+    fn archive_prefix(self) -> &'static str {
+        match self {
+            SubmissionLogSource::Current => "logs",
+            SubmissionLogSource::Legacy => "legacy-logs",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SubmissionLogFile {
+    source: SubmissionLogSource,
+    file_name: String,
+    path: PathBuf,
+}
+
+async fn collect_submission_log_files(
+    directory: &Path,
+    source: SubmissionLogSource,
+    submission_marker: &str,
+) -> anyhow::Result<Vec<SubmissionLogFile>> {
+    let mut read_dir = match fs::read_dir(directory).await {
+        Ok(read_dir) => read_dir,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "failed to open submission logs directory {}",
+                    directory.display()
+                )
+            });
+        }
+    };
+
+    let mut files = Vec::new();
+    loop {
+        let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .with_context(|| format!("failed to read directory entry {}", directory.display()))?
+        else {
+            break;
+        };
+
+        let file_type = entry
+            .file_type()
+            .await
+            .with_context(|| format!("failed to read file type {}", entry.path().display()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let is_log_file = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("log"));
+        if !is_log_file || !file_name.contains(submission_marker) {
+            continue;
+        }
+
+        files.push(SubmissionLogFile {
+            source,
+            file_name: file_name.to_string(),
+            path,
+        });
+    }
+
+    Ok(files)
+}
+
+fn package_submission_logs_tar_gz(log_files: &[SubmissionLogFile]) -> anyhow::Result<Vec<u8>> {
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut builder = Builder::new(encoder);
+    for log_file in log_files {
+        let archive_path = format!(
+            "{}/{}",
+            log_file.source.archive_prefix(),
+            log_file.file_name
+        );
+        builder
+            .append_path_with_name(&log_file.path, Path::new(&archive_path))
+            .with_context(|| format!("failed to append log file {}", log_file.path.display()))?;
+    }
+    let encoder = builder
+        .into_inner()
+        .context("failed to finalize submission logs tar archive")?;
+    let bytes = encoder
+        .finish()
+        .context("failed to finalize submission logs gzip archive")?;
+    Ok(bytes)
 }
 
 fn sanitize_storage_component(value: &str) -> String {
