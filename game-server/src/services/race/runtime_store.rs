@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use boink::model::{PitstopZone, VehicleRaceMetrics, VehicleState};
+use boink::model::{PitstopZone, TyreType, VehicleRaceMetrics, VehicleState};
 use dashmap::DashMap;
 
 use crate::runtime::engine_worker::EngineCommandTarget;
@@ -46,12 +46,18 @@ pub enum RuntimePitEntrySource {
     Emergency,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RuntimePitHistoryEntry {
     pub pit_time_ms: u64,
     pub lap: u32,
     pub source: RuntimePitEntrySource,
-    pub new_tire_type: RuntimePitTireType,
+    pub tire_type_after: RuntimePitTireType,
+    pub tire_type_before: RuntimePitTireType,
+    pub tire_wear_before_repair: [f32; 4],
+    pub tire_temperature_before_celsius: [f32; 4],
+    pub tire_temperature_after_celsius: [f32; 4],
+    pub bot_slot_before: u32,
+    pub bot_slot_after: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -407,6 +413,7 @@ impl RaceRuntimeStore {
         car_id: u64,
         vehicle_state: &VehicleState,
         race_metrics: Option<&VehicleRaceMetrics>,
+        tire_temperature_after_celsius: Option<[f32; 4]>,
         now_ms: u64,
     ) -> RuntimePitStateSnapshot {
         let mut entry = self.car_pit_state.entry(car_id).or_default();
@@ -429,7 +436,14 @@ impl RaceRuntimeStore {
                 pit_time_ms: now_ms,
                 lap,
                 source,
-                new_tire_type: entry.active_next_tire_type,
+                tire_type_after: entry.active_next_tire_type,
+                tire_type_before: runtime_tire_type_from_engine(vehicle_state.tyre_type),
+                tire_wear_before_repair: vehicle_state.tyre_health,
+                tire_temperature_before_celsius: vehicle_state.tyre_temperature_celsius,
+                tire_temperature_after_celsius: tire_temperature_after_celsius
+                    .unwrap_or(vehicle_state.tyre_temperature_celsius),
+                bot_slot_before: 1,
+                bot_slot_after: 1,
             };
             entry.history.push_front(history_entry);
             while entry.history.len() > PIT_HISTORY_MAX_ENTRIES {
@@ -494,4 +508,12 @@ fn remaining_u32(until_ms: u64, now_ms: u64) -> u32 {
     }
     let remaining = until_ms - now_ms;
     remaining.min(u64::from(u32::MAX)) as u32
+}
+
+fn runtime_tire_type_from_engine(value: TyreType) -> RuntimePitTireType {
+    match value {
+        TyreType::Hard => RuntimePitTireType::Hard,
+        TyreType::Soft => RuntimePitTireType::Soft,
+        TyreType::Wet => RuntimePitTireType::Wet,
+    }
 }

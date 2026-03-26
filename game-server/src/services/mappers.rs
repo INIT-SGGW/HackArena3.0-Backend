@@ -390,7 +390,19 @@ fn pit_history_from_snapshot(snapshot: &RuntimePitStateSnapshot) -> ProtoPitHist
                 pit_time_ms: entry.pit_time_ms,
                 lap: entry.lap,
                 source: runtime_pit_source_to_proto(entry.source),
-                new_tire_type: runtime_tire_type_to_proto(entry.new_tire_type),
+                tire_type_after: runtime_tire_type_to_proto(entry.tire_type_after),
+                tire_type_before: runtime_tire_type_to_proto(entry.tire_type_before),
+                tire_wear_before_repair: Some(tire_wear_array_to_proto(
+                    entry.tire_wear_before_repair,
+                )),
+                tire_temperature_before_celsius: Some(tire_temperature_array_to_proto(
+                    entry.tire_temperature_before_celsius,
+                )),
+                tire_temperature_after_celsius: Some(tire_temperature_array_to_proto(
+                    entry.tire_temperature_after_celsius,
+                )),
+                bot_slot_before: entry.bot_slot_before,
+                bot_slot_after: entry.bot_slot_after,
             })
             .collect(),
     }
@@ -417,6 +429,24 @@ fn runtime_pit_source_to_proto(source: RuntimePitEntrySource) -> i32 {
         RuntimePitEntrySource::BotDecision => ProtoPitEntrySource::BotDecision as i32,
         RuntimePitEntrySource::Requested => ProtoPitEntrySource::Requested as i32,
         RuntimePitEntrySource::Emergency => ProtoPitEntrySource::Emergency as i32,
+    }
+}
+
+fn tire_wear_array_to_proto(values: [f32; 4]) -> TireWearPerWheel {
+    TireWearPerWheel {
+        front_left: values[0],
+        front_right: values[1],
+        rear_left: values[2],
+        rear_right: values[3],
+    }
+}
+
+fn tire_temperature_array_to_proto(values: [f32; 4]) -> TireTemperaturePerWheel {
+    TireTemperaturePerWheel {
+        front_left_celsius: values[0],
+        front_right_celsius: values[1],
+        rear_left_celsius: values[2],
+        rear_right_celsius: values[3],
     }
 }
 
