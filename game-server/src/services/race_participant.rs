@@ -1228,7 +1228,7 @@ async fn run_participant_stream(
                         let ack = match runtime_tire_type_from_proto(command.next_tire_type) {
                             Ok(next_tire_type) => {
                                 runtime_store
-                                    .set_next_pit_tire_type(self_public_car_id, next_tire_type);
+                                    .set_next_tire_from_bot(self_public_car_id, next_tire_type);
                                 participant_command_ack(
                                     command.client_seq,
                                     ParticipantCommandType::SetNextPitTireType,

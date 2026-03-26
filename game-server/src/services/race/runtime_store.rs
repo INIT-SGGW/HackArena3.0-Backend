@@ -32,6 +32,13 @@ pub enum RuntimePitTireType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum RuntimeNextTireMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RuntimePitEntrySource {
     #[default]
     BotDecision,
@@ -90,9 +97,14 @@ struct RuntimePitState {
     last_pit_time_ms: u64,
     last_pit_source: RuntimePitEntrySource,
     last_pit_lap: u32,
-    next_pit_tire_type: RuntimePitTireType,
+    next_tire_mode: RuntimeNextTireMode,
+    bot_cached_next_tire_type: Option<RuntimePitTireType>,
+    active_next_tire_type: RuntimePitTireType,
+    next_pit_tire_revision: u64,
     history: VecDeque<RuntimePitHistoryEntry>,
     was_fix_stationary_full_pit: bool,
+    last_applied_tyre_in_current_fix: Option<RuntimePitTireType>,
+    last_applied_tire_revision_in_current_fix: Option<u64>,
     emergency_intent_pending: bool,
 }
 
@@ -112,7 +124,7 @@ impl RuntimePitState {
             last_pit_time_ms: self.last_pit_time_ms,
             last_pit_source: self.last_pit_source,
             last_pit_lap: self.last_pit_lap,
-            next_pit_tire_type: self.next_pit_tire_type,
+            next_pit_tire_type: self.active_next_tire_type,
             history: self.history.iter().copied().collect(),
         }
     }
@@ -287,9 +299,61 @@ impl RaceRuntimeStore {
             .unwrap_or_default()
     }
 
-    pub fn set_next_pit_tire_type(&self, car_id: u64, tire_type: RuntimePitTireType) {
+    pub fn set_next_tire_from_frontend(&self, car_id: u64, tire_type: RuntimePitTireType) {
         let mut entry = self.car_pit_state.entry(car_id).or_default();
-        entry.next_pit_tire_type = tire_type;
+        match tire_type {
+            RuntimePitTireType::Unspecified => {
+                entry.next_tire_mode = RuntimeNextTireMode::Auto;
+                entry.active_next_tire_type = entry
+                    .bot_cached_next_tire_type
+                    .unwrap_or(RuntimePitTireType::Unspecified);
+            }
+            RuntimePitTireType::Hard | RuntimePitTireType::Soft | RuntimePitTireType::Wet => {
+                entry.next_tire_mode = RuntimeNextTireMode::Manual;
+                entry.active_next_tire_type = tire_type;
+            }
+        }
+        entry.next_pit_tire_revision = entry.next_pit_tire_revision.saturating_add(1);
+    }
+
+    pub fn set_next_tire_from_bot(&self, car_id: u64, tire_type: RuntimePitTireType) {
+        let mut entry = self.car_pit_state.entry(car_id).or_default();
+        entry.bot_cached_next_tire_type = Some(tire_type);
+        if matches!(entry.next_tire_mode, RuntimeNextTireMode::Auto) {
+            entry.active_next_tire_type = tire_type;
+            entry.next_pit_tire_revision = entry.next_pit_tire_revision.saturating_add(1);
+        }
+    }
+
+    pub fn plan_pit_fix_tire_apply(
+        &self,
+        car_id: u64,
+        current_tire_type: RuntimePitTireType,
+        in_stationary_fix: bool,
+    ) -> Option<RuntimePitTireType> {
+        let mut entry = self.car_pit_state.entry(car_id).or_default();
+        if !in_stationary_fix {
+            entry.last_applied_tyre_in_current_fix = None;
+            entry.last_applied_tire_revision_in_current_fix = None;
+            return None;
+        }
+        let desired_tire_type = match entry.active_next_tire_type {
+            RuntimePitTireType::Unspecified => current_tire_type,
+            value => value,
+        };
+        let tire_changed = entry.last_applied_tyre_in_current_fix != Some(desired_tire_type);
+        let revision_changed =
+            entry.last_applied_tire_revision_in_current_fix != Some(entry.next_pit_tire_revision);
+        if !tire_changed && !revision_changed {
+            return None;
+        }
+        Some(desired_tire_type)
+    }
+
+    pub fn mark_pit_fix_tire_applied(&self, car_id: u64, tire_type: RuntimePitTireType) {
+        let mut entry = self.car_pit_state.entry(car_id).or_default();
+        entry.last_applied_tyre_in_current_fix = Some(tire_type);
+        entry.last_applied_tire_revision_in_current_fix = Some(entry.next_pit_tire_revision);
     }
 
     pub fn mark_back_to_track_applied(&self, car_id: u64, now_ms: u64) {
@@ -365,7 +429,7 @@ impl RaceRuntimeStore {
                 pit_time_ms: now_ms,
                 lap,
                 source,
-                new_tire_type: entry.next_pit_tire_type,
+                new_tire_type: entry.active_next_tire_type,
             };
             entry.history.push_front(history_entry);
             while entry.history.len() > PIT_HISTORY_MAX_ENTRIES {
@@ -380,6 +444,8 @@ impl RaceRuntimeStore {
 
         if !completed_pit {
             entry.was_fix_stationary_full_pit = false;
+            entry.last_applied_tyre_in_current_fix = None;
+            entry.last_applied_tire_revision_in_current_fix = None;
         } else {
             entry.was_fix_stationary_full_pit = true;
         }

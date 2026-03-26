@@ -399,7 +399,7 @@ impl RaceService for RaceServiceImpl {
             let response = match runtime_tire_type_from_proto(req.next_tire_type) {
                 Ok(next_tire_type) => {
                     self.runtime_store
-                        .set_next_pit_tire_type(public_car_id, next_tire_type);
+                        .set_next_tire_from_frontend(public_car_id, next_tire_type);
                     SetNextPitTireTypeResponse {
                         status: ParticipantCommandStatus::Accepted as i32,
                         applies_from_tick,

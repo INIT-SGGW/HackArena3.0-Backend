@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use boink::engine::{Engine, EngineBuilder, VehicleMesh, VehicleModelConfig};
 use boink::error::Error as BoinkError;
+use boink::model::TyreType;
 use boink::model::control::{AcceptedControls, Controls};
 use boink::model::ghost::GhostModeSettings;
 use boink::model::math::Vec3;
@@ -424,6 +425,29 @@ impl EngineClient {
             .send(EngineCommand::SetCarToPitstop {
                 target,
                 car_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Applies tyre compound for a vehicle in target runtime world.
+    pub async fn set_car_tyre_type_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+        tyre_type: TyreType,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetCarTyreType {
+                target,
+                car_id,
+                tyre_type,
                 reply_tx,
             })
             .await
@@ -1238,6 +1262,27 @@ async fn handle_command(
                 |slot| {
                     slot.engine
                         .set_vehicle_to_pitstop(car_id)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::SetCarTyreType {
+            target,
+            car_id,
+            tyre_type,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .set_vehicle_tyre_type(car_id, tyre_type)
                         .map_err(EngineWorkerError::Engine)
                 },
             )
