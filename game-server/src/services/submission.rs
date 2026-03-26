@@ -75,7 +75,8 @@ const SLOT_STREAM_CHANNEL_CAPACITY: usize = 8;
 const BUILD_EVENT_CHANNEL_CAPACITY: usize = 128;
 const LIST_RECENT_SUBMISSIONS_LIMIT: i64 = 1000;
 const SUBMISSIONS_ROOT: &str = ".submissions";
-const BOT_LOGS_SUBDIR: &str = "bot-logs";
+const TEAM_SUBMISSIONS_SUBDIR: &str = "submissions";
+const TEAM_LOGS_SUBDIR: &str = "logs";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_API_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRY_API_TIMEOUT: Duration = Duration::from_secs(10);
@@ -848,7 +849,7 @@ pub struct OfficialSandboxCommandServiceImpl {
     runtime_store: Arc<RaceRuntimeStore>,
     slot_updates_tx: broadcast::Sender<String>,
     join_registry: OfficialSandboxJoinRegistry,
-    bot_logs_root: PathBuf,
+    submissions_root: PathBuf,
     log_capture_tasks: Arc<DashMap<String, JoinHandle<()>>>,
     join_command_lock: Arc<Mutex<()>>,
 }
@@ -898,7 +899,7 @@ impl OfficialSandboxCommandServiceImpl {
             runtime_store,
             slot_updates_tx,
             join_registry,
-            bot_logs_root: PathBuf::from(SUBMISSIONS_ROOT).join(BOT_LOGS_SUBDIR),
+            submissions_root: PathBuf::from(SUBMISSIONS_ROOT),
             log_capture_tasks: Arc::new(DashMap::new()),
             join_command_lock: Arc::new(Mutex::new(())),
         }
@@ -909,21 +910,10 @@ impl OfficialSandboxCommandServiceImpl {
         Ok(format!("ha3-official-bot-team-{team_component}"))
     }
 
-    fn sanitize_log_component(value: &str) -> String {
-        let mut sanitized = String::with_capacity(value.len());
-        for ch in value.chars() {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                sanitized.push(ch);
-            } else {
-                sanitized.push('_');
-            }
-        }
-        let trimmed = sanitized.trim_matches('_');
-        if trimmed.is_empty() {
-            "unknown".to_string()
-        } else {
-            trimmed.to_string()
-        }
+    fn team_logs_dir(&self, team_id: &str) -> PathBuf {
+        self.submissions_root
+            .join(sanitize_storage_component(team_id))
+            .join(TEAM_LOGS_SUBDIR)
     }
 
     fn build_bot_log_path(
@@ -938,16 +928,16 @@ impl OfficialSandboxCommandServiceImpl {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis())
             .unwrap_or(0);
-        let team = Self::sanitize_log_component(team_id);
-        let submission = Self::sanitize_log_component(submission_id);
-        let sandbox = Self::sanitize_log_component(sandbox_id);
-        let container_short = Self::sanitize_log_component(
+        let team = sanitize_storage_component(team_id);
+        let submission = sanitize_storage_component(submission_id);
+        let sandbox = sanitize_storage_component(sandbox_id);
+        let container_short = sanitize_storage_component(
             container_id.trim().get(..12).unwrap_or(container_id.trim()),
         );
         let file_name = format!(
             "{ts_ms}_team-{team}_submission-{submission}_sandbox-{sandbox}_slot-{slot_index}_container-{container_short}.log"
         );
-        self.bot_logs_root.join(file_name)
+        self.team_logs_dir(team_id).join(file_name)
     }
 
     async fn stop_log_capture_for_team(&self, team_id: &str) {
@@ -979,14 +969,10 @@ impl OfficialSandboxCommandServiceImpl {
         slot_index: i16,
         container_id: &str,
     ) -> anyhow::Result<PathBuf> {
-        fs::create_dir_all(&self.bot_logs_root)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to create bot logs directory {}",
-                    self.bot_logs_root.display()
-                )
-            })?;
+        let logs_dir = self.team_logs_dir(team_id);
+        fs::create_dir_all(&logs_dir).await.with_context(|| {
+            format!("failed to create bot logs directory {}", logs_dir.display())
+        })?;
 
         let log_file_path =
             self.build_bot_log_path(team_id, submission_id, sandbox_id, slot_index, container_id);
@@ -1316,7 +1302,11 @@ impl SubmissionService for SubmissionServiceImpl {
         let (events_tx, events_rx) = mpsc::channel(BUILD_EVENT_CHANNEL_CAPACITY);
         let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
         let submission_id = uuid::Uuid::new_v4().to_string();
-        let archive_dir = self.submissions_root.join(&submission_id);
+        let archive_dir = self
+            .submissions_root
+            .join(sanitize_storage_component(&team_id))
+            .join(TEAM_SUBMISSIONS_SUBDIR)
+            .join(sanitize_storage_component(&submission_id));
         fs::create_dir_all(&archive_dir).await.map_err(|err| {
             Status::internal(format!("failed to create submission directory: {err}"))
         })?;
@@ -3061,6 +3051,23 @@ fn package_context_as_tar_gz(context_dir: &Path, out_tar_gz: &Path) -> anyhow::R
         .finish()
         .context("failed to finalize gzip archive")?;
     Ok(())
+}
+
+fn sanitize_storage_component(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn format_image_ref(registry: &str, team_id: &str, submission_id: &str) -> anyhow::Result<String> {
