@@ -33,6 +33,8 @@ use proto::race::v1::{
 };
 #[cfg(feature = "local")]
 use rand::Rng;
+#[cfg(feature = "official")]
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 #[cfg(feature = "official")]
@@ -46,6 +48,8 @@ use tonic::{Request, Response, Status, server::NamedService};
 
 use crate::auth::game_token::{GameTokenValidator, parse_game_token};
 use crate::config::AppEnv;
+#[cfg(feature = "official")]
+use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
 use crate::runtime::engine_worker::{
@@ -78,12 +82,123 @@ const OFFICIAL_BOT_LOG_MAX_CHARS: usize = 200_000;
 const OFFICIAL_BOT_LOG_STREAM_CHANNEL_CAPACITY: usize = 64;
 #[cfg(feature = "official")]
 const OFFICIAL_BOT_LOG_STREAM_POLL_INTERVAL_MS: u64 = 200;
+#[cfg(feature = "official")]
+const OFFICIAL_RACE_CONFIG_CACHE_TTL_MS: i64 = 60_000;
 
 #[cfg(feature = "official")]
 struct BotLogsSnapshot {
     lines: Vec<String>,
     truncated: bool,
     file_size_bytes: u64,
+}
+
+#[cfg(feature = "official")]
+#[derive(Default)]
+struct OfficialRaceConfigCacheState {
+    races: Vec<RaceConfigRecord>,
+    cached_at_ms: i64,
+    loaded: bool,
+}
+
+#[cfg(feature = "official")]
+#[derive(Clone)]
+struct OfficialRaceConfigCache {
+    repo: RaceConfigRepo,
+    state: Arc<RwLock<OfficialRaceConfigCacheState>>,
+}
+
+#[cfg(feature = "official")]
+impl OfficialRaceConfigCache {
+    fn new(repo: RaceConfigRepo) -> Self {
+        Self {
+            repo,
+            state: Arc::new(RwLock::new(OfficialRaceConfigCacheState::default())),
+        }
+    }
+
+    async fn load_races(&self, now_ms: i64) -> Option<Vec<RaceConfigRecord>> {
+        {
+            let guard = self.state.read().await;
+            let cache_fresh = guard.loaded
+                && now_ms.saturating_sub(guard.cached_at_ms) < OFFICIAL_RACE_CONFIG_CACHE_TTL_MS;
+            if cache_fresh {
+                return Some(guard.races.clone());
+            }
+        }
+
+        let stale_races = {
+            let guard = self.state.read().await;
+            if guard.loaded {
+                Some(guard.races.clone())
+            } else {
+                None
+            }
+        };
+
+        match self.repo.get_snapshot().await {
+            Ok(snapshot) => {
+                let mut races = snapshot.races;
+                races.sort_by(|left, right| {
+                    left.config
+                        .starts_at_ms
+                        .cmp(&right.config.starts_at_ms)
+                        .then_with(|| left.race_id.cmp(&right.race_id))
+                });
+                let mut guard = self.state.write().await;
+                guard.races = races.clone();
+                guard.cached_at_ms = now_ms;
+                guard.loaded = true;
+                Some(races)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to refresh official race schedule cache"
+                );
+                stale_races
+            }
+        }
+    }
+
+    async fn runtime_remaining_sec(&self, now_ms: i64) -> Option<f32> {
+        let races = self.load_races(now_ms).await?;
+        if races.is_empty() {
+            return None;
+        }
+
+        let active_races: Vec<_> = races
+            .iter()
+            .filter_map(|race| {
+                let ends_at_ms = race
+                    .config
+                    .starts_at_ms
+                    .saturating_add(i64::from(race.config.race_duration_sec).saturating_mul(1_000));
+                if race.config.starts_at_ms <= now_ms && now_ms < ends_at_ms {
+                    Some((race, ends_at_ms))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if active_races.is_empty() {
+            return None;
+        }
+        if active_races.len() > 1 {
+            let overlapping_race_ids: Vec<_> = active_races
+                .iter()
+                .map(|(race, _)| race.race_id.as_str())
+                .collect();
+            tracing::warn!(
+                now_ms,
+                ?overlapping_race_ids,
+                "multiple active official race schedule entries detected; using first"
+            );
+        }
+
+        let (_, ends_at_ms) = active_races[0];
+        let remaining_ms = ends_at_ms.saturating_sub(now_ms).max(0);
+        Some(remaining_ms as f32 / 1_000.0)
+    }
 }
 
 /// gRPC RaceService implementation backed by a single engine world.
@@ -104,6 +219,8 @@ pub struct RaceServiceImpl {
     token_validator: Arc<GameTokenValidator>,
     #[cfg(feature = "official")]
     official_sandbox_joins: OfficialSandboxJoinRegistry,
+    #[cfg(feature = "official")]
+    official_race_config_cache: OfficialRaceConfigCache,
     #[cfg(feature = "local")]
     local_sandbox_store: LocalSandboxConfigStore,
 }
@@ -120,6 +237,7 @@ impl RaceServiceImpl {
         runtime_store: Arc<RaceRuntimeStore>,
         frame_hub: FrameHub,
         #[cfg(feature = "official")] official_sandbox_joins: OfficialSandboxJoinRegistry,
+        #[cfg(feature = "official")] race_config_repo: RaceConfigRepo,
         #[cfg(feature = "local")] local_sandbox_store: LocalSandboxConfigStore,
     ) -> Self {
         Self {
@@ -142,6 +260,8 @@ impl RaceServiceImpl {
             )),
             #[cfg(feature = "official")]
             official_sandbox_joins,
+            #[cfg(feature = "official")]
+            official_race_config_cache: OfficialRaceConfigCache::new(race_config_repo),
             #[cfg(feature = "local")]
             local_sandbox_store,
         }
@@ -609,6 +729,8 @@ impl RaceService for RaceServiceImpl {
         let car_owners = self.car_owners.clone();
         let car_engine_ids = self.car_engine_ids.clone();
         let car_targets = self.car_targets.clone();
+        #[cfg(feature = "official")]
+        let official_race_config_cache = self.official_race_config_cache.clone();
         let (tx, rx) = mpsc::channel(FRONTEND_STREAM_CHANNEL_CAPACITY);
 
         tokio::spawn(run_frontend_spectator_stream(
@@ -629,6 +751,8 @@ impl RaceService for RaceServiceImpl {
             resolve_runtime_map_id(&runtime_state, visible_target.as_ref()),
             visible_target,
             cleanup_instance_uuid,
+            #[cfg(feature = "official")]
+            official_race_config_cache,
             tx,
         ));
 
@@ -1175,6 +1299,7 @@ async fn run_frontend_spectator_stream(
     runtime_map_id: String,
     visible_target: Option<EngineCommandTarget>,
     cleanup_instance_uuid: Option<String>,
+    #[cfg(feature = "official")] official_race_config_cache: OfficialRaceConfigCache,
     tx: mpsc::Sender<Result<FrontendSpectatorEvent, Status>>,
 ) {
     static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -1209,6 +1334,9 @@ async fn run_frontend_spectator_stream(
         return;
     }
 
+    #[cfg(feature = "official")]
+    let mut warned_missing_active_official_race_schedule = false;
+
     loop {
         ticker.tick().await;
         let frame = frame_rx.borrow().clone();
@@ -1224,6 +1352,25 @@ async fn run_frontend_spectator_stream(
         frame_cars.sort_by_key(|entry| entry.public_car_id);
 
         let mut cars = Vec::with_capacity(frame_cars.len());
+        let official_race_leader_completed_laps = if matches!(
+            visible_target.as_ref(),
+            Some(EngineCommandTarget::OfficialRace)
+        ) {
+            Some(
+                frame_cars
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .race_metrics
+                            .as_ref()
+                            .map_or(0, |metrics| metrics.completed_laps)
+                    })
+                    .max()
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
         for entry in frame_cars {
             cars.push(frontend_full_state(
                 entry.public_car_id,
@@ -1256,11 +1403,66 @@ async fn run_frontend_spectator_stream(
             None
         };
 
+        let runtime_elapsed_sec = match visible_target.as_ref() {
+            Some(EngineCommandTarget::Sandbox { sandbox_id }) => {
+                frame.sandbox_race_duration_s.get(sandbox_id).copied()
+            }
+            _ => None,
+        };
+        let runtime_remaining_sec = match visible_target.as_ref() {
+            Some(EngineCommandTarget::OfficialRace) => {
+                #[cfg(feature = "official")]
+                {
+                    let now_ms = i64::try_from(frame.server_time_ms).unwrap_or(i64::MAX);
+                    let remaining = official_race_config_cache
+                        .runtime_remaining_sec(now_ms)
+                        .await;
+                    let runtime_is_official_race = frame
+                        .runtime_state
+                        .as_ref()
+                        .map(|state| state.activity_kind == EngineActivityKind::OfficialRace)
+                        .unwrap_or(false);
+                    if remaining.is_none()
+                        && runtime_is_official_race
+                        && !warned_missing_active_official_race_schedule
+                    {
+                        tracing::warn!(
+                            now_ms,
+                            "official race runtime is active but no active schedule entry was found"
+                        );
+                        warned_missing_active_official_race_schedule = true;
+                    } else if remaining.is_some() {
+                        warned_missing_active_official_race_schedule = false;
+                    }
+                    remaining
+                }
+                #[cfg(not(feature = "official"))]
+                {
+                    None
+                }
+            }
+            Some(EngineCommandTarget::Sandbox { sandbox_id }) => {
+                #[cfg(feature = "official")]
+                {
+                    official_sandbox_pending_close_remaining_sec(&frame, sandbox_id)
+                }
+                #[cfg(not(feature = "official"))]
+                {
+                    let _ = sandbox_id;
+                    None
+                }
+            }
+            None => None,
+        };
+
         let snapshot = FrontendSpectatorSnapshot {
             tick: frame.tick,
             server_time_ms: frame.server_time_ms,
             cars,
             debug,
+            runtime_elapsed_sec,
+            official_race_leader_completed_laps,
+            runtime_remaining_sec,
         };
         let msg = FrontendSpectatorEvent {
             payload: Some(FrontendSpectatorPayload::Snapshot(snapshot)),
@@ -1286,6 +1488,23 @@ async fn run_frontend_spectator_stream(
 
     tracing::info!("frontend spectator stream ended");
     active_streams.remove(&stream_id);
+}
+
+#[cfg(feature = "official")]
+fn official_sandbox_pending_close_remaining_sec(
+    frame: &RuntimeFrame,
+    sandbox_id: &str,
+) -> Option<f32> {
+    let runtime_state = frame.runtime_state.as_ref()?;
+    let now_ms = i64::try_from(frame.server_time_ms).unwrap_or(i64::MAX);
+    let execute_at_ms = runtime_state
+        .pending_sandbox_activations
+        .iter()
+        .filter(|activation| !activation.activate && activation.sandbox_id == sandbox_id)
+        .map(|activation| activation.execute_at_unix_ms)
+        .min()?;
+    let remaining_ms = execute_at_ms.saturating_sub(now_ms).max(0);
+    Some(remaining_ms as f32 / 1_000.0)
 }
 
 fn remove_instance_mapping_for_car(

@@ -214,6 +214,8 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let official_sandbox_joins = new_official_sandbox_join_registry();
     #[cfg(feature = "official")]
+    let race_config_repo = RaceConfigRepo::new(official_db_pool.clone());
+    #[cfg(feature = "official")]
     let submission_impl = SubmissionServiceImpl::new(
         submission_repo.clone(),
         token_validator.clone(),
@@ -285,6 +287,8 @@ pub async fn serve_grpc(
         frame_hub.clone(),
         #[cfg(feature = "official")]
         official_sandbox_joins.clone(),
+        #[cfg(feature = "official")]
+        race_config_repo.clone(),
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
     );
@@ -329,7 +333,6 @@ pub async fn serve_grpc(
         let upcoming_races_invalidation = UpcomingRacesCacheInvalidation::new();
         let sandbox_config_invalidation = SandboxConfigCacheInvalidation::new();
         let weather_repo = WeatherRepo::new(official_db_pool.clone());
-        let race_config_repo = RaceConfigRepo::new(official_db_pool.clone());
         let sandbox_config_repo = SandboxConfigRepo::new(official_db_pool.clone());
         (
             WeatherQueryServiceImpl::with_repo(weather_repo.clone()),
