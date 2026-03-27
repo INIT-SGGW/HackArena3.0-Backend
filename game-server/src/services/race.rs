@@ -1372,12 +1372,24 @@ async fn run_frontend_spectator_stream(
             None
         };
         for entry in frame_cars {
+            let current_lap_elapsed_ms = entry.race_metrics.and_then(|metrics| {
+                let lap_is_active = metrics.completed_laps > 0
+                    || metrics.lap_progress_m > 0.0
+                    || metrics.current_lap_time_ms > 0;
+                lap_is_active.then_some(metrics.current_lap_time_ms)
+            });
+            let last_lap_time_ms = entry
+                .race_metrics
+                .and_then(|metrics| metrics.last_lap_time_ms);
             cars.push(frontend_full_state(
                 entry.public_car_id,
                 entry.state,
                 entry.last_client_seq,
                 &entry.pit_state,
                 entry.controls_input,
+                current_lap_elapsed_ms,
+                last_lap_time_ms,
+                entry.best_lap_time_ms,
             ));
         }
 

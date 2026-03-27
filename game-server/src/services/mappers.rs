@@ -214,6 +214,9 @@ pub(crate) fn frontend_full_state(
     last_applied_client_seq: u64,
     pit_state: &RuntimePitStateSnapshot,
     controls_input: RuntimeControlInputSnapshot,
+    current_lap_elapsed_ms: Option<u32>,
+    last_lap_time_ms: Option<u32>,
+    best_lap_time_ms: Option<u32>,
 ) -> FrontendCarFullState {
     FrontendCarFullState {
         car_id,
@@ -231,6 +234,9 @@ pub(crate) fn frontend_full_state(
         frontend_next_pit_tire_override: runtime_tire_type_to_proto(
             pit_state.frontend_next_pit_tire_override,
         ),
+        current_lap_elapsed_ms,
+        last_lap_time_ms,
+        best_lap_time_ms,
     }
 }
 

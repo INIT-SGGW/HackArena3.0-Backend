@@ -27,6 +27,7 @@ pub struct RuntimeCarFrame {
     pub target: EngineCommandTarget,
     pub state: VehicleState,
     pub race_metrics: Option<VehicleRaceMetrics>,
+    pub best_lap_time_ms: Option<u32>,
     pub last_client_seq: u64,
     pub identity: Option<RuntimeCarIdentity>,
     pub pit_state: RuntimePitStateSnapshot,
@@ -66,6 +67,9 @@ struct FrameCollectorCache {
     official_lap_length_m: Option<f32>,
     // sandbox_id -> (map_id, lap_length_m)
     sandbox_lap_length_m: HashMap<String, (String, f32)>,
+    #[cfg(feature = "official")]
+    // public_car_id -> best completed lap in current runtime session.
+    best_lap_time_ms: HashMap<u64, u32>,
 }
 
 pub fn spawn_frame_hub(
@@ -239,10 +243,12 @@ async fn collect_frame(
     for public_car_id in runtime_store.known_car_ids() {
         let Some(target) = runtime_store.car_target(public_car_id) else {
             runtime_store.remove_car(public_car_id);
+            invalidate_best_lap_cache(cache, public_car_id);
             continue;
         };
         let Some(engine_car_id) = runtime_store.car_engine_id(public_car_id) else {
             runtime_store.remove_car(public_car_id);
+            invalidate_best_lap_cache(cache, public_car_id);
             continue;
         };
 
@@ -253,6 +259,7 @@ async fn collect_frame(
             Ok(state) => state,
             Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
                 runtime_store.remove_car(public_car_id);
+                invalidate_best_lap_cache(cache, public_car_id);
                 continue;
             }
             Err(err) => {
@@ -280,6 +287,7 @@ async fn collect_frame(
                     }
                     Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
                         runtime_store.remove_car(public_car_id);
+                        invalidate_best_lap_cache(cache, public_car_id);
                         continue;
                     }
                     Err(err) => {
@@ -301,6 +309,24 @@ async fn collect_frame(
         };
 
         #[cfg(feature = "official")]
+        let best_lap_time_ms = {
+            if let Some(last_lap_time_ms) =
+                race_metrics.and_then(|metrics| metrics.last_lap_time_ms)
+            {
+                let current_best = cache.best_lap_time_ms.get(&public_car_id).copied();
+                let next_best = current_best
+                    .map(|best_so_far| best_so_far.min(last_lap_time_ms))
+                    .unwrap_or(last_lap_time_ms);
+                cache.best_lap_time_ms.insert(public_car_id, next_best);
+                Some(next_best)
+            } else {
+                cache.best_lap_time_ms.get(&public_car_id).copied()
+            }
+        };
+        #[cfg(not(feature = "official"))]
+        let best_lap_time_ms = None;
+
+        #[cfg(feature = "official")]
         {
             let in_stationary_fix = state.pitstop_state.has_zone(PitstopZone::Fix)
                 && state.pitstop_state.wheels_in_pitstop == 4
@@ -320,6 +346,7 @@ async fn collect_frame(
                             .mark_pit_fix_tire_applied(public_car_id, desired_tire_type),
                         Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
                             runtime_store.remove_car(public_car_id);
+                            invalidate_best_lap_cache(cache, public_car_id);
                             continue;
                         }
                         Err(err) => {
@@ -389,6 +416,7 @@ async fn collect_frame(
                 target,
                 state,
                 race_metrics,
+                best_lap_time_ms,
                 last_client_seq: runtime_store.car_last_client_seq(public_car_id),
                 identity: runtime_store.car_identity(public_car_id),
                 pit_state,
@@ -405,6 +433,17 @@ fn current_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn invalidate_best_lap_cache(cache: &mut FrameCollectorCache, car_id: u64) {
+    #[cfg(feature = "official")]
+    {
+        cache.best_lap_time_ms.remove(&car_id);
+    }
+    #[cfg(not(feature = "official"))]
+    {
+        let _ = (cache, car_id);
+    }
 }
 
 #[cfg(feature = "official")]
