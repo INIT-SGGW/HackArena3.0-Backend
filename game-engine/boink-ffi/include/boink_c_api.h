@@ -34,7 +34,7 @@
 
 #define BOINK_C_API_VERSION_MINOR 17
 
-#define BOINK_C_API_VERSION_PATCH 0
+#define BOINK_C_API_VERSION_PATCH 7
 
 /**
  * Indicates successful operation.
@@ -1191,6 +1191,26 @@ BOINK_API int boink_set_vehicle_to_pitstop(BoinkHandle h, uint64_t vehicle_id);
 BOINK_API int boink_set_vehicle_tyre_type(BoinkHandle h,
                                        uint64_t vehicle_id,
                                        enum BoinkTyreType tyre_type);
+
+/**
+ * Forces the tyre compound/type for a specific vehicle.
+ *
+ * This immediately updates the vehicle's tyres in the simulation.
+ *
+ * Parameters:
+ * - `h` - handle to a valid race.
+ * - `vehicle_id` - identifier of the vehicle.
+ * - `tyre_type` - tyre compound/type to apply.
+ *
+ * Returns:
+ * - `BOINK_OK` on success.
+ * - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+ * - `BOINK_CONDITION_NOT_MET` when the vehicle was not in the pitstop fix zone or was not stationary.
+ * - Another error code for other failures.
+ */
+BOINK_API int boink_force_set_vehicle_tyre_type(BoinkHandle h,
+                                             uint64_t vehicle_id,
+                                             enum BoinkTyreType tyre_type);
 
 /**
  * Sets the world-space position of a vehicle at a selected starting position.

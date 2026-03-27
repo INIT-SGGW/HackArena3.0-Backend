@@ -14,7 +14,7 @@ use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
 pub const BOINK_C_API_VERSION_MINOR: c_uint = 17;
-pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 7;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
@@ -887,6 +887,26 @@ unsafe extern "C" {
     /// - `BOINK_CONDITION_NOT_MET` when the vehicle was not in the pitstop fix zone or was not stationary.
     /// - Another error code for other failures.
     pub fn boink_set_vehicle_tyre_type(
+        h: BoinkHandle,
+        vehicle_id: u64,
+        tyre_type: BoinkTyreType,
+    ) -> c_int;
+
+    /// Forces the tyre compound/type for a specific vehicle.
+    ///
+    /// This immediately updates the vehicle's tyres in the simulation.
+    ///
+    /// Parameters:
+    /// - `h` - handle to a valid race.
+    /// - `vehicle_id` - identifier of the vehicle.
+    /// - `tyre_type` - tyre compound/type to apply.
+    ///
+    /// Returns:
+    /// - `BOINK_OK` on success.
+    /// - `BOINK_ERR_NOT_FOUND` if the vehicle does not exist.
+    /// - `BOINK_CONDITION_NOT_MET` when the vehicle was not in the pitstop fix zone or was not stationary.
+    /// - Another error code for other failures.
+    pub fn boink_force_set_vehicle_tyre_type(
         h: BoinkHandle,
         vehicle_id: u64,
         tyre_type: BoinkTyreType,
