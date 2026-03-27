@@ -108,6 +108,8 @@ pub struct Config {
     #[cfg(feature = "official")]
     pub wrapper_csharp_gh_repo: String,
     #[cfg(feature = "official")]
+    pub wrapper_typescript_gh_repo: String,
+    #[cfg(feature = "official")]
     pub gh_token: Option<String>,
 }
 
@@ -336,6 +338,9 @@ impl Config {
         let wrapper_csharp_gh_repo = read_env_string("WRAPPER_CSHARP_GH_REPO")
             .ok_or("WRAPPER_CSHARP_GH_REPO must be set for official backend")?;
         #[cfg(feature = "official")]
+        let wrapper_typescript_gh_repo = read_env_string("WRAPPER_TYPESCRIPT_GH_REPO")
+            .ok_or("WRAPPER_TYPESCRIPT_GH_REPO must be set for official backend")?;
+        #[cfg(feature = "official")]
         let gh_token = read_env_string("GH_TOKEN");
         #[cfg(feature = "official")]
         let submission_archive_max_mb = parse_u32_env("SUBMISSION_ARCHIVE_MAX_MB")?
@@ -414,6 +419,8 @@ impl Config {
             wrapper_python_gh_repo,
             #[cfg(feature = "official")]
             wrapper_csharp_gh_repo,
+            #[cfg(feature = "official")]
+            wrapper_typescript_gh_repo,
             #[cfg(feature = "official")]
             gh_token,
         })

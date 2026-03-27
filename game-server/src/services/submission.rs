@@ -87,6 +87,7 @@ const REGISTRY_API_TIMEOUT: Duration = Duration::from_secs(10);
 const REGISTRY_MANIFEST_V2_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json";
 const REGISTRY_DIGEST_HEADER: &str = "docker-content-digest";
 const DEFAULT_CSHARP_DOTNET_RUNTIME_VERSION: &str = "8.0";
+const DEFAULT_TYPESCRIPT_NODE_RUNTIME_VERSION: &str = "20";
 
 #[derive(Debug, Clone)]
 pub(crate) struct SubmissionBuildJob {
@@ -173,9 +174,18 @@ struct CsharpRunConfig {
 }
 
 #[derive(Debug, Clone)]
+struct TypescriptRunConfig {
+    entrypoint: Vec<String>,
+    source_dir: String,
+    runtime_version: String,
+    entrypoint_from_manifest: bool,
+}
+
+#[derive(Debug, Clone)]
 enum BuildContextPreparation {
     Python(PythonRunConfig),
     Csharp(CsharpRunConfig),
+    Typescript(TypescriptRunConfig),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1292,9 +1302,12 @@ impl SubmissionService for SubmissionServiceImpl {
         let req = request.into_inner();
         let wrapper_kind = WrapperKind::try_from(req.wrapper_kind)
             .map_err(|_| Status::invalid_argument("invalid wrapper_kind"))?;
-        if !matches!(wrapper_kind, WrapperKind::Python | WrapperKind::Csharp) {
+        if !matches!(
+            wrapper_kind,
+            WrapperKind::Python | WrapperKind::Csharp | WrapperKind::JsTs
+        ) {
             return Err(Status::invalid_argument(
-                "only WRAPPER_KIND_PYTHON and WRAPPER_KIND_CSHARP are supported in MVP",
+                "only WRAPPER_KIND_PYTHON, WRAPPER_KIND_CSHARP and WRAPPER_KIND_JS_TS are supported in MVP",
             ));
         }
 
@@ -2049,6 +2062,27 @@ async fn run_remote_build_pipeline(
             )
             .await?;
         }
+        BuildContextPreparation::Typescript(run_config) => {
+            emit_build_log_line(
+                events_tx,
+                format!(
+                    "[context/ts] resolved run config: source_dir={}, runtime_version={}, entrypoint={:?}, from_manifest={}",
+                    run_config.source_dir,
+                    run_config.runtime_version,
+                    run_config.entrypoint,
+                    run_config.entrypoint_from_manifest
+                ),
+            )
+            .await;
+            prepare_typescript_wrapper_package(
+                cfg,
+                &job.wrapper_version,
+                &context_dir,
+                run_config,
+                events_tx,
+            )
+            .await?;
+        }
     }
 
     let local_context_tar = temp_dir.path().join("context.tar.gz");
@@ -2509,6 +2543,66 @@ async fn prepare_csharp_wrapper_package(
     Ok(())
 }
 
+async fn prepare_typescript_wrapper_package(
+    cfg: &Config,
+    wrapper_version: &str,
+    context_dir: &Path,
+    run_config: &TypescriptRunConfig,
+    events_tx: &mpsc::Sender<Result<SubmitBuildStreamResponse, Status>>,
+) -> anyhow::Result<()> {
+    emit_build_log_line(events_tx, "[wrapper-fetch/ts] resolving release asset").await;
+    let (release_tag, asset_version) = normalize_wrapper_version(wrapper_version)?;
+    let release =
+        fetch_github_release_by_tag(cfg, &cfg.wrapper_typescript_gh_repo, &release_tag).await?;
+    let asset = select_typescript_release_asset(release.assets, &asset_version, &release_tag)?;
+
+    emit_build_log_line(
+        events_tx,
+        format!(
+            "[wrapper-fetch/ts] downloading `{}` from {}/{}",
+            asset.name, cfg.wrapper_gh_owner, cfg.wrapper_typescript_gh_repo
+        ),
+    )
+    .await;
+
+    let package_bytes =
+        download_github_release_asset(cfg, &cfg.wrapper_typescript_gh_repo, &asset).await?;
+
+    let wrappers_dir = context_dir.join("wrappers");
+    fs::create_dir_all(&wrappers_dir).await.with_context(|| {
+        format!(
+            "failed to create wrappers directory {}",
+            wrappers_dir.display()
+        )
+    })?;
+    if asset.name.contains('/') || asset.name.contains('\\') {
+        bail!("wrapper-fetch: asset name contains invalid path separators");
+    }
+    let package_path = wrappers_dir.join(&asset.name);
+    fs::write(&package_path, package_bytes)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to write TypeScript wrapper package {}",
+                package_path.display()
+            )
+        })?;
+
+    let dockerfile_path = context_dir.join("Dockerfile");
+    let dockerfile = build_typescript_dockerfile(&asset.name, run_config)?;
+    fs::write(&dockerfile_path, dockerfile)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to write Dockerfile at {}",
+                dockerfile_path.display()
+            )
+        })?;
+
+    emit_build_log_line(events_tx, "[wrapper-fetch/ts] wrapper package prepared").await;
+    Ok(())
+}
+
 async fn fetch_github_release_by_tag(
     cfg: &Config,
     repo: &str,
@@ -2631,6 +2725,39 @@ fn select_csharp_release_asset(
     }
 }
 
+fn select_typescript_release_asset(
+    assets: Vec<GitHubReleaseAsset>,
+    asset_version: &str,
+    release_tag: &str,
+) -> anyhow::Result<GitHubReleaseAsset> {
+    let expected_name = format!("hackarena3-wrapper-ts-{asset_version}.tgz");
+    let mut matches: Vec<GitHubReleaseAsset> = assets
+        .into_iter()
+        .filter(|entry| entry.name.eq_ignore_ascii_case(&expected_name))
+        .collect();
+
+    match matches.len() {
+        0 => bail!(
+            "wrapper-fetch: release `{}` does not contain TypeScript package `{}`",
+            release_tag,
+            expected_name
+        ),
+        1 => Ok(matches.swap_remove(0)),
+        _ => {
+            let candidates = matches
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "wrapper-fetch: release `{}` has multiple matching TypeScript packages: {}",
+                release_tag,
+                candidates
+            )
+        }
+    }
+}
+
 fn normalize_wrapper_version(raw: &str) -> anyhow::Result<(String, String)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2717,6 +2844,53 @@ ENTRYPOINT {cmd_json}
     ))
 }
 
+fn build_typescript_dockerfile(
+    package_file_name: &str,
+    run_config: &TypescriptRunConfig,
+) -> anyhow::Result<String> {
+    if run_config.entrypoint.is_empty() {
+        bail!("manifest run.entrypoint must be non-empty");
+    }
+    let entrypoint_json = serde_json::to_string(&run_config.entrypoint)
+        .context("failed to serialize manifest run.entrypoint to Docker ENTRYPOINT")?;
+    let fallback_output_guard = if run_config.entrypoint_from_manifest {
+        String::new()
+    } else {
+        r#"RUN entrypoint_candidate="$( \
+    if [ -f /app/user/dist/main.js ]; then printf '/app/user/dist/main.js'; \
+    elif [ -f /app/user/dist/src/main.js ]; then printf '/app/user/dist/src/main.js'; \
+    elif [ -f /app/user/dist/index.js ]; then printf '/app/user/dist/index.js'; \
+    elif [ -f /app/user/dist/src/index.js ]; then printf '/app/user/dist/src/index.js'; \
+    elif [ -f /app/user/dist/bot.js ]; then printf '/app/user/dist/bot.js'; \
+    elif [ -f /app/user/dist/src/bot.js ]; then printf '/app/user/dist/src/bot.js'; \
+    elif [ -f /app/user/build/main.js ]; then printf '/app/user/build/main.js'; \
+    elif [ -f /app/user/build/src/main.js ]; then printf '/app/user/build/src/main.js'; \
+    elif [ -f /app/user/build/index.js ]; then printf '/app/user/build/index.js'; \
+    elif [ -f /app/user/build/src/index.js ]; then printf '/app/user/build/src/index.js'; \
+    elif [ -f /app/user/build/bot.js ]; then printf '/app/user/build/bot.js'; \
+    elif [ -f /app/user/build/src/bot.js ]; then printf '/app/user/build/src/bot.js'; \
+    else find /app/user/dist /app/user/build -type f -name '*.js' 2>/dev/null | sort | head -n 1; fi)" \
+    && test -n "$entrypoint_candidate" \
+    || (echo "build failed: cannot resolve default TypeScript output (.js) under /app/user/dist or /app/user/build" && exit 1)
+"#
+        .to_string()
+    };
+
+    Ok(format!(
+        r#"FROM node:{runtime_version}
+WORKDIR /app/user
+COPY wrappers/{package_file_name} /app/wrappers/{package_file_name}
+COPY user /app/user
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+RUN npm install --no-save /app/wrappers/{package_file_name}
+RUN npm run build
+{fallback_output_guard}ENTRYPOINT {entrypoint_json}
+"#,
+        runtime_version = run_config.runtime_version,
+        fallback_output_guard = fallback_output_guard
+    ))
+}
+
 fn github_release_error_message(status: u16, release_tag: &str) -> String {
     match status {
         401 | 403 => "wrapper-fetch: GitHub token missing or insufficient permissions".to_string(),
@@ -2764,6 +2938,10 @@ fn prepare_build_context(
         WrapperKind::Csharp => {
             let run_config = resolve_csharp_run_config(&user_dir, &extracted_entries)?;
             Ok(BuildContextPreparation::Csharp(run_config))
+        }
+        WrapperKind::JsTs => {
+            let run_config = resolve_typescript_run_config(&user_dir, &extracted_entries)?;
+            Ok(BuildContextPreparation::Typescript(run_config))
         }
         _ => bail!("unsupported wrapper_kind in build worker: {wrapper_kind:?}"),
     }
@@ -2904,6 +3082,82 @@ fn resolve_csharp_run_config(
     })
 }
 
+fn resolve_typescript_run_config(
+    user_dir: &Path,
+    extracted_entries: &[String],
+) -> anyhow::Result<TypescriptRunConfig> {
+    let mut source_dir = "src".to_string();
+    let mut entrypoint_from_manifest = false;
+    let mut manifest_entrypoint: Option<Vec<String>> = None;
+    let mut runtime_version: Option<String> = None;
+    if let Some(manifest) = read_wrapper_manifest(user_dir)? {
+        if let Some(run) = manifest.run {
+            if let Some(source_dir_raw) = run.source_dir {
+                source_dir = normalize_manifest_source_dir(&source_dir_raw)?;
+            }
+            if let Some(entrypoint) = run.entrypoint {
+                manifest_entrypoint = Some(normalize_manifest_entrypoint(entrypoint)?);
+                entrypoint_from_manifest = true;
+            }
+        }
+        if let Some(runtime_version_raw) = manifest.runtime.and_then(|runtime| runtime.version) {
+            runtime_version = Some(normalize_node_runtime_version(&runtime_version_raw)?);
+        }
+    }
+    let runtime_version =
+        runtime_version.unwrap_or_else(|| DEFAULT_TYPESCRIPT_NODE_RUNTIME_VERSION.to_string());
+
+    let package_json_path = user_dir.join("package.json");
+    if !package_json_path.is_file() {
+        let sample = format_path_sample(extracted_entries, 20);
+        bail!(
+            "archive validation failed: expected `package.json` at archive root (mapped to build-context/user/package.json). Extracted entries sample: {}",
+            sample
+        );
+    }
+
+    let source_path = user_dir.join(&source_dir);
+    if !source_path.is_dir() {
+        bail!(
+            "run.source_dir `{}` does not exist in archive (expected `{}`)",
+            source_dir,
+            source_path.display()
+        );
+    }
+
+    let entrypoint = if let Some(entrypoint) = manifest_entrypoint {
+        entrypoint
+    } else {
+        vec![
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            "entrypoint_candidate=\"\"; \
+if [ -f /app/user/dist/main.js ]; then entrypoint_candidate=/app/user/dist/main.js; \
+elif [ -f /app/user/dist/src/main.js ]; then entrypoint_candidate=/app/user/dist/src/main.js; \
+elif [ -f /app/user/dist/index.js ]; then entrypoint_candidate=/app/user/dist/index.js; \
+elif [ -f /app/user/dist/src/index.js ]; then entrypoint_candidate=/app/user/dist/src/index.js; \
+elif [ -f /app/user/dist/bot.js ]; then entrypoint_candidate=/app/user/dist/bot.js; \
+elif [ -f /app/user/dist/src/bot.js ]; then entrypoint_candidate=/app/user/dist/src/bot.js; \
+elif [ -f /app/user/build/main.js ]; then entrypoint_candidate=/app/user/build/main.js; \
+elif [ -f /app/user/build/src/main.js ]; then entrypoint_candidate=/app/user/build/src/main.js; \
+elif [ -f /app/user/build/index.js ]; then entrypoint_candidate=/app/user/build/index.js; \
+elif [ -f /app/user/build/src/index.js ]; then entrypoint_candidate=/app/user/build/src/index.js; \
+elif [ -f /app/user/build/bot.js ]; then entrypoint_candidate=/app/user/build/bot.js; \
+elif [ -f /app/user/build/src/bot.js ]; then entrypoint_candidate=/app/user/build/src/bot.js; \
+else entrypoint_candidate=$(find /app/user/dist /app/user/build -type f -name '*.js' 2>/dev/null | sort | head -n 1); fi; \
+if [ -n \"$entrypoint_candidate\" ]; then exec node \"$entrypoint_candidate\"; fi; \
+echo \"runtime error: cannot resolve default TypeScript entrypoint under /app/user/dist or /app/user/build\"; exit 1".to_string(),
+        ]
+    };
+
+    Ok(TypescriptRunConfig {
+        entrypoint,
+        source_dir,
+        runtime_version,
+        entrypoint_from_manifest,
+    })
+}
+
 fn read_wrapper_manifest(user_dir: &Path) -> anyhow::Result<Option<WrapperManifestToml>> {
     let manifest_path = user_dir.join("manifest.toml");
     if !manifest_path.is_file() {
@@ -2988,6 +3242,20 @@ fn normalize_manifest_source_dir(raw: &str) -> anyhow::Result<String> {
 }
 
 fn normalize_dotnet_runtime_version(raw: &str) -> anyhow::Result<String> {
+    let version = raw.trim();
+    if version.is_empty() {
+        bail!("manifest runtime.version must not be empty when provided");
+    }
+    if !version
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-')
+    {
+        bail!("manifest runtime.version contains unsupported characters");
+    }
+    Ok(version.to_string())
+}
+
+fn normalize_node_runtime_version(raw: &str) -> anyhow::Result<String> {
     let version = raw.trim();
     if version.is_empty() {
         bail!("manifest runtime.version must not be empty when provided");
@@ -3817,17 +4085,33 @@ async fn emit_build_finished(
 }
 
 fn clip_for_error(value: &str) -> String {
-    const LIMIT: usize = 800;
+    const MAX_CHARS: usize = 4000;
+    const HEAD_CHARS: usize = 2200;
+    const TAIL_CHARS: usize = 1600;
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return "<empty>".to_string();
     }
 
-    let mut clipped = trimmed.chars().take(LIMIT).collect::<String>();
-    if trimmed.chars().count() > LIMIT {
-        clipped.push_str("...");
+    let total_chars = trimmed.chars().count();
+    if total_chars <= MAX_CHARS {
+        return trimmed.to_string();
     }
-    clipped
+
+    let head = trimmed.chars().take(HEAD_CHARS).collect::<String>();
+    let tail = trimmed
+        .chars()
+        .rev()
+        .take(TAIL_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+
+    format!(
+        "{head}\n...[truncated {} chars]...\n{tail}",
+        total_chars.saturating_sub(HEAD_CHARS + TAIL_CHARS)
+    )
 }
 
 fn attach_auth_cookie<T>(request: &mut Request<T>, token: &str) -> Result<(), Status> {
