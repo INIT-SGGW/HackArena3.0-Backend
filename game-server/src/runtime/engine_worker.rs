@@ -1090,15 +1090,31 @@ async fn handle_command(
 ) -> Result<(), EngineWorkerError> {
     match cmd {
         EngineCommand::SpawnCar { target, reply_tx } => {
+            #[cfg(feature = "official")]
+            let target_for_log = target.clone();
             let result = with_target_slot_mut(
                 &target,
                 runtime_state,
                 official_engine,
                 sandbox_engines,
                 |slot| {
-                    slot.engine
+                    let car_id = slot
+                        .engine
                         .spawn_vehicle()
-                        .map_err(EngineWorkerError::Engine)
+                        .map_err(EngineWorkerError::Engine)?;
+                    #[cfg(feature = "official")]
+                    if let Err(err) = slot
+                        .engine
+                        .force_set_vehicle_tyre_type(car_id, TyreType::Hard)
+                    {
+                        tracing::warn!(
+                            car_id,
+                            target = ?target_for_log,
+                            error = %err,
+                            "engine worker: failed to apply default HARD tyre after spawn"
+                        );
+                    }
+                    Ok(car_id)
                 },
             )
             .await;

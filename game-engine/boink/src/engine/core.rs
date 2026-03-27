@@ -491,6 +491,38 @@ impl Engine {
         }
     }
 
+    /// Forces the tyre compound for the specified vehicle.
+    ///
+    /// Returns [`Error::ConditionNotMet`](crate::Error::ConditionNotMet) when
+    /// native preconditions are not satisfied (for example, vehicle not in fix zone or not stationary).
+    #[instrument(skip(self))]
+    pub fn force_set_vehicle_tyre_type(
+        &mut self,
+        vehicle_id: u64,
+        tyre_type: TyreType,
+    ) -> Result<()> {
+        let ffi_tyre_type = tyre_type.to_ffi();
+
+        tracing::debug!(vehicle_id, ?tyre_type, "boink_force_set_vehicle_tyre_type");
+        let code = unsafe {
+            sys::boink_force_set_vehicle_tyre_type(self.handle, vehicle_id, ffi_tyre_type)
+        };
+        tracing::debug!(
+            code,
+            vehicle_id,
+            ?tyre_type,
+            "boink_force_set_vehicle_tyre_type result"
+        );
+        if code == sys::BOINK_OK {
+            Ok(())
+        } else {
+            Err(Error::from_ffi_status(
+                code,
+                "boink_force_set_vehicle_tyre_type",
+            ))
+        }
+    }
+
     /// Retrieves the width and depth (length) of the specified vehicle.
     #[instrument(skip(self))]
     pub fn get_vehicle_dimensions(&self, vehicle_id: u64) -> Result<(f32, f32)> {
