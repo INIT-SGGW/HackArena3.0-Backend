@@ -2093,7 +2093,7 @@ fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError>
         wheel_radius: 0.38,
         suspension_rest_length: 0.01,
         mass: 800.0,
-        max_steer_angle_deg: 30.0,
+        max_steer_angle_deg: 20.0,
     };
 
     let builder =
