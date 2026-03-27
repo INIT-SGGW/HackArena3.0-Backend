@@ -82,6 +82,7 @@ pub struct RuntimePitStateSnapshot {
     pub last_pit_time_ms: u64,
     pub last_pit_source: RuntimePitEntrySource,
     pub last_pit_lap: u32,
+    pub frontend_next_pit_tire_override: RuntimePitTireType,
     pub next_pit_tire_type: RuntimePitTireType,
     pub history: Vec<RuntimePitHistoryEntry>,
 }
@@ -146,7 +147,13 @@ impl RuntimePitState {
             last_pit_time_ms: self.last_pit_time_ms,
             last_pit_source: self.last_pit_source,
             last_pit_lap: self.last_pit_lap,
-            next_pit_tire_type: self.active_next_tire_type,
+            frontend_next_pit_tire_override: match self.next_tire_mode {
+                RuntimeNextTireMode::Auto => RuntimePitTireType::Unspecified,
+                RuntimeNextTireMode::Manual => self.active_next_tire_type,
+            },
+            next_pit_tire_type: self
+                .bot_cached_next_tire_type
+                .unwrap_or(RuntimePitTireType::Unspecified),
             history: self.history.iter().copied().collect(),
         }
     }

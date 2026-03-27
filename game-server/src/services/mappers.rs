@@ -228,6 +228,9 @@ pub(crate) fn frontend_full_state(
         input_brake: controls_input.input_brake,
         current_brake_balancer: controls_input.current_brake_balancer,
         current_differential_lock: controls_input.current_differential_lock,
+        frontend_next_pit_tire_override: runtime_tire_type_to_proto(
+            pit_state.frontend_next_pit_tire_override,
+        ),
     }
 }
 
