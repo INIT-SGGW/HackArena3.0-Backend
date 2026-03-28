@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(feature = "local")]
+use boink::model::TyreType as EngineTyreType;
 use boink::model::{Controls, GearShift as EngineGearShift};
 use proto::race::v1::{
     CarDimensions, LocalSandboxJoinRequest, LocalSandboxJoinResponse, ParticipantBootstrap,
@@ -717,6 +719,16 @@ fn runtime_tire_type_from_proto(raw: i32) -> Result<RuntimePitTireType, ()> {
     })
 }
 
+#[cfg(feature = "local")]
+fn runtime_tire_type_to_engine_tire_type(value: RuntimePitTireType) -> Option<EngineTyreType> {
+    Some(match value {
+        RuntimePitTireType::Unspecified => return None,
+        RuntimePitTireType::Hard => EngineTyreType::Hard,
+        RuntimePitTireType::Soft => EngineTyreType::Soft,
+        RuntimePitTireType::Wet => EngineTyreType::Wet,
+    })
+}
+
 async fn run_participant_stream(
     engine: EngineClient,
     frame_hub: FrameHub,
@@ -1264,16 +1276,60 @@ async fn run_participant_stream(
                         let applies_from_tick = frame_hub.latest().tick;
                         let ack = match runtime_tire_type_from_proto(command.next_tire_type) {
                             Ok(next_tire_type) => {
-                                runtime_store
-                                    .set_next_tire_from_bot(self_public_car_id, next_tire_type);
-                                participant_command_ack(
-                                    command.client_seq,
-                                    ParticipantCommandType::SetNextPitTireType,
-                                    ParticipantCommandStatus::Accepted,
-                                    applies_from_tick,
-                                    ParticipantCommandRejectReason::Unspecified,
-                                    0,
-                                )
+                                #[cfg(feature = "local")]
+                                {
+                                    if let Some(engine_tire_type) =
+                                        runtime_tire_type_to_engine_tire_type(next_tire_type)
+                                        && let Err(err) = engine
+                                            .force_set_car_tyre_type_in(
+                                                self_target.clone(),
+                                                self_engine_car_id,
+                                                engine_tire_type,
+                                            )
+                                            .await
+                                    {
+                                        tracing::warn!(
+                                            stream_id,
+                                            car_id = self_public_car_id,
+                                            target = ?self_target,
+                                            error = %err,
+                                            ?engine_tire_type,
+                                            "participant set_next_pit_tire_type force-set rejected in local mode"
+                                        );
+                                        participant_command_ack(
+                                            command.client_seq,
+                                            ParticipantCommandType::SetNextPitTireType,
+                                            ParticipantCommandStatus::Rejected,
+                                            applies_from_tick,
+                                            ParticipantCommandRejectReason::NotAllowed,
+                                            0,
+                                        )
+                                    } else {
+                                        runtime_store
+                                            .set_next_tire_from_bot(self_public_car_id, next_tire_type);
+                                        participant_command_ack(
+                                            command.client_seq,
+                                            ParticipantCommandType::SetNextPitTireType,
+                                            ParticipantCommandStatus::Accepted,
+                                            applies_from_tick,
+                                            ParticipantCommandRejectReason::Unspecified,
+                                            0,
+                                        )
+                                    }
+                                }
+                                #[cfg(feature = "official")]
+                                {
+                                    runtime_store
+                                        .set_next_tire_from_bot(self_public_car_id, next_tire_type);
+                                    participant_command_ack(
+                                        command.client_seq,
+                                        ParticipantCommandType::SetNextPitTireType,
+                                        ParticipantCommandStatus::Accepted,
+                                        applies_from_tick,
+                                        ParticipantCommandRejectReason::Unspecified,
+                                        0,
+                                    )
+                                }
                             }
                             Err(()) => participant_command_ack(
                                 command.client_seq,

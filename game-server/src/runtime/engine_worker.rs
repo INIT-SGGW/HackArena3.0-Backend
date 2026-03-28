@@ -479,6 +479,29 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Force-applies tyre compound for a vehicle in target runtime world.
+    pub async fn force_set_car_tyre_type_in(
+        &self,
+        target: EngineCommandTarget,
+        car_id: u64,
+        tyre_type: TyreType,
+    ) -> Result<(), EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::ForceSetCarTyreType {
+                target,
+                car_id,
+                tyre_type,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Returns number of available start positions in target runtime world.
     pub async fn get_number_of_start_pos_in(
         &self,
@@ -1340,6 +1363,27 @@ async fn handle_command(
                 |slot| {
                     slot.engine
                         .set_vehicle_tyre_type(car_id, tyre_type)
+                        .map_err(EngineWorkerError::Engine)
+                },
+            )
+            .await;
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::ForceSetCarTyreType {
+            target,
+            car_id,
+            tyre_type,
+            reply_tx,
+        } => {
+            let result = with_target_slot_mut(
+                &target,
+                runtime_state,
+                official_engine,
+                sandbox_engines,
+                |slot| {
+                    slot.engine
+                        .force_set_vehicle_tyre_type(car_id, tyre_type)
                         .map_err(EngineWorkerError::Engine)
                 },
             )

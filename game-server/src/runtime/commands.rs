@@ -77,6 +77,12 @@ pub enum EngineCommand {
         tyre_type: TyreType,
         reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
     },
+    ForceSetCarTyreType {
+        target: EngineCommandTarget,
+        car_id: u64,
+        tyre_type: TyreType,
+        reply_tx: oneshot::Sender<Result<(), EngineWorkerError>>,
+    },
     GetNumberOfStartPos {
         target: EngineCommandTarget,
         reply_tx: oneshot::Sender<Result<u64, EngineWorkerError>>,
