@@ -82,6 +82,30 @@ build_binary() {
   cargo build -p game-server --bin "$bin_name" --features "$features" --release --target "$TARGET"
 }
 
+write_packaged_env() {
+  local package_root="$1"
+  cat > "$package_root/.env" <<'EOF'
+# Application environment: development | preprod | production
+APP_ENV=production
+
+# gRPC server listen address
+LISTEN_ADDR=0.0.0.0:50052
+
+# Logging
+RUST_LOG=warn,boink=info,tonic_web=info,game_server=info,game_engine=info,game_server::config=debug
+
+# Allowed CORS origins
+CORS_ALLOWED_ORIGINS=https://ha3-game.hackarena.pl
+
+API_URL=https://ha3-api.hackarena.pl
+
+# Game-token JWT settings used by `ha3-backend-local`
+HPS_ENDPOINT=https://platform-grpc.hackarena.pl
+GAME_JWT_LOCAL_AUDIENCE=ha3-local
+GAME_JWT_LOCAL_ISSUERS=ha3-dev-auth
+EOF
+}
+
 copy_required_files() {
   local package_root="$1"
   local bin_path="$2"
@@ -106,6 +130,8 @@ copy_required_files() {
     rm -rf "$assets_target/bolids"
     cp -R "$bolids_source" "$assets_target/bolids"
   fi
+
+  write_packaged_env "$package_root"
 }
 
 RESOLVED_VERSION="$VERSION"

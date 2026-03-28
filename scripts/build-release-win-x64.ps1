@@ -32,6 +32,35 @@ function Build-Binary {
     Invoke-Expression $cmd
 }
 
+function Write-PackagedEnv {
+    param(
+        [Parameter(Mandatory = $true)][string]$PackageRoot
+    )
+
+    $envContent = @'
+# Application environment: development | preprod | production
+APP_ENV=production
+
+# gRPC server listen address
+LISTEN_ADDR=0.0.0.0:50052
+
+# Logging
+RUST_LOG=warn,boink=info,tonic_web=info,game_server=info,game_engine=info,game_server::config=debug
+
+# Allowed CORS origins
+CORS_ALLOWED_ORIGINS=https://ha3-game.hackarena.pl
+
+API_URL=https://ha3-api.hackarena.pl
+
+# Game-token JWT settings used by `ha3-backend-local`
+HPS_ENDPOINT=https://platform-grpc.hackarena.pl
+GAME_JWT_LOCAL_AUDIENCE=ha3-local
+GAME_JWT_LOCAL_ISSUERS=ha3-dev-auth
+'@
+
+    Set-Content -Path (Join-Path $PackageRoot ".env") -Value $envContent -NoNewline
+}
+
 function Copy-RequiredFiles {
     param(
         [Parameter(Mandatory = $true)][string]$PackageRoot,
@@ -61,6 +90,8 @@ function Copy-RequiredFiles {
         New-Item -ItemType Directory -Force -Path $assetsTarget | Out-Null
         Copy-Item $bolidsSource -Destination (Join-Path $assetsTarget "bolids") -Recurse -Force
     }
+
+    Write-PackagedEnv -PackageRoot $PackageRoot
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
