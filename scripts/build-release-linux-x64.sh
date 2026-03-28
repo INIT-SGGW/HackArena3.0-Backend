@@ -129,6 +129,10 @@ copy_required_files() {
       -exec cp -a {} "$package_root/" \;
   fi
 
+  if [[ -f "$package_root/libboink.so" && ! -e "$package_root/libboink.so.1" ]]; then
+    cp -f "$package_root/libboink.so" "$package_root/libboink.so.1"
+  fi
+
   local bolids_source="$REPO_ROOT/game-server/assets/bolids"
   if [[ -d "$bolids_source" ]]; then
     local assets_target="$package_root/assets"

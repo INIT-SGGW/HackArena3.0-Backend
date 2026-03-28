@@ -69,6 +69,7 @@ fn setup_linux(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
     // Make runtime loader search next to the executable in release artifacts.
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
     copy_runtime_lib(&lib_dir, "libboink.so");
+    copy_optional_runtime_lib(&lib_dir, "libboink.so.1");
 }
 
 fn setup_macos(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
@@ -81,6 +82,7 @@ fn setup_macos(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
     // Make runtime loader search next to the executable in release artifacts.
     println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     copy_runtime_lib(&lib_dir, "libboink.dylib");
+    copy_optional_runtime_lib(&lib_dir, "libboink.1.dylib");
 }
 
 fn determine_lib_dir(
@@ -128,6 +130,28 @@ fn copy_runtime_lib(lib_dir: &Path, file_name: &str) {
             );
             return;
         }
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("Unexpected OUT_DIR layout (target/<profile>/build/..)");
+
+    if let Err(err) = fs::copy(&source, profile_dir.join(file_name)) {
+        panic!(
+            "Failed to copy {} to {}: {}",
+            source.display(),
+            profile_dir.display(),
+            err
+        );
+    }
+}
+
+fn copy_optional_runtime_lib(lib_dir: &Path, file_name: &str) {
+    let source = lib_dir.join(file_name);
+    if !source.exists() {
+        return;
     }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
