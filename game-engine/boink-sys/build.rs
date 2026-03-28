@@ -66,6 +66,8 @@ fn setup_linux(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=boink");
+    // Make runtime loader search next to the executable in release artifacts.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
     copy_runtime_lib(&lib_dir, "libboink.so");
 }
 
@@ -76,6 +78,8 @@ fn setup_macos(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=boink");
+    // Make runtime loader search next to the executable in release artifacts.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     copy_runtime_lib(&lib_dir, "libboink.dylib");
 }
 

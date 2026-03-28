@@ -116,11 +116,17 @@ copy_required_files() {
   cp -f "$bin_path" "$package_root/"
 
   if [[ -d "$target_release_dir" ]]; then
-    find "$target_release_dir" -maxdepth 1 -type f -name "*.so" -exec cp -f {} "$package_root/" \;
+    find "$target_release_dir" -maxdepth 1 \
+      \( -type f -o -type l \) \
+      \( -name "*.so" -o -name "*.so.*" \) \
+      -exec cp -a {} "$package_root/" \;
   fi
 
   if [[ -d "$native_runtime_dir" ]]; then
-    find "$native_runtime_dir" -maxdepth 1 -type f -name "*.so" -exec cp -f {} "$package_root/" \;
+    find "$native_runtime_dir" -maxdepth 1 \
+      \( -type f -o -type l \) \
+      \( -name "*.so" -o -name "*.so.*" \) \
+      -exec cp -a {} "$package_root/" \;
   fi
 
   local bolids_source="$REPO_ROOT/game-server/assets/bolids"
