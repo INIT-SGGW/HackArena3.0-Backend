@@ -483,7 +483,24 @@ fn ha_auth_candidates() -> Vec<OsString> {
 
     #[cfg(target_os = "macos")]
     {
+        if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
+            candidates.push(
+                PathBuf::from(xdg_data_home)
+                    .join("hackarena")
+                    .join("bin")
+                    .join("ha-auth")
+                    .into_os_string(),
+            );
+        }
         if let Some(home) = home_dir() {
+            candidates.push(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("hackarena")
+                    .join("bin")
+                    .join("ha-auth")
+                    .into_os_string(),
+            );
             candidates.push(
                 home.join("Library")
                     .join("Application Support")
