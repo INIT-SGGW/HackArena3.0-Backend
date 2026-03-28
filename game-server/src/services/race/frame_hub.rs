@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use boink::error::Error as BoinkError;
 use boink::model::{Controls, Gear, GearShift, VehicleRaceMetrics, VehicleState};
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "local"))]
 use boink::model::{PitstopZone, TyreType};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -14,7 +14,7 @@ use crate::runtime::engine_worker::{
     EngineActivityKind, EngineClient, EngineCommandTarget, EngineRuntimeState, EngineWorkerError,
 };
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "local"))]
 use super::runtime_store::RuntimePitTireType;
 use super::runtime_store::{
     RaceRuntimeStore, RuntimeCarIdentity, RuntimeControlInputSnapshot, RuntimePitStateSnapshot,
@@ -372,6 +372,55 @@ async fn collect_frame(
             }
         }
 
+        #[cfg(feature = "local")]
+        {
+            if matches!(&target, EngineCommandTarget::Sandbox { .. }) {
+                let in_stationary_fix = state.pitstop_state.has_zone(PitstopZone::Fix)
+                    && state.pitstop_state.wheels_in_pitstop == 4
+                    && state.speed == 0.0;
+                let current_tire_type = runtime_tire_type_from_engine(state.tyre_type);
+                if let Some(desired_tire_type) = runtime_store.plan_pit_fix_tire_apply(
+                    public_car_id,
+                    current_tire_type,
+                    in_stationary_fix,
+                ) {
+                    if let Some(engine_tire_type) = engine_tire_type_from_runtime(desired_tire_type)
+                    {
+                        match engine
+                            .set_car_tyre_type_in(target.clone(), engine_car_id, engine_tire_type)
+                            .await
+                        {
+                            Ok(()) => runtime_store
+                                .mark_pit_fix_tire_applied(public_car_id, desired_tire_type),
+                            Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
+                                runtime_store.remove_car(public_car_id);
+                                invalidate_best_lap_cache(cache, public_car_id);
+                                continue;
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    public_car_id,
+                                    engine_car_id,
+                                    target = ?target,
+                                    desired_tire_type = ?desired_tire_type,
+                                    error = %err,
+                                    "frame hub: failed to apply local pit-fix tyre type"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            public_car_id,
+                            engine_car_id,
+                            target = ?target,
+                            desired_tire_type = ?desired_tire_type,
+                            "frame hub: skipped local pit-fix tyre apply for unspecified tyre type"
+                        );
+                    }
+                }
+            }
+        }
+
         let pit_state = runtime_store.update_pit_state_from_runtime(
             public_car_id,
             &state,
@@ -446,7 +495,7 @@ fn invalidate_best_lap_cache(cache: &mut FrameCollectorCache, car_id: u64) {
     }
 }
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "local"))]
 fn runtime_tire_type_from_engine(value: TyreType) -> RuntimePitTireType {
     match value {
         TyreType::Hard => RuntimePitTireType::Hard,
@@ -455,7 +504,7 @@ fn runtime_tire_type_from_engine(value: TyreType) -> RuntimePitTireType {
     }
 }
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "local"))]
 fn engine_tire_type_from_runtime(value: RuntimePitTireType) -> Option<TyreType> {
     match value {
         RuntimePitTireType::Hard => Some(TyreType::Hard),
