@@ -78,8 +78,15 @@ get_game_server_version() {
 build_binary() {
   local bin_name="$1"
   local features="$2"
+  local rpath_flag='-C link-arg=-Wl,-rpath,$ORIGIN'
+  local rustflags="${RUSTFLAGS:-}"
+  if [[ -n "$rustflags" ]]; then
+    rustflags="$rustflags $rpath_flag"
+  else
+    rustflags="$rpath_flag"
+  fi
   echo "==> cargo build -p game-server --bin $bin_name --features $features --release --target $TARGET"
-  cargo build -p game-server --bin "$bin_name" --features "$features" --release --target "$TARGET"
+  RUSTFLAGS="$rustflags" cargo build -p game-server --bin "$bin_name" --features "$features" --release --target "$TARGET"
 }
 
 write_packaged_env() {
@@ -106,11 +113,28 @@ GAME_JWT_LOCAL_ISSUERS=ha3-dev-auth
 EOF
 }
 
+write_launcher() {
+  local package_root="$1"
+  local bin_name="$2"
+  local launcher_path="$package_root/run-$bin_name.sh"
+  cat > "$launcher_path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="\$DIR:\${LD_LIBRARY_PATH:-}"
+export BOINK_NATIVE_LIB_DIR="\$DIR"
+exec "\$DIR/$bin_name" "\$@"
+EOF
+  chmod +x "$launcher_path"
+}
+
 copy_required_files() {
   local package_root="$1"
   local bin_path="$2"
   local target_release_dir="$3"
   local native_runtime_dir="$4"
+  local bin_name
+  bin_name="$(basename "$bin_path")"
 
   mkdir -p "$package_root"
   cp -f "$bin_path" "$package_root/"
@@ -142,6 +166,7 @@ copy_required_files() {
   fi
 
   write_packaged_env "$package_root"
+  write_launcher "$package_root" "$bin_name"
 }
 
 RESOLVED_VERSION="$VERSION"
