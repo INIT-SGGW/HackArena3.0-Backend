@@ -241,6 +241,74 @@ impl SubmissionRepo {
         Ok(())
     }
 
+    /// Returns persisted selected slot for team.
+    pub async fn get_selected_slot_index(&self, team_id: &str) -> anyhow::Result<Option<i16>> {
+        let value = sqlx::query_scalar::<_, i16>(
+            r#"
+            SELECT selected_slot_index
+            FROM team_selected_slots
+            WHERE team_id = $1
+            LIMIT 1
+            "#,
+        )
+        .bind(team_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(value)
+    }
+
+    /// Persists selected slot for team.
+    pub async fn upsert_selected_slot_index(
+        &self,
+        team_id: &str,
+        selected_slot_index: i16,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO team_selected_slots (team_id, selected_slot_index, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (team_id)
+            DO UPDATE SET selected_slot_index = EXCLUDED.selected_slot_index,
+                          updated_at = NOW()
+            "#,
+        )
+        .bind(team_id)
+        .bind(selected_slot_index)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Resolves selected slot with fallback policy:
+    /// persisted selected -> loaded slot -> lowest filled slot -> slot 1.
+    pub async fn resolve_selected_slot_index(
+        &self,
+        team_id: &str,
+        loaded_slot: Option<i16>,
+    ) -> anyhow::Result<i16> {
+        let persisted = self.get_selected_slot_index(team_id).await?;
+        let filled_slots = self
+            .list_filled_succeeded_slots(team_id)
+            .await?
+            .into_iter()
+            .map(|slot| slot.slot_index)
+            .collect::<Vec<_>>();
+
+        if let Some(slot) = persisted {
+            let is_visible = filled_slots.contains(&slot) || Some(slot) == loaded_slot;
+            if (1..=3).contains(&slot) && is_visible {
+                return Ok(slot);
+            }
+        }
+        if let Some(slot) = loaded_slot {
+            return Ok(slot);
+        }
+        if let Some(slot) = filled_slots.first().copied() {
+            return Ok(slot);
+        }
+        Ok(1)
+    }
+
     /// Returns only filled slots pointing to succeeded submissions.
     pub async fn list_filled_succeeded_slots(
         &self,

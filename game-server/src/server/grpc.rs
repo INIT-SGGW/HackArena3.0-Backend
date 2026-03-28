@@ -25,6 +25,8 @@ use proto::race::v1::track_service_server::TrackServiceServer;
 #[cfg(feature = "official")]
 use proto::submission::v1::official_sandbox_command_service_server::OfficialSandboxCommandServiceServer;
 #[cfg(feature = "official")]
+use proto::submission::v1::slot_command_service_server::SlotCommandServiceServer;
+#[cfg(feature = "official")]
 use proto::submission::v1::slot_query_service_server::SlotQueryServiceServer;
 #[cfg(feature = "official")]
 use proto::submission::v1::submission_service_server::SubmissionServiceServer;
@@ -81,8 +83,8 @@ use crate::services::sandbox_admin::SandboxAdminServiceImpl;
 #[cfg(feature = "official")]
 use crate::services::submission::{
     GameTokenIssuer, HpsTeamResolver, LogsAchievementGranter, OfficialSandboxCommandServiceImpl,
-    SlotQueryServiceImpl, SubmissionServiceImpl, WrapperAuthTokenIssuer,
-    new_official_sandbox_join_registry, spawn_submission_worker,
+    SlotCommandServiceImpl, SlotQueryServiceImpl, SubmissionServiceImpl, WrapperAuthTokenIssuer,
+    new_official_race_bot_registry, new_official_sandbox_join_registry, spawn_submission_worker,
 };
 use crate::services::track::TrackServiceImpl;
 #[cfg(feature = "local")]
@@ -165,6 +167,10 @@ pub async fn serve_grpc(
         .await;
     #[cfg(feature = "official")]
     health_reporter
+        .set_serving::<SlotCommandServiceServer<SlotCommandServiceImpl>>()
+        .await;
+    #[cfg(feature = "official")]
+    health_reporter
         .set_serving::<OfficialSandboxCommandServiceServer<OfficialSandboxCommandServiceImpl>>()
         .await;
 
@@ -214,6 +220,8 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let official_sandbox_joins = new_official_sandbox_join_registry();
     #[cfg(feature = "official")]
+    let official_race_bots = new_official_race_bot_registry();
+    #[cfg(feature = "official")]
     let race_config_repo = RaceConfigRepo::new(official_db_pool.clone());
     #[cfg(feature = "official")]
     let submission_impl = SubmissionServiceImpl::new(
@@ -228,8 +236,17 @@ pub async fn serve_grpc(
         submission_repo.clone(),
         token_validator.clone(),
         team_resolver.clone(),
+        engine.clone(),
         slot_updates_tx.clone(),
         official_sandbox_joins.clone(),
+        official_race_bots.clone(),
+    );
+    #[cfg(feature = "official")]
+    let slot_command_impl = SlotCommandServiceImpl::new(
+        submission_repo.clone(),
+        token_validator.clone(),
+        team_resolver.clone(),
+        slot_updates_tx.clone(),
     );
 
     #[cfg(feature = "official")]
@@ -252,15 +269,17 @@ pub async fn serve_grpc(
         submission_repo.clone(),
         token_validator.clone(),
         team_resolver.clone(),
-        game_token_issuer,
-        logs_achievement_granter,
-        wrapper_auth_token_issuer,
+        game_token_issuer.clone(),
+        logs_achievement_granter.clone(),
+        wrapper_auth_token_issuer.clone(),
         cfg.official_bot_backend_endpoint.clone(),
         engine.clone(),
         race_runtime_store.clone(),
         slot_updates_tx.clone(),
         official_sandbox_joins.clone(),
     );
+    #[cfg(feature = "official")]
+    official_sandbox_command_impl.spawn_slot_switch_poller();
     let (frame_hub, frame_hub_handle) = spawn_frame_hub(
         engine.clone(),
         race_runtime_store.clone(),
@@ -302,9 +321,23 @@ pub async fn serve_grpc(
         frame_hub.clone(),
         #[cfg(feature = "official")]
         official_sandbox_joins,
+        #[cfg(feature = "official")]
+        official_race_bots,
+        #[cfg(feature = "official")]
+        submission_repo.clone(),
+        #[cfg(feature = "official")]
+        game_token_issuer.clone(),
+        #[cfg(feature = "official")]
+        wrapper_auth_token_issuer.clone(),
+        #[cfg(feature = "official")]
+        cfg.official_bot_backend_endpoint.clone(),
+        #[cfg(feature = "official")]
+        slot_updates_tx.clone(),
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
     );
+    #[cfg(feature = "official")]
+    race_participant_impl.spawn_slot_switch_poller();
     let race_table_impl = RaceTableQueryServiceImpl::new(
         race_runtime_store.clone(),
         frame_hub.clone(),
@@ -447,6 +480,8 @@ pub async fn serve_grpc(
     let server = server.add_service(SubmissionServiceServer::new(submission_impl));
     #[cfg(feature = "official")]
     let server = server.add_service(SlotQueryServiceServer::new(slot_query_impl));
+    #[cfg(feature = "official")]
+    let server = server.add_service(SlotCommandServiceServer::new(slot_command_impl));
     #[cfg(feature = "official")]
     let server = server.add_service(OfficialSandboxCommandServiceServer::new(
         official_sandbox_command_impl,

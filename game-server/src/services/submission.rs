@@ -24,6 +24,7 @@ use proto::hackarena::platform::teams::v1::{
     GetEventTeamsRequest, GetTeamByUserRequest, Team, TeamEvent,
 };
 use proto::submission::v1::official_sandbox_command_service_server::OfficialSandboxCommandService;
+use proto::submission::v1::slot_command_service_server::SlotCommandService;
 use proto::submission::v1::slot_query_service_server::SlotQueryService;
 use proto::submission::v1::submission_service_server::SubmissionService;
 use proto::submission::v1::{
@@ -31,9 +32,10 @@ use proto::submission::v1::{
     GetSubmissionArchiveRequest, GetSubmissionArchiveResponse, GetSubmissionLogsRequest,
     GetSubmissionLogsResponse, JoinOfficialSandboxRequest, JoinOfficialSandboxResponse,
     LeaveOfficialSandboxRequest, LeaveOfficialSandboxResponse, ListRecentSubmissionsRequest,
-    ListRecentSubmissionsResponse, OfficialSandboxCommandStatus, RecentSubmissionDto, SlotDto,
-    SlotSummaryDto, StreamSlotsRequest, StreamSlotsResponse, SubmitBuildRequest,
-    SubmitBuildStreamResponse, WrapperKind, submit_build_stream_response,
+    ListRecentSubmissionsResponse, OfficialSandboxCommandStatus, RecentSubmissionDto,
+    SelectSlotRequest, SelectSlotResponse, SlotDto, SlotSummaryDto, StreamSlotsRequest,
+    StreamSlotsResponse, SubmitBuildRequest, SubmitBuildStreamResponse, WrapperKind,
+    submit_build_stream_response,
 };
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
@@ -55,7 +57,9 @@ use tonic::{Code, Request, Response, Status};
 use crate::auth::auth_claims::TokenValidator;
 use crate::config::Config;
 use crate::db::repos::submission::{NewSubmissionRecord, SubmissionRepo};
-use crate::runtime::engine_worker::{EngineClient, EngineCommandTarget, EngineWorkerError};
+use crate::runtime::engine_worker::{
+    EngineActivityKind, EngineClient, EngineCommandTarget, EngineWorkerError,
+};
 use crate::services::error_map::map_worker_err;
 use crate::services::log_redaction::redact_log_line;
 use crate::services::race::{RaceRuntimeStore, RuntimeCarIdentity};
@@ -114,6 +118,21 @@ pub(crate) struct TeamSandboxJoinState {
 pub(crate) type OfficialSandboxJoinRegistry = Arc<DashMap<String, TeamSandboxJoinState>>;
 
 pub(crate) fn new_official_sandbox_join_registry() -> OfficialSandboxJoinRegistry {
+    Arc::new(DashMap::new())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TeamOfficialRaceBotState {
+    pub(crate) public_car_id: u64,
+    pub(crate) engine_car_id: u64,
+    pub(crate) slot_index: i16,
+    pub(crate) container_name: String,
+    pub(crate) container_id: String,
+}
+
+pub(crate) type OfficialRaceBotRegistry = Arc<DashMap<String, TeamOfficialRaceBotState>>;
+
+pub(crate) fn new_official_race_bot_registry() -> OfficialRaceBotRegistry {
     Arc::new(DashMap::new())
 }
 
@@ -845,8 +864,19 @@ pub struct SlotQueryServiceImpl {
     repo: SubmissionRepo,
     token_validator: Arc<TokenValidator>,
     team_resolver: Arc<HpsTeamResolver>,
+    engine: EngineClient,
     slot_updates_tx: broadcast::Sender<String>,
     join_registry: OfficialSandboxJoinRegistry,
+    race_bot_registry: OfficialRaceBotRegistry,
+}
+
+/// gRPC SlotCommandService implementation.
+#[derive(Clone)]
+pub struct SlotCommandServiceImpl {
+    repo: SubmissionRepo,
+    token_validator: Arc<TokenValidator>,
+    team_resolver: Arc<HpsTeamResolver>,
+    slot_updates_tx: broadcast::Sender<String>,
 }
 
 /// gRPC OfficialSandboxCommandService implementation.
@@ -873,15 +903,35 @@ impl SlotQueryServiceImpl {
         repo: SubmissionRepo,
         token_validator: Arc<TokenValidator>,
         team_resolver: Arc<HpsTeamResolver>,
+        engine: EngineClient,
         slot_updates_tx: broadcast::Sender<String>,
         join_registry: OfficialSandboxJoinRegistry,
+        race_bot_registry: OfficialRaceBotRegistry,
+    ) -> Self {
+        Self {
+            repo,
+            token_validator,
+            team_resolver,
+            engine,
+            slot_updates_tx,
+            join_registry,
+            race_bot_registry,
+        }
+    }
+}
+
+impl SlotCommandServiceImpl {
+    pub(crate) fn new(
+        repo: SubmissionRepo,
+        token_validator: Arc<TokenValidator>,
+        team_resolver: Arc<HpsTeamResolver>,
+        slot_updates_tx: broadcast::Sender<String>,
     ) -> Self {
         Self {
             repo,
             token_validator,
             team_resolver,
             slot_updates_tx,
-            join_registry,
         }
     }
 }
@@ -920,8 +970,7 @@ impl OfficialSandboxCommandServiceImpl {
     }
 
     fn container_name_for_team(team_id: &str) -> anyhow::Result<String> {
-        let team_component = sanitize_tag_component(team_id)?;
-        Ok(format!("ha3-official-bot-team-{team_component}"))
+        official_bot_container_name_for_team(team_id)
     }
 
     fn team_logs_dir(&self, team_id: &str) -> PathBuf {
@@ -1288,6 +1337,140 @@ impl OfficialSandboxCommandServiceImpl {
             }
         });
     }
+
+    pub(crate) fn spawn_slot_switch_poller(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(300));
+            loop {
+                ticker.tick().await;
+                let team_ids: Vec<String> = service
+                    .join_registry
+                    .iter()
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                for team_id in team_ids {
+                    if let Err(err) = service
+                        .try_apply_pending_selected_slot_for_team(&team_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            team_id = %team_id,
+                            error = %err,
+                            "sandbox selected-slot switch attempt failed"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    async fn try_apply_pending_selected_slot_for_team(&self, team_id: &str) -> anyhow::Result<()> {
+        let _guard = self.join_command_lock.lock().await;
+        let Some(join_state) = self
+            .join_registry
+            .get(team_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return Ok(());
+        };
+        if !self
+            .runtime_store
+            .is_in_stationary_fix(join_state.public_car_id)
+        {
+            return Ok(());
+        }
+
+        let selected_slot = self
+            .repo
+            .resolve_selected_slot_index(team_id, Some(join_state.slot_index))
+            .await
+            .context("failed to resolve selected slot")?;
+        if selected_slot == join_state.slot_index {
+            return Ok(());
+        }
+
+        let selected_submission = self
+            .repo
+            .get_succeeded_submission_for_slot(team_id, selected_slot)
+            .await
+            .context("failed to resolve selected slot submission")?
+            .ok_or_else(|| anyhow!("selected slot does not contain succeeded submission"))?;
+        let image_ref = selected_submission
+            .image_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("selected slot submission is missing image_ref"))?;
+
+        tracing::info!(
+            team_id = %team_id,
+            public_car_id = join_state.public_car_id,
+            from_slot = join_state.slot_index,
+            to_slot = selected_slot,
+            submission_id = %selected_submission.submission_id,
+            "applying pending sandbox selected slot in pit"
+        );
+
+        let team_bot_token = self
+            .game_token_issuer
+            .issue_team_bot_token(team_id)
+            .await
+            .map_err(|status| anyhow!(status.to_string()))?;
+        let wrapper_auth_token = self
+            .wrapper_auth_token_issuer
+            .issue_wrapper_auth_token()
+            .await
+            .map_err(|status| anyhow!(status.to_string()))?;
+        let switching_container_id = format!("switching-{}", current_time_ms());
+        if let Some(mut entry) = self.join_registry.get_mut(team_id) {
+            entry.container_id = switching_container_id.clone();
+        }
+        let container_id = start_bot_container(
+            image_ref,
+            &join_state.container_name,
+            &self.wrapper_backend_endpoint,
+            &team_bot_token,
+            &wrapper_auth_token,
+            team_id,
+            &selected_submission.submission_id,
+            &join_state.sandbox_id,
+            selected_slot,
+        )
+        .await
+        .context("failed to restart sandbox bot container for selected slot")?;
+
+        self.stop_log_capture_for_team(team_id).await;
+        let _ = compress_bot_log_file_if_exists(&join_state.log_file_path).await;
+        let log_file_path = self
+            .start_bot_log_capture(
+                team_id,
+                &selected_submission.submission_id,
+                &join_state.sandbox_id,
+                selected_slot,
+                &container_id,
+            )
+            .await
+            .context("failed to restart sandbox log capture after slot switch")?;
+
+        self.join_registry.insert(
+            team_id.to_string(),
+            TeamSandboxJoinState {
+                sandbox_id: join_state.sandbox_id,
+                slot_index: selected_slot,
+                public_car_id: join_state.public_car_id,
+                engine_car_id: join_state.engine_car_id,
+                container_name: join_state.container_name,
+                container_id: container_id.clone(),
+                log_file_path: log_file_path.clone(),
+            },
+        );
+        self.runtime_store
+            .set_active_bot_slot(join_state.public_car_id, selected_slot);
+        let _ = self.slot_updates_tx.send(team_id.to_string());
+        self.spawn_container_exit_monitor(team_id.to_string(), container_id);
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -1579,14 +1762,16 @@ impl SlotQueryService for SlotQueryServiceImpl {
         let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
         let mut updates_rx = self.slot_updates_tx.subscribe();
         let repo = self.repo.clone();
+        let engine = self.engine.clone();
         let joins = self.join_registry.clone();
+        let race_bots = self.race_bot_registry.clone();
         let (tx, rx) = mpsc::channel(SLOT_STREAM_CHANNEL_CAPACITY);
 
         tokio::spawn(async move {
-            if let Err(status) =
-                emit_slots_snapshot(&repo, &team_id, loaded_slot_for_team(&joins, &team_id), &tx)
-                    .await
-            {
+            let loaded_slot =
+                loaded_slot_for_team_for_active_runtime(&engine, &joins, &race_bots, &team_id)
+                    .await;
+            if let Err(status) = emit_slots_snapshot(&repo, &team_id, loaded_slot, &tx).await {
                 let _ = tx.send(Err(status)).await;
                 return;
             }
@@ -1597,13 +1782,12 @@ impl SlotQueryService for SlotQueryServiceImpl {
                         if updated_team_id != team_id {
                             continue;
                         }
-                        if let Err(status) = emit_slots_snapshot(
-                            &repo,
-                            &team_id,
-                            loaded_slot_for_team(&joins, &team_id),
-                            &tx,
+                        let loaded_slot = loaded_slot_for_team_for_active_runtime(
+                            &engine, &joins, &race_bots, &team_id,
                         )
-                        .await
+                        .await;
+                        if let Err(status) =
+                            emit_slots_snapshot(&repo, &team_id, loaded_slot, &tx).await
                         {
                             let _ = tx.send(Err(status)).await;
                             break;
@@ -1615,13 +1799,12 @@ impl SlotQueryService for SlotQueryServiceImpl {
                             skipped_events = skipped,
                             "slot stream lagged; emitting latest snapshot"
                         );
-                        if let Err(status) = emit_slots_snapshot(
-                            &repo,
-                            &team_id,
-                            loaded_slot_for_team(&joins, &team_id),
-                            &tx,
+                        let loaded_slot = loaded_slot_for_team_for_active_runtime(
+                            &engine, &joins, &race_bots, &team_id,
                         )
-                        .await
+                        .await;
+                        if let Err(status) =
+                            emit_slots_snapshot(&repo, &team_id, loaded_slot, &tx).await
                         {
                             let _ = tx.send(Err(status)).await;
                             break;
@@ -1637,6 +1820,59 @@ impl SlotQueryService for SlotQueryServiceImpl {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+#[tonic::async_trait]
+impl SlotCommandService for SlotCommandServiceImpl {
+    async fn select_slot(
+        &self,
+        request: Request<SelectSlotRequest>,
+    ) -> Result<Response<SelectSlotResponse>, Status> {
+        let user_id = self.token_validator.subject(request.metadata()).await?;
+        let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
+        let req = request.into_inner();
+        if !(1..=3).contains(&req.slot) {
+            return Err(Status::failed_precondition("slot must be between 1 and 3"));
+        }
+        let slot_index = i16::try_from(req.slot)
+            .map_err(|_| Status::failed_precondition("slot must be between 1 and 3"))?;
+
+        let slot_submission = self
+            .repo
+            .get_succeeded_submission_for_slot(&team_id, slot_index)
+            .await
+            .map_err(|err| Status::internal(format!("failed to resolve slot submission: {err}")))?;
+        let Some(slot_submission) = slot_submission else {
+            return Err(Status::failed_precondition(
+                "requested slot does not contain succeeded submission",
+            ));
+        };
+        let has_image = slot_submission
+            .image_ref
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        if !has_image {
+            return Err(Status::failed_precondition(
+                "requested slot submission is missing image_ref",
+            ));
+        }
+
+        self.repo
+            .upsert_selected_slot_index(&team_id, slot_index)
+            .await
+            .map_err(|err| Status::internal(format!("failed to persist selected slot: {err}")))?;
+
+        let _ = self.slot_updates_tx.send(team_id.clone());
+        tracing::info!(
+            team_id = %team_id,
+            slot_index,
+            submission_id = %slot_submission.submission_id,
+            "selected slot updated"
+        );
+
+        Ok(Response::new(SelectSlotResponse {}))
     }
 }
 
@@ -1743,6 +1979,8 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
         identity.subject = Some(user_id);
         identity.team_id = Some(team_id.clone());
         self.runtime_store.set_car_identity(public_car_id, identity);
+        self.runtime_store
+            .set_active_bot_slot(public_car_id, slot_index);
         self.runtime_store.known_cars().insert(public_car_id, ());
         self.runtime_store
             .last_client_seq()
@@ -1812,6 +2050,26 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
                 ))));
             }
         };
+
+        if let Err(err) = self
+            .repo
+            .upsert_selected_slot_index(&team_id, slot_index)
+            .await
+        {
+            self.stop_log_capture_for_team(&team_id).await;
+            self.rollback_join_runtime(
+                &team_id,
+                &sandbox_id,
+                target,
+                public_car_id,
+                engine_car_id,
+                &container_name,
+            )
+            .await;
+            return Err(Status::internal(format!(
+                "failed to persist selected slot on join: {err}"
+            )));
+        }
 
         self.join_registry.insert(
             team_id.clone(),
@@ -3567,6 +3825,11 @@ fn sanitize_tag_component(value: &str) -> anyhow::Result<String> {
     Ok(value.to_string())
 }
 
+pub(crate) fn official_bot_container_name_for_team(team_id: &str) -> anyhow::Result<String> {
+    let team_component = sanitize_tag_component(team_id)?;
+    Ok(format!("ha3-official-bot-team-{team_component}"))
+}
+
 fn shell_escape_single(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -3581,7 +3844,7 @@ fn wrapper_kind_to_db(kind: WrapperKind) -> &'static str {
     }
 }
 
-async fn start_bot_container(
+pub(crate) async fn start_bot_container(
     image_ref: &str,
     container_name: &str,
     wrapper_backend_endpoint: &str,
@@ -3651,7 +3914,7 @@ async fn pull_bot_image(image_ref: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn wait_bot_container_exit_code(container_id: &str) -> anyhow::Result<i32> {
+pub(crate) async fn wait_bot_container_exit_code(container_id: &str) -> anyhow::Result<i32> {
     let mut command = Command::new("docker");
     command.arg("wait").arg(container_id);
     let (stdout, _stderr) = run_command_capture(command, "docker/wait", None).await?;
@@ -3672,7 +3935,7 @@ async fn wait_bot_container_exit_code(container_id: &str) -> anyhow::Result<i32>
         .with_context(|| format!("invalid exit code from docker/wait: `{code_raw}`"))
 }
 
-async fn remove_bot_container(container_name: &str) -> anyhow::Result<()> {
+pub(crate) async fn remove_bot_container(container_name: &str) -> anyhow::Result<()> {
     let mut command = Command::new("docker");
     command.arg("rm").arg("-f").arg(container_name);
     match run_command_capture(command, "docker/rm", Some(BOT_DOCKER_TIMEOUT)).await {
@@ -4114,6 +4377,13 @@ fn clip_for_error(value: &str) -> String {
     )
 }
 
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn attach_auth_cookie<T>(request: &mut Request<T>, token: &str) -> Result<(), Status> {
     let cookie = format!("auth_token={token}");
     let value = MetadataValue::try_from(cookie.as_str())
@@ -4236,6 +4506,10 @@ async fn emit_slots_snapshot(
     loaded_slot: Option<i16>,
     tx: &mpsc::Sender<Result<StreamSlotsResponse, Status>>,
 ) -> Result<(), Status> {
+    let selected_slot = repo
+        .resolve_selected_slot_index(team_id, loaded_slot)
+        .await
+        .map_err(|err| Status::internal(format!("failed to resolve selected slot: {err}")))?;
     let filled_slots = repo
         .list_filled_succeeded_slots(team_id)
         .await
@@ -4247,7 +4521,7 @@ async fn emit_slots_snapshot(
                 slot: Some(i32::from(slot.slot_index)),
                 submission_id: slot.submission_id,
                 description: slot.description.unwrap_or_default(),
-                selected: false,
+                selected: slot.slot_index == selected_slot,
                 currently_loaded: Some(slot.slot_index) == loaded_slot,
             })
             .collect(),
@@ -4259,10 +4533,32 @@ async fn emit_slots_snapshot(
     Ok(())
 }
 
-fn loaded_slot_for_team(join_registry: &OfficialSandboxJoinRegistry, team_id: &str) -> Option<i16> {
-    join_registry
-        .get(team_id)
-        .map(|entry| entry.value().slot_index)
+async fn loaded_slot_for_team_for_active_runtime(
+    engine: &EngineClient,
+    join_registry: &OfficialSandboxJoinRegistry,
+    race_bot_registry: &OfficialRaceBotRegistry,
+    team_id: &str,
+) -> Option<i16> {
+    let runtime = match engine.runtime_state().await {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                team_id = %team_id,
+                error = %err,
+                "failed to resolve runtime state for slot stream"
+            );
+            return None;
+        }
+    };
+    match runtime.activity_kind {
+        EngineActivityKind::Sandbox => join_registry
+            .get(team_id)
+            .map(|entry| entry.value().slot_index),
+        EngineActivityKind::OfficialRace => race_bot_registry
+            .get(team_id)
+            .map(|entry| entry.value().slot_index),
+        EngineActivityKind::None => None,
+    }
 }
 
 fn join_failed(message: impl Into<String>) -> JoinOfficialSandboxResponse {

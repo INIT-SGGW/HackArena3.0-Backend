@@ -19,11 +19,15 @@ use proto::race::v1::{
 use rand::Rng;
 #[cfg(feature = "official")]
 use tokio::sync::Mutex;
+#[cfg(feature = "official")]
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::auth::game_token::{GameTokenValidator, parse_game_token};
+#[cfg(feature = "official")]
+use crate::db::repos::submission::SubmissionRepo;
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
 #[cfg(feature = "official")]
@@ -41,7 +45,11 @@ use super::race::RuntimeCarIdentity;
 use super::race::runtime_store::RuntimePitTireType;
 use super::race::{FrameHub, RaceRuntimeStore};
 #[cfg(feature = "official")]
-use crate::services::submission::OfficialSandboxJoinRegistry;
+use crate::services::submission::{
+    GameTokenIssuer, OfficialRaceBotRegistry, OfficialSandboxJoinRegistry,
+    TeamOfficialRaceBotState, WrapperAuthTokenIssuer, official_bot_container_name_for_team,
+    start_bot_container, wait_bot_container_exit_code,
+};
 
 const PARTICIPANT_REQUESTED_HZ: u32 = 30;
 const MIN_STREAM_HZ: u32 = 1;
@@ -59,6 +67,18 @@ pub struct RaceParticipantServiceImpl {
     #[cfg(feature = "official")]
     official_sandbox_joins: OfficialSandboxJoinRegistry,
     #[cfg(feature = "official")]
+    official_race_bots: OfficialRaceBotRegistry,
+    #[cfg(feature = "official")]
+    submission_repo: SubmissionRepo,
+    #[cfg(feature = "official")]
+    game_token_issuer: Arc<GameTokenIssuer>,
+    #[cfg(feature = "official")]
+    wrapper_auth_token_issuer: Arc<WrapperAuthTokenIssuer>,
+    #[cfg(feature = "official")]
+    wrapper_backend_endpoint: String,
+    #[cfg(feature = "official")]
+    slot_updates_tx: broadcast::Sender<String>,
+    #[cfg(feature = "official")]
     prepare_command_lock: Arc<Mutex<()>>,
     #[cfg(feature = "local")]
     local_sandbox_store: LocalSandboxConfigStore,
@@ -74,6 +94,12 @@ impl RaceParticipantServiceImpl {
         runtime_store: Arc<RaceRuntimeStore>,
         frame_hub: FrameHub,
         #[cfg(feature = "official")] official_sandbox_joins: OfficialSandboxJoinRegistry,
+        #[cfg(feature = "official")] official_race_bots: OfficialRaceBotRegistry,
+        #[cfg(feature = "official")] submission_repo: SubmissionRepo,
+        #[cfg(feature = "official")] game_token_issuer: Arc<GameTokenIssuer>,
+        #[cfg(feature = "official")] wrapper_auth_token_issuer: Arc<WrapperAuthTokenIssuer>,
+        #[cfg(feature = "official")] wrapper_backend_endpoint: String,
+        #[cfg(feature = "official")] slot_updates_tx: broadcast::Sender<String>,
         #[cfg(feature = "local")] local_sandbox_store: LocalSandboxConfigStore,
     ) -> Self {
         Self {
@@ -89,6 +115,18 @@ impl RaceParticipantServiceImpl {
             next_stream_seq: Arc::new(AtomicU64::new(100_000)),
             #[cfg(feature = "official")]
             official_sandbox_joins,
+            #[cfg(feature = "official")]
+            official_race_bots,
+            #[cfg(feature = "official")]
+            submission_repo,
+            #[cfg(feature = "official")]
+            game_token_issuer,
+            #[cfg(feature = "official")]
+            wrapper_auth_token_issuer,
+            #[cfg(feature = "official")]
+            wrapper_backend_endpoint,
+            #[cfg(feature = "official")]
+            slot_updates_tx,
             #[cfg(feature = "official")]
             prepare_command_lock: Arc::new(Mutex::new(())),
             #[cfg(feature = "local")]
@@ -300,6 +338,221 @@ impl RaceParticipantServiceImpl {
         self.resolve_team_official_race_car(team_id)?
             .ok_or_else(|| Status::not_found("no active official-race car for team"))
     }
+
+    #[cfg(feature = "official")]
+    async fn resolve_selected_slot_for_team(&self, team_id: &str) -> Result<i16, Status> {
+        let loaded_slot = self
+            .official_race_bots
+            .get(team_id)
+            .map(|entry| entry.value().slot_index);
+        self.submission_repo
+            .resolve_selected_slot_index(team_id, loaded_slot)
+            .await
+            .map_err(|err| Status::internal(format!("failed to resolve selected slot: {err}")))
+    }
+
+    #[cfg(feature = "official")]
+    async fn resolve_slot_submission_image(
+        &self,
+        team_id: &str,
+        slot_index: i16,
+    ) -> Result<(String, String), Status> {
+        let slot_submission = self
+            .submission_repo
+            .get_succeeded_submission_for_slot(team_id, slot_index)
+            .await
+            .map_err(|err| Status::internal(format!("failed to resolve slot submission: {err}")))?;
+        let Some(slot_submission) = slot_submission else {
+            return Err(Status::failed_precondition(
+                "selected slot does not contain succeeded submission",
+            ));
+        };
+        let image_ref = slot_submission
+            .image_ref
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Status::failed_precondition("selected slot submission is missing image_ref")
+            })?
+            .to_string();
+        Ok((slot_submission.submission_id, image_ref))
+    }
+
+    #[cfg(feature = "official")]
+    async fn cleanup_spawned_official_race_car(&self, public_car_id: u64, engine_car_id: u64) {
+        if let Err(err) = self
+            .engine
+            .despawn_car_in(EngineCommandTarget::OfficialRace, engine_car_id)
+            .await
+        {
+            tracing::warn!(
+                public_car_id,
+                engine_car_id,
+                error = %err,
+                "prepare official join: failed to rollback spawned official-race car"
+            );
+        }
+        self.runtime_store.remove_car(public_car_id);
+    }
+
+    #[cfg(feature = "official")]
+    fn spawn_official_race_bot_exit_monitor(&self, team_id: String, container_id: String) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let exit_code = match wait_bot_container_exit_code(&container_id).await {
+                Ok(code) => code,
+                Err(err) => {
+                    tracing::warn!(
+                        team_id = %team_id,
+                        container_id = %container_id,
+                        error = %err,
+                        "official race bot exit monitor failed to wait for container"
+                    );
+                    return;
+                }
+            };
+            tracing::info!(
+                team_id = %team_id,
+                container_id = %container_id,
+                exit_code,
+                "official race bot container exited"
+            );
+
+            let _guard = service.prepare_command_lock.lock().await;
+            let Some(current) = service
+                .official_race_bots
+                .get(&team_id)
+                .map(|entry| entry.value().clone())
+            else {
+                return;
+            };
+            if current.container_id != container_id {
+                return;
+            }
+            service.official_race_bots.remove(&team_id);
+            service
+                .runtime_store
+                .clear_active_bot_slot(current.public_car_id);
+            let _ = service.slot_updates_tx.send(team_id.clone());
+
+            if let Err(err) = service
+                .engine
+                .set_car_to_pitstop_in(EngineCommandTarget::OfficialRace, current.engine_car_id)
+                .await
+            {
+                tracing::warn!(
+                    team_id = %team_id,
+                    public_car_id = current.public_car_id,
+                    engine_car_id = current.engine_car_id,
+                    error = %err,
+                    "official race bot exit monitor: failed to move car to pit"
+                );
+            }
+            let now_ms = service.frame_hub.latest().server_time_ms;
+            service
+                .runtime_store
+                .mark_emergency_pitstop_requested(current.public_car_id, now_ms);
+        });
+    }
+
+    #[cfg(feature = "official")]
+    pub(crate) fn spawn_slot_switch_poller(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(300));
+            loop {
+                ticker.tick().await;
+                let team_ids: Vec<String> = service
+                    .official_race_bots
+                    .iter()
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                for team_id in team_ids {
+                    if let Err(status) = service
+                        .try_apply_pending_selected_slot_for_team(&team_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            team_id = %team_id,
+                            code = ?status.code(),
+                            error = %status,
+                            "official race selected-slot switch attempt failed"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "official")]
+    async fn try_apply_pending_selected_slot_for_team(&self, team_id: &str) -> Result<(), Status> {
+        let _guard = self.prepare_command_lock.lock().await;
+        let Some(race_bot_state) = self
+            .official_race_bots
+            .get(team_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return Ok(());
+        };
+        if !self
+            .runtime_store
+            .is_in_stationary_fix(race_bot_state.public_car_id)
+        {
+            return Ok(());
+        }
+
+        let selected_slot = self.resolve_selected_slot_for_team(team_id).await?;
+        if selected_slot == race_bot_state.slot_index {
+            return Ok(());
+        }
+        let (submission_id, image_ref) = self
+            .resolve_slot_submission_image(team_id, selected_slot)
+            .await?;
+        let team_bot_token = self.game_token_issuer.issue_team_bot_token(team_id).await?;
+        let wrapper_auth_token = self
+            .wrapper_auth_token_issuer
+            .issue_wrapper_auth_token()
+            .await?;
+        let switching_container_id =
+            format!("switching-{}", self.frame_hub.latest().server_time_ms);
+        if let Some(mut entry) = self.official_race_bots.get_mut(team_id) {
+            entry.container_id = switching_container_id;
+        }
+        let container_id = start_bot_container(
+            &image_ref,
+            &race_bot_state.container_name,
+            &self.wrapper_backend_endpoint,
+            &team_bot_token,
+            &wrapper_auth_token,
+            team_id,
+            &submission_id,
+            "official-race",
+            selected_slot,
+        )
+        .await
+        .map_err(|err| {
+            Status::internal(format!(
+                "failed to restart official-race bot container for selected slot: {err}"
+            ))
+        })?;
+
+        self.official_race_bots.insert(
+            team_id.to_string(),
+            TeamOfficialRaceBotState {
+                public_car_id: race_bot_state.public_car_id,
+                engine_car_id: race_bot_state.engine_car_id,
+                slot_index: selected_slot,
+                container_name: race_bot_state.container_name,
+                container_id: container_id.clone(),
+            },
+        );
+        self.runtime_store
+            .set_active_bot_slot(race_bot_state.public_car_id, selected_slot);
+        let _ = self.slot_updates_tx.send(team_id.to_string());
+        self.spawn_official_race_bot_exit_monitor(team_id.to_string(), container_id);
+        Ok(())
+    }
 }
 
 #[cfg(feature = "local")]
@@ -442,44 +695,180 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
             match runtime_state.activity_kind {
                 EngineActivityKind::OfficialRace => {
                     let map_id = runtime_state.map_id.clone();
-                    if let Some((public_car_id, engine_car_id)) =
-                        self.resolve_team_official_race_car(&team_id)?
-                    {
-                        tracing::info!(
-                            team_id = %team_id,
-                            public_car_id,
-                            engine_car_id,
-                            map_id = %map_id,
-                            "prepare official join: reused official-race car"
-                        );
-                        return Ok(Response::new(PrepareOfficialJoinResponse {
-                            car_id: public_car_id,
-                            map_id,
-                        }));
+                    let mut spawned_new_car = false;
+                    let (public_car_id, engine_car_id) =
+                        if let Some((public_car_id, engine_car_id)) =
+                            self.resolve_team_official_race_car(&team_id)?
+                        {
+                            tracing::info!(
+                                team_id = %team_id,
+                                public_car_id,
+                                engine_car_id,
+                                map_id = %map_id,
+                                "prepare official join: reused official-race car"
+                            );
+                            (public_car_id, engine_car_id)
+                        } else {
+                            self.official_race_bots.remove(&team_id);
+                            let engine_car_id =
+                                self.engine.spawn_car().await.map_err(map_worker_err)?;
+                            let public_car_id = self.runtime_store.allocate_public_car_id();
+                            let mut identity = RuntimeCarIdentity::default();
+                            identity.team_id = Some(team_id.clone());
+                            self.runtime_store.set_car_identity(public_car_id, identity);
+                            self.runtime_store.known_cars().insert(public_car_id, ());
+                            self.runtime_store
+                                .last_client_seq()
+                                .insert(public_car_id, 0);
+                            self.runtime_store
+                                .car_engine_ids()
+                                .insert(public_car_id, engine_car_id);
+                            self.runtime_store
+                                .car_targets()
+                                .insert(public_car_id, EngineCommandTarget::OfficialRace);
+                            spawned_new_car = true;
+                            tracing::info!(
+                                team_id = %team_id,
+                                public_car_id,
+                                engine_car_id,
+                                map_id = %map_id,
+                                "prepare official join: spawned official-race car"
+                            );
+                            (public_car_id, engine_car_id)
+                        };
+
+                    if let Some(existing) = self.official_race_bots.get(&team_id) {
+                        if !existing.container_id.starts_with("switching-") {
+                            self.runtime_store
+                                .set_active_bot_slot(public_car_id, existing.slot_index);
+                            return Ok(Response::new(PrepareOfficialJoinResponse {
+                                car_id: public_car_id,
+                                map_id,
+                            }));
+                        }
                     }
 
-                    let engine_car_id = self.engine.spawn_car().await.map_err(map_worker_err)?;
-                    let public_car_id = self.runtime_store.allocate_public_car_id();
-                    let mut identity = RuntimeCarIdentity::default();
-                    identity.team_id = Some(team_id.clone());
-                    self.runtime_store.set_car_identity(public_car_id, identity);
-                    self.runtime_store.known_cars().insert(public_car_id, ());
-                    self.runtime_store
-                        .last_client_seq()
-                        .insert(public_car_id, 0);
-                    self.runtime_store
-                        .car_engine_ids()
-                        .insert(public_car_id, engine_car_id);
-                    self.runtime_store
-                        .car_targets()
-                        .insert(public_car_id, EngineCommandTarget::OfficialRace);
+                    let selected_slot = match self.resolve_selected_slot_for_team(&team_id).await {
+                        Ok(value) => value,
+                        Err(status) => {
+                            if spawned_new_car {
+                                self.cleanup_spawned_official_race_car(
+                                    public_car_id,
+                                    engine_car_id,
+                                )
+                                .await;
+                            }
+                            return Err(status);
+                        }
+                    };
+                    let (submission_id, image_ref) = match self
+                        .resolve_slot_submission_image(&team_id, selected_slot)
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(status) => {
+                            if spawned_new_car {
+                                self.cleanup_spawned_official_race_car(
+                                    public_car_id,
+                                    engine_car_id,
+                                )
+                                .await;
+                            }
+                            return Err(status);
+                        }
+                    };
 
+                    let team_bot_token =
+                        match self.game_token_issuer.issue_team_bot_token(&team_id).await {
+                            Ok(value) => value,
+                            Err(status) => {
+                                if spawned_new_car {
+                                    self.cleanup_spawned_official_race_car(
+                                        public_car_id,
+                                        engine_car_id,
+                                    )
+                                    .await;
+                                }
+                                return Err(status);
+                            }
+                        };
+                    let wrapper_auth_token = match self
+                        .wrapper_auth_token_issuer
+                        .issue_wrapper_auth_token()
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(status) => {
+                            if spawned_new_car {
+                                self.cleanup_spawned_official_race_car(
+                                    public_car_id,
+                                    engine_car_id,
+                                )
+                                .await;
+                            }
+                            return Err(status);
+                        }
+                    };
+                    let container_name =
+                        official_bot_container_name_for_team(&team_id).map_err(|err| {
+                            Status::failed_precondition(format!(
+                                "invalid team_id for container name: {err}"
+                            ))
+                        })?;
+                    let container_id = match start_bot_container(
+                        &image_ref,
+                        &container_name,
+                        &self.wrapper_backend_endpoint,
+                        &team_bot_token,
+                        &wrapper_auth_token,
+                        &team_id,
+                        &submission_id,
+                        "official-race",
+                        selected_slot,
+                    )
+                    .await
+                    {
+                        Ok(id) => id,
+                        Err(err) => {
+                            if spawned_new_car {
+                                self.cleanup_spawned_official_race_car(
+                                    public_car_id,
+                                    engine_car_id,
+                                )
+                                .await;
+                            }
+                            return Err(Status::internal(format!(
+                                "failed to start official-race bot container: {err}"
+                            )));
+                        }
+                    };
+
+                    self.official_race_bots.insert(
+                        team_id.clone(),
+                        TeamOfficialRaceBotState {
+                            public_car_id,
+                            engine_car_id,
+                            slot_index: selected_slot,
+                            container_name: container_name.clone(),
+                            container_id: container_id.clone(),
+                        },
+                    );
+                    self.runtime_store
+                        .set_active_bot_slot(public_car_id, selected_slot);
+                    let _ = self.slot_updates_tx.send(team_id.clone());
+                    self.spawn_official_race_bot_exit_monitor(
+                        team_id.clone(),
+                        container_id.clone(),
+                    );
                     tracing::info!(
                         team_id = %team_id,
                         public_car_id,
                         engine_car_id,
-                        map_id = %map_id,
-                        "prepare official join: spawned official-race car"
+                        slot_index = selected_slot,
+                        submission_id = %submission_id,
+                        container_name = %container_name,
+                        container_id = %container_id,
+                        "prepare official join: started official-race bot container"
                     );
                     Ok(Response::new(PrepareOfficialJoinResponse {
                         car_id: public_car_id,
@@ -630,6 +1019,21 @@ async fn cleanup_participant_car(
 ) {
     match target {
         EngineCommandTarget::Sandbox { .. } => {
+            #[cfg(feature = "official")]
+            if runtime_store
+                .car_identity(public_car_id)
+                .and_then(|identity| identity.team_id)
+                .is_some()
+            {
+                tracing::info!(
+                    public_car_id,
+                    engine_car_id,
+                    target = ?target,
+                    reason,
+                    "participant cleanup: preserving official sandbox car"
+                );
+                return;
+            }
             if let Err(err) = engine.despawn_car_in(target.clone(), engine_car_id).await {
                 tracing::warn!(
                     public_car_id,

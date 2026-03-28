@@ -20,6 +20,7 @@ pub struct RuntimeCarIdentity {
     pub team_id: Option<String>,
     pub instance_uuid: Option<String>,
     pub local_bot_index: Option<u32>,
+    pub active_bot_slot: Option<i16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -129,6 +130,7 @@ struct RuntimePitState {
     last_applied_tyre_in_current_fix: Option<RuntimePitTireType>,
     last_applied_tire_revision_in_current_fix: Option<u64>,
     emergency_intent_pending: bool,
+    in_stationary_fix: bool,
 }
 
 impl RuntimePitState {
@@ -431,6 +433,31 @@ impl RaceRuntimeStore {
             .unwrap_or(0)
     }
 
+    pub fn set_active_bot_slot(&self, car_id: u64, slot_index: i16) {
+        if let Some(mut identity) = self.car_identity.get_mut(&car_id) {
+            identity.active_bot_slot = Some(slot_index);
+        }
+    }
+
+    pub fn active_bot_slot(&self, car_id: u64) -> Option<i16> {
+        self.car_identity
+            .get(&car_id)
+            .and_then(|entry| entry.active_bot_slot)
+    }
+
+    pub fn clear_active_bot_slot(&self, car_id: u64) {
+        if let Some(mut identity) = self.car_identity.get_mut(&car_id) {
+            identity.active_bot_slot = None;
+        }
+    }
+
+    pub fn is_in_stationary_fix(&self, car_id: u64) -> bool {
+        self.car_pit_state
+            .get(&car_id)
+            .map(|entry| entry.in_stationary_fix)
+            .unwrap_or(false)
+    }
+
     pub fn update_pit_state_from_runtime(
         &self,
         car_id: u64,
@@ -439,6 +466,14 @@ impl RaceRuntimeStore {
         now_ms: u64,
     ) -> RuntimePitStateSnapshot {
         let mut entry = self.car_pit_state.entry(car_id).or_default();
+        #[cfg(feature = "official")]
+        let current_bot_slot_for_history = || {
+            self.car_identity
+                .get(&car_id)
+                .and_then(|identity| identity.active_bot_slot)
+                .map(|value| value.max(1) as u32)
+                .unwrap_or(1)
+        };
         #[cfg(feature = "official")]
         let in_fix_zone = vehicle_state.pitstop_state.has_zone(PitstopZone::Fix);
         let completed_pit = vehicle_state.pitstop_state.has_zone(PitstopZone::Fix)
@@ -542,6 +577,7 @@ impl RaceRuntimeStore {
         } else {
             entry.was_fix_stationary_full_pit = true;
         }
+        entry.in_stationary_fix = completed_pit;
 
         entry.snapshot(now_ms)
     }
@@ -595,9 +631,4 @@ fn runtime_tire_type_from_engine(value: TyreType) -> RuntimePitTireType {
         TyreType::Soft => RuntimePitTireType::Soft,
         TyreType::Wet => RuntimePitTireType::Wet,
     }
-}
-
-#[cfg(feature = "official")]
-fn current_bot_slot_for_history() -> u32 {
-    1
 }
