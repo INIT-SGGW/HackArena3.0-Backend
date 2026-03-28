@@ -40,6 +40,11 @@ pub enum EngineCommand {
         car_id: u64,
         reply_tx: oneshot::Sender<Result<VehicleRaceMetrics, EngineWorkerError>>,
     },
+    ReadCarDimensions {
+        target: EngineCommandTarget,
+        car_id: u64,
+        reply_tx: oneshot::Sender<Result<(f32, f32), EngineWorkerError>>,
+    },
     SetCarBackToTrack {
         target: EngineCommandTarget,
         car_id: u64,

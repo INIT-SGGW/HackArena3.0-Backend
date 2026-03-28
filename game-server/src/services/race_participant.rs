@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use boink::model::{Controls, GearShift as EngineGearShift};
 use proto::race::v1::{
-    LocalSandboxJoinRequest, LocalSandboxJoinResponse, ParticipantCommandAck,
-    ParticipantCommandRejectReason, ParticipantCommandStatus, ParticipantCommandType,
-    ParticipantServerEvent, ParticipantSnapshot, PrepareOfficialJoinRequest,
-    PrepareOfficialJoinResponse, SpectatorView, StreamClampReason, StreamSettings,
-    TireType as ProtoTireType, ViewDowngradeReason,
+    CarDimensions, LocalSandboxJoinRequest, LocalSandboxJoinResponse, ParticipantBootstrap,
+    ParticipantCommandAck, ParticipantCommandRejectReason, ParticipantCommandStatus,
+    ParticipantCommandType, ParticipantServerEvent, ParticipantSnapshot,
+    PrepareOfficialJoinRequest, PrepareOfficialJoinResponse, SpectatorView, StreamClampReason,
+    StreamSettings, TireType as ProtoTireType, ViewDowngradeReason,
     participant_client_message::Payload as ParticipantClientPayload,
     participant_server_event::Payload as ParticipantServerPayload,
     race_participant_service_server::RaceParticipantService,
@@ -839,6 +839,43 @@ async fn run_participant_stream(
                                 &self_target,
                                 self_engine_car_id,
                             ).await;
+                            break;
+                        }
+
+                        let car_dimensions = match engine
+                            .read_car_dimensions_in(self_target.clone(), self_engine_car_id)
+                            .await
+                        {
+                            Ok((width_m, depth_m)) => Some(CarDimensions { width_m, depth_m }),
+                            Err(err) => {
+                                tracing::warn!(
+                                    stream_id,
+                                    self_public_car_id,
+                                    self_engine_car_id,
+                                    target = ?self_target,
+                                    error = %err,
+                                    "participant bootstrap: failed to read car dimensions"
+                                );
+                                None
+                            }
+                        };
+                        let bootstrap = ParticipantBootstrap { car_dimensions };
+                        if !send_participant_event(
+                            &tx,
+                            &mut server_seq,
+                            ParticipantServerPayload::Bootstrap(bootstrap),
+                        )
+                        .await
+                        {
+                            cleanup_participant_car(
+                                "bootstrap-send-failed",
+                                &engine,
+                                runtime_store.as_ref(),
+                                self_public_car_id,
+                                &self_target,
+                                self_engine_car_id,
+                            )
+                            .await;
                             break;
                         }
                     }
