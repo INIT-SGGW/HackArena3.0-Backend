@@ -189,13 +189,12 @@ impl VehiclePitstopState {
     }
 
     pub(crate) fn try_from_ffi(zone_mask: u32, wheels_num: i32) -> Result<Self> {
-        let wheels_in_pitstop = u8::try_from(wheels_num)
-            .map_err(|_| Error::Internal(format!("invalid pitstop wheels count: {wheels_num}")))?;
-        if wheels_in_pitstop > 4 {
+        if wheels_num < 0 {
             return Err(Error::Internal(format!(
-                "invalid pitstop wheels count out of range 0..=4: {wheels_num}"
+                "invalid pitstop wheels count: {wheels_num}"
             )));
         }
+        let wheels_in_pitstop = wheels_num.min(4) as u8;
 
         Ok(Self {
             zone_mask,
