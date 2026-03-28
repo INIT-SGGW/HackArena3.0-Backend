@@ -30,11 +30,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define BOINK_C_API_VERSION_MAJOR 0
+#define BOINK_C_API_VERSION_MAJOR 1
 
-#define BOINK_C_API_VERSION_MINOR 17
+#define BOINK_C_API_VERSION_MINOR 0
 
-#define BOINK_C_API_VERSION_PATCH 7
+#define BOINK_C_API_VERSION_PATCH 0
 
 /**
  * Indicates successful operation.

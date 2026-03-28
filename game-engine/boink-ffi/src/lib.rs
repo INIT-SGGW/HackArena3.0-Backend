@@ -12,9 +12,9 @@
 
 use libc::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
-pub const BOINK_C_API_VERSION_MAJOR: c_uint = 0;
-pub const BOINK_C_API_VERSION_MINOR: c_uint = 17;
-pub const BOINK_C_API_VERSION_PATCH: c_uint = 7;
+pub const BOINK_C_API_VERSION_MAJOR: c_uint = 1;
+pub const BOINK_C_API_VERSION_MINOR: c_uint = 0;
+pub const BOINK_C_API_VERSION_PATCH: c_uint = 0;
 
 /// Indicates successful operation.
 pub const BOINK_OK: c_int = 0;
