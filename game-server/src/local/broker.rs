@@ -457,7 +457,7 @@ fn ha_auth_candidates() -> Vec<OsString> {
         if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
             candidates.push(
                 PathBuf::from(xdg_data_home)
-                    .join("HackArena")
+                    .join("hackarena")
                     .join("bin")
                     .join("ha-auth")
                     .into_os_string(),
@@ -467,7 +467,7 @@ fn ha_auth_candidates() -> Vec<OsString> {
             candidates.push(
                 home.join(".local")
                     .join("share")
-                    .join("HackArena")
+                    .join("hackarena")
                     .join("bin")
                     .join("ha-auth")
                     .into_os_string(),
