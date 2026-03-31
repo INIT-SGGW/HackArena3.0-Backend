@@ -33,6 +33,7 @@ const GAP_DISABLED_LAPS_BEHIND_THRESHOLD: u32 = 1;
 const TRAJECTORY_MIN_PROGRESS_DELTA_M: f64 = 0.1;
 const TRAJECTORY_PROGRESS_EPSILON_M: f64 = 1e-3;
 const TRAJECTORY_RESET_BACKTRACK_M: f64 = 5.0;
+const START_PROGRESS_MOVED_EPSILON_M: f64 = 1.0;
 #[cfg(feature = "official")]
 const TEAM_NAME_FETCH_FAILED: &str = "failed to fetch";
 
@@ -50,6 +51,7 @@ struct OfficialRaceCache {
     archived_dnf_rows: HashMap<u64, OfficialRaceTableEntry>,
     car_trajectories: HashMap<u64, VecDeque<TrajectorySample>>,
     last_computed_gap_ms: HashMap<u64, u32>,
+    car_start_progress_m: HashMap<u64, f64>,
 }
 
 impl OfficialRaceCache {
@@ -59,6 +61,7 @@ impl OfficialRaceCache {
         self.archived_dnf_rows.clear();
         self.car_trajectories.clear();
         self.last_computed_gap_ms.clear();
+        self.car_start_progress_m.clear();
     }
 
     fn reset_if_session_changed(&mut self, marker: &str) {
@@ -80,6 +83,7 @@ struct ActiveEntrySample {
     row: OfficialRaceTableEntry,
     completed_laps: u32,
     progress_total_m: f64,
+    hide_gap_to_leader: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -205,8 +209,7 @@ impl RaceTableQueryServiceImpl {
             .map(|duration_s| (duration_s.max(0.0) * 1000.0) as u64)
             .unwrap_or(0);
 
-        let mut active_entries = self.collect_official_active_entries(frame, lap_length_m);
-        sort_active_entries(&mut active_entries);
+        let active_entries = self.collect_official_active_entries(frame, lap_length_m);
 
         let session_marker = format!("official-race:{}", runtime_state.map_id);
         let entries = self
@@ -252,7 +255,7 @@ impl RaceTableQueryServiceImpl {
         &self,
         session_marker: &str,
         race_elapsed_ms: u64,
-        active_entries: Vec<ActiveEntrySample>,
+        mut active_entries: Vec<ActiveEntrySample>,
     ) -> Vec<OfficialRaceTableEntry> {
         let mut cache = self.cache.lock().await;
         let official_cache = &mut cache.official;
@@ -269,6 +272,12 @@ impl RaceTableQueryServiceImpl {
             .iter()
             .map(|sample| sample.row.car_id)
             .collect();
+        normalize_active_progress_from_start(
+            official_cache,
+            &mut active_entries,
+            &current_active_ids,
+        );
+        sort_active_entries(&mut active_entries);
         update_car_trajectories(
             official_cache,
             race_elapsed_ms,
@@ -279,6 +288,9 @@ impl RaceTableQueryServiceImpl {
         let mut active_rows: Vec<OfficialRaceTableEntry> = Vec::with_capacity(active_entries.len());
         if let Some(leader) = active_entries.first().cloned() {
             let leader_trajectory = official_cache.car_trajectories.get(&leader.row.car_id);
+            let leader_has_motion = leader_trajectory
+                .is_some_and(|trajectory| trajectory.len() >= 2)
+                && leader.progress_total_m > START_PROGRESS_MOVED_EPSILON_M;
             for sample in active_entries {
                 let mut row = sample.row;
                 if row.car_id == leader.row.car_id {
@@ -288,9 +300,14 @@ impl RaceTableQueryServiceImpl {
                     continue;
                 }
 
+                let hide_gap_to_leader = sample.hide_gap_to_leader;
                 row.laps_behind = leader.completed_laps.saturating_sub(sample.completed_laps);
-                let gap_ms = if row.laps_behind > GAP_DISABLED_LAPS_BEHIND_THRESHOLD {
+                let gap_ms = if hide_gap_to_leader {
                     None
+                } else if row.laps_behind > GAP_DISABLED_LAPS_BEHIND_THRESHOLD {
+                    None
+                } else if !leader_has_motion {
+                    Some(0)
                 } else {
                     leader_trajectory
                         .and_then(|trajectory| {
@@ -309,6 +326,9 @@ impl RaceTableQueryServiceImpl {
                         })
                 };
 
+                if hide_gap_to_leader {
+                    official_cache.last_computed_gap_ms.remove(&row.car_id);
+                }
                 if let Some(gap_ms) = gap_ms {
                     official_cache
                         .last_computed_gap_ms
@@ -321,6 +341,9 @@ impl RaceTableQueryServiceImpl {
 
         official_cache
             .last_computed_gap_ms
+            .retain(|car_id, _| current_active_ids.contains(car_id));
+        official_cache
+            .car_start_progress_m
             .retain(|car_id, _| current_active_ids.contains(car_id));
         for car_id in &current_active_ids {
             official_cache.archived_dnf_rows.remove(car_id);
@@ -609,7 +632,8 @@ fn sample_to_official_entry(
     identity: Option<RuntimeCarIdentity>,
     in_pit: bool,
 ) -> ActiveEntrySample {
-    let lap_progress_m = metrics.lap_progress_m.max(0.0);
+    let lap_progress_raw_m = metrics.lap_progress_m;
+    let lap_progress_m = lap_progress_raw_m.max(0.0);
     let progress_total_m = metrics.completed_laps as f64 * lap_length_m + f64::from(lap_progress_m);
     let row = OfficialRaceTableEntry {
         car_id: public_car_id,
@@ -625,6 +649,8 @@ fn sample_to_official_entry(
         row,
         completed_laps: metrics.completed_laps,
         progress_total_m,
+        // Keep gap hidden for pre-start samples reported before crossing start/finish line.
+        hide_gap_to_leader: lap_progress_raw_m < 0.0,
     }
 }
 
@@ -636,6 +662,24 @@ fn sort_active_entries(entries: &mut [ActiveEntrySample]) {
             .unwrap_or(Ordering::Equal)
             .then_with(|| left.row.car_id.cmp(&right.row.car_id))
     });
+}
+
+fn normalize_active_progress_from_start(
+    cache: &mut OfficialRaceCache,
+    active_entries: &mut [ActiveEntrySample],
+    current_active_ids: &HashSet<u64>,
+) {
+    cache
+        .car_start_progress_m
+        .retain(|car_id, _| current_active_ids.contains(car_id));
+
+    for sample in active_entries {
+        let baseline = *cache
+            .car_start_progress_m
+            .entry(sample.row.car_id)
+            .or_insert(sample.progress_total_m);
+        sample.progress_total_m = (sample.progress_total_m - baseline).max(0.0);
+    }
 }
 
 fn update_car_trajectories(

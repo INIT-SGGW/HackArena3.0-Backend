@@ -1,15 +1,17 @@
 [package]
 name = "game-server"
-version = "0.1.0-beta.146"
+version = "0.1.0-beta.203"
 edition.workspace = true
 
 [[bin]]
 name = "ha3-backend-official"
 path = "src/bin/ha3-backend-official.rs"
+required-features = ["official"]
 
 [[bin]]
 name = "ha3-backend-local"
 path = "src/bin/ha3-backend-local.rs"
+required-features = ["local"]
 
 [features]
 default = []

@@ -228,6 +228,9 @@ pub async fn serve_grpc(
         submission_repo.clone(),
         token_validator.clone(),
         team_resolver.clone(),
+        engine.clone(),
+        official_sandbox_joins.clone(),
+        official_race_bots.clone(),
         submission_queue_tx,
         cfg.submission_archive_max_mb,
     );
@@ -307,7 +310,7 @@ pub async fn serve_grpc(
         #[cfg(feature = "official")]
         official_sandbox_joins.clone(),
         #[cfg(feature = "official")]
-        race_config_repo.clone(),
+        official_race_bots.clone(),
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
     );
@@ -338,6 +341,24 @@ pub async fn serve_grpc(
     );
     #[cfg(feature = "official")]
     race_participant_impl.spawn_slot_switch_poller();
+    #[cfg(feature = "official")]
+    {
+        let assets_dir = cfg
+            .tracks_dir
+            .parent()
+            .map(|path| path.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("assets"));
+        let teams_file_path = assets_dir.join("official-race-teams.txt");
+        let prepare_signal_path = assets_dir.join(".prepare");
+        let start_signal_path = assets_dir.join(".start");
+        race_participant_impl.spawn_official_race_file_launcher(
+            race_config_repo.clone(),
+            teams_file_path,
+            prepare_signal_path,
+            start_signal_path,
+            shutdown_rx.resubscribe(),
+        );
+    }
     let race_table_impl = RaceTableQueryServiceImpl::new(
         race_runtime_store.clone(),
         frame_hub.clone(),

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 #[cfg(feature = "official")]
 use std::io::SeekFrom;
 #[cfg(feature = "official")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -33,8 +33,6 @@ use proto::race::v1::{
 };
 #[cfg(feature = "local")]
 use rand::Rng;
-#[cfg(feature = "official")]
-use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 #[cfg(feature = "official")]
@@ -48,8 +46,6 @@ use tonic::{Request, Response, Status, server::NamedService};
 
 use crate::auth::game_token::{GameTokenValidator, parse_game_token};
 use crate::config::AppEnv;
-#[cfg(feature = "official")]
-use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
 use crate::runtime::engine_worker::{
@@ -57,7 +53,7 @@ use crate::runtime::engine_worker::{
     EngineRuntimeState,
 };
 #[cfg(feature = "official")]
-use crate::services::submission::OfficialSandboxJoinRegistry;
+use crate::services::submission::{OfficialRaceBotRegistry, OfficialSandboxJoinRegistry};
 
 pub mod frame_hub;
 pub mod runtime_store;
@@ -82,8 +78,6 @@ const OFFICIAL_BOT_LOG_MAX_CHARS: usize = 200_000;
 const OFFICIAL_BOT_LOG_STREAM_CHANNEL_CAPACITY: usize = 64;
 #[cfg(feature = "official")]
 const OFFICIAL_BOT_LOG_STREAM_POLL_INTERVAL_MS: u64 = 200;
-#[cfg(feature = "official")]
-const OFFICIAL_RACE_CONFIG_CACHE_TTL_MS: i64 = 60_000;
 
 #[cfg(feature = "official")]
 struct BotLogsSnapshot {
@@ -93,112 +87,19 @@ struct BotLogsSnapshot {
 }
 
 #[cfg(feature = "official")]
-#[derive(Default)]
-struct OfficialRaceConfigCacheState {
-    races: Vec<RaceConfigRecord>,
-    cached_at_ms: i64,
-    loaded: bool,
-}
-
-#[cfg(feature = "official")]
-#[derive(Clone)]
-struct OfficialRaceConfigCache {
-    repo: RaceConfigRepo,
-    state: Arc<RwLock<OfficialRaceConfigCacheState>>,
-}
-
-#[cfg(feature = "official")]
-impl OfficialRaceConfigCache {
-    fn new(repo: RaceConfigRepo) -> Self {
-        Self {
-            repo,
-            state: Arc::new(RwLock::new(OfficialRaceConfigCacheState::default())),
-        }
-    }
-
-    async fn load_races(&self, now_ms: i64) -> Option<Vec<RaceConfigRecord>> {
-        {
-            let guard = self.state.read().await;
-            let cache_fresh = guard.loaded
-                && now_ms.saturating_sub(guard.cached_at_ms) < OFFICIAL_RACE_CONFIG_CACHE_TTL_MS;
-            if cache_fresh {
-                return Some(guard.races.clone());
-            }
-        }
-
-        let stale_races = {
-            let guard = self.state.read().await;
-            if guard.loaded {
-                Some(guard.races.clone())
-            } else {
-                None
-            }
-        };
-
-        match self.repo.get_snapshot().await {
-            Ok(snapshot) => {
-                let mut races = snapshot.races;
-                races.sort_by(|left, right| {
-                    left.config
-                        .starts_at_ms
-                        .cmp(&right.config.starts_at_ms)
-                        .then_with(|| left.race_id.cmp(&right.race_id))
-                });
-                let mut guard = self.state.write().await;
-                guard.races = races.clone();
-                guard.cached_at_ms = now_ms;
-                guard.loaded = true;
-                Some(races)
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "failed to refresh official race schedule cache"
-                );
-                stale_races
-            }
-        }
-    }
-
-    async fn runtime_remaining_sec(&self, now_ms: i64) -> Option<f32> {
-        let races = self.load_races(now_ms).await?;
-        if races.is_empty() {
-            return None;
-        }
-
-        let active_races: Vec<_> = races
-            .iter()
-            .filter_map(|race| {
-                let ends_at_ms = race
-                    .config
-                    .starts_at_ms
-                    .saturating_add(i64::from(race.config.race_duration_sec).saturating_mul(1_000));
-                if race.config.starts_at_ms <= now_ms && now_ms < ends_at_ms {
-                    Some((race, ends_at_ms))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if active_races.is_empty() {
-            return None;
-        }
-        if active_races.len() > 1 {
-            let overlapping_race_ids: Vec<_> = active_races
-                .iter()
-                .map(|(race, _)| race.race_id.as_str())
-                .collect();
-            tracing::warn!(
-                now_ms,
-                ?overlapping_race_ids,
-                "multiple active official race schedule entries detected; using first"
-            );
-        }
-
-        let (_, ends_at_ms) = active_races[0];
-        let remaining_ms = ends_at_ms.saturating_sub(now_ms).max(0);
-        Some(remaining_ms as f32 / 1_000.0)
-    }
+fn current_team_bot_log_path(
+    joins: &OfficialSandboxJoinRegistry,
+    race_bots: &OfficialRaceBotRegistry,
+    team_id: &str,
+) -> Option<PathBuf> {
+    joins
+        .get(team_id)
+        .map(|entry| entry.value().log_file_path.clone())
+        .or_else(|| {
+            race_bots
+                .get(team_id)
+                .map(|entry| entry.value().log_file_path.clone())
+        })
 }
 
 /// gRPC RaceService implementation backed by a single engine world.
@@ -220,7 +121,7 @@ pub struct RaceServiceImpl {
     #[cfg(feature = "official")]
     official_sandbox_joins: OfficialSandboxJoinRegistry,
     #[cfg(feature = "official")]
-    official_race_config_cache: OfficialRaceConfigCache,
+    official_race_bots: OfficialRaceBotRegistry,
     #[cfg(feature = "local")]
     local_sandbox_store: LocalSandboxConfigStore,
 }
@@ -237,7 +138,7 @@ impl RaceServiceImpl {
         runtime_store: Arc<RaceRuntimeStore>,
         frame_hub: FrameHub,
         #[cfg(feature = "official")] official_sandbox_joins: OfficialSandboxJoinRegistry,
-        #[cfg(feature = "official")] race_config_repo: RaceConfigRepo,
+        #[cfg(feature = "official")] official_race_bots: OfficialRaceBotRegistry,
         #[cfg(feature = "local")] local_sandbox_store: LocalSandboxConfigStore,
     ) -> Self {
         Self {
@@ -261,7 +162,7 @@ impl RaceServiceImpl {
             #[cfg(feature = "official")]
             official_sandbox_joins,
             #[cfg(feature = "official")]
-            official_race_config_cache: OfficialRaceConfigCache::new(race_config_repo),
+            official_race_bots,
             #[cfg(feature = "local")]
             local_sandbox_store,
         }
@@ -452,6 +353,19 @@ impl RaceService for RaceServiceImpl {
                 self.resolve_team_active_command_car(&auth).await?;
             let frame = self.frame_hub.latest();
             let applies_from_tick = frame.tick;
+            let in_pit = frame
+                .cars
+                .get(&public_car_id)
+                .map(|car| car.state.pitstop_state.is_in_any_zone())
+                .unwrap_or(false);
+            if in_pit {
+                return Ok(Response::new(EmergencyPitstopResponse {
+                    status: ParticipantCommandStatus::Rejected as i32,
+                    applies_from_tick,
+                    rejected_reason: ParticipantCommandRejectReason::InPit as i32,
+                    cooldown_remaining_ms: 0,
+                }));
+            }
             let cooldown_remaining_ms = self
                 .runtime_store
                 .emergency_pitstop_cooldown_remaining_ms(public_car_id, frame.server_time_ms);
@@ -558,18 +472,19 @@ impl RaceService for RaceServiceImpl {
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| Status::unauthenticated("missing team_id claim"))?;
 
-            let join_state = self
-                .official_sandbox_joins
-                .get(team_id.as_str())
-                .map(|entry| entry.value().clone())
-                .ok_or_else(|| Status::not_found("no active official sandbox bot for team"))?;
+            let log_file_path = current_team_bot_log_path(
+                &self.official_sandbox_joins,
+                &self.official_race_bots,
+                team_id.as_str(),
+            )
+            .ok_or_else(|| Status::not_found("no active official bot logs for team"))?;
 
-            let snapshot = read_tail_bot_logs_snapshot(&join_state.log_file_path)
+            let snapshot = read_tail_bot_logs_snapshot(&log_file_path)
                 .await
                 .map_err(|err| {
                     tracing::warn!(
                         team_id = %team_id,
-                        log_file = %join_state.log_file_path.display(),
+                        log_file = %log_file_path.display(),
                         error = %err,
                         "failed to read official team bot logs"
                     );
@@ -605,18 +520,19 @@ impl RaceService for RaceServiceImpl {
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| Status::unauthenticated("missing team_id claim"))?;
 
-            let join_state = self
-                .official_sandbox_joins
-                .get(team_id.as_str())
-                .map(|entry| entry.value().clone())
-                .ok_or_else(|| Status::not_found("no active official sandbox bot for team"))?;
+            let log_file_path = current_team_bot_log_path(
+                &self.official_sandbox_joins,
+                &self.official_race_bots,
+                team_id.as_str(),
+            )
+            .ok_or_else(|| Status::not_found("no active official bot logs for team"))?;
 
-            let snapshot = read_tail_bot_logs_snapshot(&join_state.log_file_path)
+            let snapshot = read_tail_bot_logs_snapshot(&log_file_path)
                 .await
                 .map_err(|err| {
                     tracing::warn!(
                         team_id = %team_id,
-                        log_file = %join_state.log_file_path.display(),
+                        log_file = %log_file_path.display(),
                         error = %err,
                         "failed to read official team bot log snapshot"
                     );
@@ -625,8 +541,9 @@ impl RaceService for RaceServiceImpl {
 
             let (tx, rx) = mpsc::channel(OFFICIAL_BOT_LOG_STREAM_CHANNEL_CAPACITY);
             let joins = self.official_sandbox_joins.clone();
+            let race_bots = self.official_race_bots.clone();
             let team_id_for_task = team_id.clone();
-            let log_path = join_state.log_file_path.clone();
+            let log_path = log_file_path.clone();
             let mut offset = snapshot.file_size_bytes;
             let mut pending_tail = String::new();
 
@@ -655,9 +572,8 @@ impl RaceService for RaceServiceImpl {
                     }
                     interval.tick().await;
 
-                    let current_log_path = joins
-                        .get(team_id_for_task.as_str())
-                        .map(|entry| entry.value().log_file_path.clone());
+                    let current_log_path =
+                        current_team_bot_log_path(&joins, &race_bots, team_id_for_task.as_str());
                     let Some(current_log_path) = current_log_path else {
                         break;
                     };
@@ -722,6 +638,7 @@ impl RaceService for RaceServiceImpl {
         let visible_target = self.resolve_stream_target(&req, &runtime_state)?;
         let simulation_hz = self.simulation_hz;
         let frame_hub = self.frame_hub.clone();
+        let runtime_store = self.runtime_store.clone();
         let active_streams = self.active_streams.clone();
         let known_cars = self.known_cars.clone();
         let last_client_seq = self.last_client_seq.clone();
@@ -729,13 +646,12 @@ impl RaceService for RaceServiceImpl {
         let car_owners = self.car_owners.clone();
         let car_engine_ids = self.car_engine_ids.clone();
         let car_targets = self.car_targets.clone();
-        #[cfg(feature = "official")]
-        let official_race_config_cache = self.official_race_config_cache.clone();
         let (tx, rx) = mpsc::channel(FRONTEND_STREAM_CHANNEL_CAPACITY);
 
         tokio::spawn(run_frontend_spectator_stream(
             engine,
             frame_hub,
+            runtime_store,
             simulation_hz,
             active_streams,
             known_cars,
@@ -751,8 +667,6 @@ impl RaceService for RaceServiceImpl {
             resolve_runtime_map_id(&runtime_state, visible_target.as_ref()),
             visible_target,
             cleanup_instance_uuid,
-            #[cfg(feature = "official")]
-            official_race_config_cache,
             tx,
         ));
 
@@ -1284,6 +1198,7 @@ fn build_frontend_settings_event(
 async fn run_frontend_spectator_stream(
     engine: EngineClient,
     frame_hub: FrameHub,
+    runtime_store: Arc<RaceRuntimeStore>,
     simulation_hz: u32,
     active_streams: Arc<DashMap<u64, ()>>,
     known_cars: Arc<DashMap<u64, ()>>,
@@ -1299,7 +1214,6 @@ async fn run_frontend_spectator_stream(
     runtime_map_id: String,
     visible_target: Option<EngineCommandTarget>,
     cleanup_instance_uuid: Option<String>,
-    #[cfg(feature = "official")] official_race_config_cache: OfficialRaceConfigCache,
     tx: mpsc::Sender<Result<FrontendSpectatorEvent, Status>>,
 ) {
     static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -1334,12 +1248,24 @@ async fn run_frontend_spectator_stream(
         return;
     }
 
-    #[cfg(feature = "official")]
-    let mut warned_missing_active_official_race_schedule = false;
-
     loop {
         ticker.tick().await;
         let frame = frame_rx.borrow().clone();
+        if matches!(visible_target.as_ref(), Some(EngineCommandTarget::OfficialRace)) {
+            let runtime_is_official_race = frame
+                .runtime_state
+                .as_ref()
+                .map(|state| state.activity_kind == EngineActivityKind::OfficialRace)
+                .unwrap_or(false);
+            if !runtime_is_official_race {
+                tracing::info!(
+                    stream_id,
+                    target = ?visible_target,
+                    "frontend spectator stream ended: official race runtime is no longer active"
+                );
+                break;
+            }
+        }
         let mut frame_cars: Vec<_> = frame
             .cars
             .values()
@@ -1425,28 +1351,7 @@ async fn run_frontend_spectator_stream(
             Some(EngineCommandTarget::OfficialRace) => {
                 #[cfg(feature = "official")]
                 {
-                    let now_ms = i64::try_from(frame.server_time_ms).unwrap_or(i64::MAX);
-                    let remaining = official_race_config_cache
-                        .runtime_remaining_sec(now_ms)
-                        .await;
-                    let runtime_is_official_race = frame
-                        .runtime_state
-                        .as_ref()
-                        .map(|state| state.activity_kind == EngineActivityKind::OfficialRace)
-                        .unwrap_or(false);
-                    if remaining.is_none()
-                        && runtime_is_official_race
-                        && !warned_missing_active_official_race_schedule
-                    {
-                        tracing::warn!(
-                            now_ms,
-                            "official race runtime is active but no active schedule entry was found"
-                        );
-                        warned_missing_active_official_race_schedule = true;
-                    } else if remaining.is_some() {
-                        warned_missing_active_official_race_schedule = false;
-                    }
-                    remaining
+                    runtime_store.official_race_remaining_sec(frame.server_time_ms)
                 }
                 #[cfg(not(feature = "official"))]
                 {

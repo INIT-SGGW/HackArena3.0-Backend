@@ -262,6 +262,11 @@ async fn collect_frame(
                 invalidate_best_lap_cache(cache, public_car_id);
                 continue;
             }
+            Err(err) if is_sandbox_runtime_not_active_invalid_argument(&err) => {
+                runtime_store.remove_car(public_car_id);
+                invalidate_best_lap_cache(cache, public_car_id);
+                continue;
+            }
             Err(err) => {
                 tracing::warn!(
                     public_car_id,
@@ -286,6 +291,11 @@ async fn collect_frame(
                         Some(VehicleRaceMetrics::default())
                     }
                     Err(EngineWorkerError::Engine(BoinkError::NotFound)) => {
+                        runtime_store.remove_car(public_car_id);
+                        invalidate_best_lap_cache(cache, public_car_id);
+                        continue;
+                    }
+                    Err(err) if is_sandbox_runtime_not_active_invalid_argument(&err) => {
                         runtime_store.remove_car(public_car_id);
                         invalidate_best_lap_cache(cache, public_car_id);
                         continue;
@@ -493,6 +503,14 @@ fn invalidate_best_lap_cache(cache: &mut FrameCollectorCache, car_id: u64) {
     {
         let _ = (cache, car_id);
     }
+}
+
+fn is_sandbox_runtime_not_active_invalid_argument(err: &EngineWorkerError) -> bool {
+    matches!(
+        err,
+        EngineWorkerError::InvalidArgument(message)
+            if message.to_ascii_lowercase().contains("sandbox runtime is not active")
+    )
 }
 
 #[cfg(any(feature = "official", feature = "local"))]

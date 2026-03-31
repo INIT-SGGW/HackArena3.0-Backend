@@ -76,6 +76,7 @@ const SERVICE_TOKEN_DEFAULT_TTL_SEC: u64 = 300;
 const SERVICE_TOKEN_TTL_SAFETY_SEC: u64 = 30;
 const SERVICE_TOKEN_MIN_TTL_SEC: u64 = 10;
 const BOT_DOCKER_TIMEOUT: Duration = Duration::from_secs(60);
+const SANDBOX_CAR_DESPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 const SUBMISSION_QUEUE_CAPACITY: usize = 64;
 const SLOT_UPDATE_CHANNEL_CAPACITY: usize = 128;
 const SLOT_STREAM_CHANNEL_CAPACITY: usize = 8;
@@ -85,6 +86,7 @@ const SUBMISSIONS_ROOT: &str = ".submissions";
 const LEGACY_BOT_LOGS_SUBDIR: &str = "bot-logs";
 const TEAM_SUBMISSIONS_SUBDIR: &str = "submissions";
 const TEAM_LOGS_SUBDIR: &str = "logs";
+const WRAPPER_CACHE_SUBDIR: &str = "wrapper-cache";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_API_TIMEOUT: Duration = Duration::from_secs(30);
 const REGISTRY_API_TIMEOUT: Duration = Duration::from_secs(10);
@@ -125,9 +127,14 @@ pub(crate) fn new_official_sandbox_join_registry() -> OfficialSandboxJoinRegistr
 pub(crate) struct TeamOfficialRaceBotState {
     pub(crate) public_car_id: u64,
     pub(crate) engine_car_id: u64,
+    pub(crate) start_position_index: u64,
     pub(crate) slot_index: i16,
     pub(crate) container_name: String,
     pub(crate) container_id: String,
+    pub(crate) submission_id: String,
+    pub(crate) image_ref: String,
+    pub(crate) log_file_path: PathBuf,
+    pub(crate) auto_restart_attempts: u32,
 }
 
 pub(crate) type OfficialRaceBotRegistry = Arc<DashMap<String, TeamOfficialRaceBotState>>;
@@ -833,6 +840,9 @@ pub struct SubmissionServiceImpl {
     repo: SubmissionRepo,
     token_validator: Arc<TokenValidator>,
     team_resolver: Arc<HpsTeamResolver>,
+    engine: EngineClient,
+    join_registry: OfficialSandboxJoinRegistry,
+    race_bot_registry: OfficialRaceBotRegistry,
     queue_tx: mpsc::Sender<SubmissionBuildJob>,
     submissions_root: PathBuf,
     archive_max_bytes: usize,
@@ -844,6 +854,9 @@ impl SubmissionServiceImpl {
         repo: SubmissionRepo,
         token_validator: Arc<TokenValidator>,
         team_resolver: Arc<HpsTeamResolver>,
+        engine: EngineClient,
+        join_registry: OfficialSandboxJoinRegistry,
+        race_bot_registry: OfficialRaceBotRegistry,
         queue_tx: mpsc::Sender<SubmissionBuildJob>,
         archive_max_mb: u32,
     ) -> Self {
@@ -851,6 +864,9 @@ impl SubmissionServiceImpl {
             repo,
             token_validator,
             team_resolver,
+            engine,
+            join_registry,
+            race_bot_registry,
             queue_tx,
             submissions_root: PathBuf::from(SUBMISSIONS_ROOT),
             archive_max_bytes: archive_max_mb as usize * 1024 * 1024,
@@ -1192,25 +1208,129 @@ impl OfficialSandboxCommandServiceImpl {
                 "failed to rollback bot container after join failure"
             );
         }
-        if let Err(err) = self.engine.despawn_car_in(target, engine_car_id).await {
-            if is_engine_resource_not_found(&err) {
-                tracing::debug!(
-                    team_id = %team_id,
-                    sandbox_id = %sandbox_id,
-                    engine_car_id,
-                    "rollback join: engine car already absent"
-                );
-            } else {
+        match tokio::time::timeout(
+            SANDBOX_CAR_DESPAWN_TIMEOUT,
+            self.engine.despawn_car_in(target, engine_car_id),
+        )
+        .await
+        {
+            Err(_) => {
                 tracing::warn!(
                     team_id = %team_id,
                     sandbox_id = %sandbox_id,
                     engine_car_id,
-                    error = %err,
-                    "failed to rollback spawned join car after bot container failure"
+                    timeout_sec = SANDBOX_CAR_DESPAWN_TIMEOUT.as_secs(),
+                    "rollback join: despawn timed out"
                 );
             }
+            Ok(Err(err)) => {
+                if is_engine_resource_not_found(&err) || is_sandbox_runtime_not_active(&err) {
+                    tracing::debug!(
+                        team_id = %team_id,
+                        sandbox_id = %sandbox_id,
+                        engine_car_id,
+                        "rollback join: engine car already absent or sandbox inactive"
+                    );
+                } else {
+                    tracing::warn!(
+                        team_id = %team_id,
+                        sandbox_id = %sandbox_id,
+                        engine_car_id,
+                        error = %err,
+                        "failed to rollback spawned join car after bot container failure"
+                    );
+                }
+            }
+            Ok(Ok(())) => {}
         }
         self.runtime_store.remove_car(public_car_id);
+    }
+
+    async fn cleanup_orphan_team_sandbox_cars(
+        &self,
+        team_id: &str,
+        reason: &str,
+    ) -> anyhow::Result<usize> {
+        let mut cleaned = 0usize;
+        for public_car_id in self.runtime_store.known_car_ids() {
+            let Some(identity) = self.runtime_store.car_identity(public_car_id) else {
+                continue;
+            };
+            let team_matches = identity
+                .team_id
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| value == team_id);
+            if !team_matches || identity.active_bot_slot.is_none() {
+                continue;
+            }
+
+            let Some(target) = self.runtime_store.car_target(public_car_id) else {
+                continue;
+            };
+            let EngineCommandTarget::Sandbox { sandbox_id } = &target else {
+                continue;
+            };
+
+            if let Some(engine_car_id) = self.runtime_store.car_engine_id(public_car_id) {
+                match tokio::time::timeout(
+                    SANDBOX_CAR_DESPAWN_TIMEOUT,
+                    self.engine.despawn_car_in(target.clone(), engine_car_id),
+                )
+                .await
+                {
+                    Err(_) => {
+                        tracing::warn!(
+                            team_id = %team_id,
+                            sandbox_id = %sandbox_id,
+                            public_car_id,
+                            engine_car_id,
+                            timeout_sec = SANDBOX_CAR_DESPAWN_TIMEOUT.as_secs(),
+                            reason,
+                            "orphan sandbox car cleanup: despawn timed out"
+                        );
+                    }
+                    Ok(Err(err)) => {
+                        if is_engine_resource_not_found(&err) || is_sandbox_runtime_not_active(&err) {
+                            tracing::debug!(
+                                team_id = %team_id,
+                                sandbox_id = %sandbox_id,
+                                public_car_id,
+                                engine_car_id,
+                                reason,
+                                "orphan sandbox car cleanup: engine car already absent or sandbox inactive"
+                            );
+                        } else {
+                            tracing::warn!(
+                                team_id = %team_id,
+                                sandbox_id = %sandbox_id,
+                                public_car_id,
+                                engine_car_id,
+                                error = %err,
+                                reason,
+                                "orphan sandbox car cleanup: failed to despawn engine car"
+                            );
+                        }
+                    }
+                    Ok(Ok(())) => {}
+                }
+            }
+
+            self.runtime_store.remove_car(public_car_id);
+            cleaned = cleaned.saturating_add(1);
+            tracing::warn!(
+                team_id = %team_id,
+                sandbox_id = %sandbox_id,
+                public_car_id,
+                reason,
+                "cleaned orphan official sandbox runtime car"
+            );
+        }
+
+        if cleaned > 0 {
+            let _ = self.slot_updates_tx.send(team_id.to_string());
+        }
+        Ok(cleaned)
     }
 
     async fn cleanup_join_state_locked(
@@ -1219,6 +1339,8 @@ impl OfficialSandboxCommandServiceImpl {
         join_state: TeamSandboxJoinState,
         reason: &str,
     ) -> Result<(), Status> {
+        let mut deferred_status: Option<Status> = None;
+
         if let Err(err) = remove_bot_container(&join_state.container_name).await {
             tracing::warn!(
                 team_id = %team_id,
@@ -1254,21 +1376,41 @@ impl OfficialSandboxCommandServiceImpl {
         let target = EngineCommandTarget::Sandbox {
             sandbox_id: join_state.sandbox_id.clone(),
         };
-        if let Err(err) = self
-            .engine
-            .despawn_car_in(target, join_state.engine_car_id)
-            .await
+        match tokio::time::timeout(
+            SANDBOX_CAR_DESPAWN_TIMEOUT,
+            self.engine.despawn_car_in(target, join_state.engine_car_id),
+        )
+        .await
         {
-            if is_engine_resource_not_found(&err) {
-                tracing::debug!(
+            Err(_) => {
+                tracing::warn!(
                     team_id = %team_id,
                     sandbox_id = %join_state.sandbox_id,
                     engine_car_id = join_state.engine_car_id,
-                    "join cleanup: engine car already absent"
+                    timeout_sec = SANDBOX_CAR_DESPAWN_TIMEOUT.as_secs(),
+                    "join cleanup: engine despawn timed out; continuing state cleanup"
                 );
-            } else {
-                return Err(map_worker_err(err));
             }
+            Ok(Err(err)) => {
+                if is_engine_resource_not_found(&err) || is_sandbox_runtime_not_active(&err) {
+                    tracing::debug!(
+                        team_id = %team_id,
+                        sandbox_id = %join_state.sandbox_id,
+                        engine_car_id = join_state.engine_car_id,
+                        "join cleanup: engine car already absent or sandbox inactive"
+                    );
+                } else {
+                    tracing::warn!(
+                        team_id = %team_id,
+                        sandbox_id = %join_state.sandbox_id,
+                        engine_car_id = join_state.engine_car_id,
+                        error = %err,
+                        "join cleanup: failed to despawn engine car; continuing state cleanup"
+                    );
+                    deferred_status = Some(map_worker_err(err));
+                }
+            }
+            Ok(Ok(())) => {}
         }
 
         self.runtime_store.remove_car(join_state.public_car_id);
@@ -1287,6 +1429,11 @@ impl OfficialSandboxCommandServiceImpl {
             reason,
             "official sandbox join resources cleaned"
         );
+
+        if let Some(status) = deferred_status {
+            return Err(status);
+        }
+
         Ok(())
     }
 
@@ -1300,9 +1447,9 @@ impl OfficialSandboxCommandServiceImpl {
                         team_id = %team_id,
                         container_id = %container_id,
                         error = %err,
-                        "failed waiting for bot container exit"
+                        "failed waiting for bot container exit; trying reconcile via docker inspect"
                     );
-                    return;
+                    -1
                 }
             };
             tracing::info!(
@@ -1324,6 +1471,37 @@ impl OfficialSandboxCommandServiceImpl {
                 return;
             }
 
+            if exit_code < 0 {
+                match is_bot_container_running(&join_state.container_name).await {
+                    Ok(true) => {
+                        tracing::debug!(
+                            team_id = %team_id,
+                            container_name = %join_state.container_name,
+                            "bot exit monitor reconcile: container still running, skipping cleanup"
+                        );
+                        return;
+                    }
+                    Ok(false) => {
+                        tracing::warn!(
+                            team_id = %team_id,
+                            container_name = %join_state.container_name,
+                            container_id = %container_id,
+                            "bot exit monitor reconcile: container is not running; proceeding with cleanup"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            team_id = %team_id,
+                            container_name = %join_state.container_name,
+                            container_id = %container_id,
+                            error = %err,
+                            "bot exit monitor reconcile failed; skipping cleanup"
+                        );
+                        return;
+                    }
+                }
+            }
+
             if let Err(err) = service
                 .cleanup_join_state_locked(&team_id, join_state, "container-exit")
                 .await
@@ -1342,14 +1520,25 @@ impl OfficialSandboxCommandServiceImpl {
         let service = self.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_millis(300));
+            let mut tick_counter: u64 = 0;
             loop {
                 ticker.tick().await;
+                tick_counter = tick_counter.wrapping_add(1);
                 let team_ids: Vec<String> = service
                     .join_registry
                     .iter()
                     .map(|entry| entry.key().clone())
                     .collect();
                 for team_id in team_ids {
+                    if tick_counter % 10 == 0
+                        && let Err(err) = service.reconcile_join_liveness_for_team(&team_id).await
+                    {
+                        tracing::warn!(
+                            team_id = %team_id,
+                            error = %err,
+                            "sandbox join liveness reconcile failed"
+                        );
+                    }
                     if let Err(err) = service
                         .try_apply_pending_selected_slot_for_team(&team_id)
                         .await
@@ -1363,6 +1552,128 @@ impl OfficialSandboxCommandServiceImpl {
                 }
             }
         });
+    }
+
+    async fn reconcile_join_liveness_for_team(&self, team_id: &str) -> anyhow::Result<()> {
+        let _guard = self.join_command_lock.lock().await;
+        let Some(join_state) = self
+            .join_registry
+            .get(team_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return Ok(());
+        };
+        let runtime_car_present = self
+            .runtime_store
+            .car_target(join_state.public_car_id)
+            .is_some()
+            && self
+                .runtime_store
+                .car_engine_id(join_state.public_car_id)
+                .is_some();
+        if !runtime_car_present {
+            tracing::warn!(
+                team_id = %team_id,
+                sandbox_id = %join_state.sandbox_id,
+                public_car_id = join_state.public_car_id,
+                engine_car_id = join_state.engine_car_id,
+                container_name = %join_state.container_name,
+                reason = "join-cleanup-missing-runtime-car",
+                "detected stale sandbox join with missing runtime car; forcing cleanup"
+            );
+            if let Err(status) = self
+                .cleanup_join_state_locked(team_id, join_state, "liveness-reconcile-missing-car")
+                .await
+            {
+                tracing::warn!(
+                    team_id = %team_id,
+                    error = %status,
+                    "liveness reconcile missing-car cleanup reported error (state cleaned best-effort)"
+                );
+            }
+            return Ok(());
+        }
+
+        if is_bot_container_running(&join_state.container_name).await? {
+            let log_capture_running = self
+                .log_capture_tasks
+                .get(team_id)
+                .map(|entry| !entry.value().is_finished())
+                .unwrap_or(false);
+            if log_capture_running {
+                return Ok(());
+            }
+
+            tracing::warn!(
+                team_id = %team_id,
+                sandbox_id = %join_state.sandbox_id,
+                slot_index = join_state.slot_index,
+                container_id = %join_state.container_id,
+                "detected running sandbox join without active log capture; restarting capture"
+            );
+            self.stop_log_capture_for_team(team_id).await;
+            let Some(slot_submission) = self
+                .repo
+                .get_succeeded_submission_for_slot(team_id, join_state.slot_index)
+                .await
+                .context("failed to resolve submission for sandbox log-capture restart")?
+            else {
+                tracing::warn!(
+                    team_id = %team_id,
+                    slot_index = join_state.slot_index,
+                    "cannot restart sandbox log capture because loaded slot submission is missing"
+                );
+                return Ok(());
+            };
+            let restarted_log_file = match self
+                .start_bot_log_capture(
+                    team_id,
+                    &slot_submission.submission_id,
+                    &join_state.sandbox_id,
+                    join_state.slot_index,
+                    &join_state.container_id,
+                )
+                .await
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    tracing::warn!(
+                        team_id = %team_id,
+                        sandbox_id = %join_state.sandbox_id,
+                        slot_index = join_state.slot_index,
+                        container_id = %join_state.container_id,
+                        error = %err,
+                        "failed to restart sandbox log capture for running container"
+                    );
+                    return Ok(());
+                }
+            };
+            if let Some(mut entry) = self.join_registry.get_mut(team_id)
+                && entry.container_id == join_state.container_id
+            {
+                entry.log_file_path = restarted_log_file;
+            }
+            return Ok(());
+        }
+
+        tracing::warn!(
+            team_id = %team_id,
+            sandbox_id = %join_state.sandbox_id,
+            container_name = %join_state.container_name,
+            container_id = %join_state.container_id,
+            "detected stale sandbox join with stopped container; forcing cleanup"
+        );
+        if let Err(status) = self
+            .cleanup_join_state_locked(team_id, join_state, "liveness-reconcile")
+            .await
+        {
+            tracing::warn!(
+                team_id = %team_id,
+                error = %status,
+                "liveness reconcile cleanup reported error (state cleaned best-effort)"
+            );
+        }
+        Ok(())
     }
 
     async fn try_apply_pending_selected_slot_for_team(&self, team_id: &str) -> anyhow::Result<()> {
@@ -1412,46 +1723,66 @@ impl OfficialSandboxCommandServiceImpl {
             "applying pending sandbox selected slot in pit"
         );
 
-        let team_bot_token = self
-            .game_token_issuer
-            .issue_team_bot_token(team_id)
-            .await
-            .map_err(|status| anyhow!(status.to_string()))?;
-        let wrapper_auth_token = self
-            .wrapper_auth_token_issuer
-            .issue_wrapper_auth_token()
-            .await
-            .map_err(|status| anyhow!(status.to_string()))?;
-        let switching_container_id = format!("switching-{}", current_time_ms());
-        if let Some(mut entry) = self.join_registry.get_mut(team_id) {
-            entry.container_id = switching_container_id.clone();
-        }
-        let container_id = start_bot_container(
-            image_ref,
-            &join_state.container_name,
-            &self.wrapper_backend_endpoint,
-            &team_bot_token,
-            &wrapper_auth_token,
-            team_id,
-            &selected_submission.submission_id,
-            &join_state.sandbox_id,
-            selected_slot,
-        )
-        .await
-        .context("failed to restart sandbox bot container for selected slot")?;
-
-        self.stop_log_capture_for_team(team_id).await;
-        let _ = compress_bot_log_file_if_exists(&join_state.log_file_path).await;
-        let log_file_path = self
-            .start_bot_log_capture(
+        let previous_container_id = join_state.container_id.clone();
+        self.runtime_store
+            .set_bot_switch_in_progress(join_state.public_car_id, true);
+        let switch_result: anyhow::Result<(String, PathBuf)> = async {
+            let team_bot_token = self
+                .game_token_issuer
+                .issue_team_bot_token(team_id)
+                .await
+                .map_err(|status| anyhow!(status.to_string()))?;
+            let wrapper_auth_token = self
+                .wrapper_auth_token_issuer
+                .issue_wrapper_auth_token()
+                .await
+                .map_err(|status| anyhow!(status.to_string()))?;
+            let switching_container_id = format!("switching-{}", current_time_ms());
+            if let Some(mut entry) = self.join_registry.get_mut(team_id) {
+                entry.container_id = switching_container_id;
+            }
+            let container_id = start_bot_container(
+                image_ref,
+                &join_state.container_name,
+                &self.wrapper_backend_endpoint,
+                &team_bot_token,
+                &wrapper_auth_token,
                 team_id,
                 &selected_submission.submission_id,
                 &join_state.sandbox_id,
                 selected_slot,
-                &container_id,
             )
             .await
-            .context("failed to restart sandbox log capture after slot switch")?;
+            .context("failed to restart sandbox bot container for selected slot")?;
+
+            self.stop_log_capture_for_team(team_id).await;
+            let _ = compress_bot_log_file_if_exists(&join_state.log_file_path).await;
+            let log_file_path = self
+                .start_bot_log_capture(
+                    team_id,
+                    &selected_submission.submission_id,
+                    &join_state.sandbox_id,
+                    selected_slot,
+                    &container_id,
+                )
+                .await
+                .context("failed to restart sandbox log capture after slot switch")?;
+            Ok((container_id, log_file_path))
+        }
+        .await;
+        self.runtime_store
+            .set_bot_switch_in_progress(join_state.public_car_id, false);
+        let (container_id, log_file_path) = match switch_result {
+            Ok(value) => value,
+            Err(err) => {
+                if let Some(mut entry) = self.join_registry.get_mut(team_id)
+                    && entry.container_id.starts_with("switching-")
+                {
+                    entry.container_id = previous_container_id;
+                }
+                return Err(err);
+            }
+        };
 
         self.join_registry.insert(
             team_id.to_string(),
@@ -1525,6 +1856,31 @@ impl SubmissionService for SubmissionServiceImpl {
 
         let (events_tx, events_rx) = mpsc::channel(BUILD_EVENT_CHANNEL_CAPACITY);
         let team_id = self.team_resolver.resolve_team_id(&user_id).await?;
+        let loaded_slot = loaded_slot_for_team_for_active_runtime(
+            &self.engine,
+            &self.join_registry,
+            &self.race_bot_registry,
+            &team_id,
+        )
+        .await;
+        if Some(slot_index) == loaded_slot {
+            return Err(Status::failed_precondition(
+                "requested slot is currently loaded",
+            ));
+        }
+        let persisted_selected_slot = self
+            .repo
+            .get_selected_slot_index(&team_id)
+            .await
+            .map_err(|err| Status::internal(format!("failed to resolve selected slot: {err}")))?;
+        if loaded_slot.is_some()
+            && persisted_selected_slot == Some(slot_index)
+            && persisted_selected_slot != loaded_slot
+        {
+            return Err(Status::failed_precondition(
+                "requested slot is selected for pending pit switch",
+            ));
+        }
         let submission_id = uuid::Uuid::new_v4().to_string();
         let archive_dir = self
             .submissions_root
@@ -1896,13 +2252,83 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
             .map_err(|_| Status::failed_precondition("slot must be between 1 and 3"))?;
 
         let _join_guard = self.join_command_lock.lock().await;
-        if self.join_registry.contains_key(&team_id) {
-            return Ok(Response::new(join_failed(
-                "team bot is already joined; leave first",
-            )));
+        let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
+        if let Some(existing_join) = self
+            .join_registry
+            .get(&team_id)
+            .map(|entry| entry.value().clone())
+        {
+            let existing_sandbox_active = runtime
+                .active_sandboxes
+                .iter()
+                .any(|sandbox| sandbox.sandbox_id == existing_join.sandbox_id);
+            let existing_runtime_car_present = self
+                .runtime_store
+                .car_target(existing_join.public_car_id)
+                .is_some()
+                && self
+                    .runtime_store
+                    .car_engine_id(existing_join.public_car_id)
+                    .is_some();
+            if existing_sandbox_active && existing_runtime_car_present {
+                match is_bot_container_running(&existing_join.container_name).await {
+                    Ok(true) => {
+                        return Ok(Response::new(join_failed(
+                            "team bot is already joined; leave first",
+                        )));
+                    }
+                    Ok(false) => {
+                        tracing::warn!(
+                            team_id = %team_id,
+                            stale_sandbox_id = %existing_join.sandbox_id,
+                            container_name = %existing_join.container_name,
+                            "detected stale official sandbox join with non-running container; cleaning up"
+                        );
+                    }
+                    Err(err) => {
+                        return Err(Status::internal(format!(
+                            "failed to verify existing team bot container: {}",
+                            clip_for_error(&format!("{err:#}"))
+                        )));
+                    }
+                }
+            }
+
+            tracing::warn!(
+                team_id = %team_id,
+                stale_sandbox_id = %existing_join.sandbox_id,
+                stale_public_car_id = existing_join.public_car_id,
+                stale_engine_car_id = existing_join.engine_car_id,
+                stale_runtime_car_present = existing_runtime_car_present,
+                requested_sandbox_id = %sandbox_id,
+                "detected stale official sandbox join entry; cleaning up before new join"
+            );
+            if let Err(err) = self
+                .cleanup_join_state_locked(&team_id, existing_join, "stale-join-entry")
+                .await
+            {
+                return Err(Status::internal(format!(
+                    "failed to cleanup stale join state: {err}"
+                )));
+            }
         }
 
-        let runtime = self.engine.runtime_state().await.map_err(map_worker_err)?;
+        if !self.join_registry.contains_key(&team_id) {
+            let cleaned_orphans = self
+                .cleanup_orphan_team_sandbox_cars(&team_id, "join-preflight-orphan-reconcile")
+                .await
+                .map_err(|err| {
+                    Status::internal(format!("failed to cleanup orphan sandbox cars: {err}"))
+                })?;
+            if cleaned_orphans > 0 {
+                tracing::warn!(
+                    team_id = %team_id,
+                    cleaned_orphans,
+                    "join preflight removed orphan sandbox cars for team"
+                );
+            }
+        }
+
         let sandbox_active = runtime
             .active_sandboxes
             .iter()
@@ -2118,14 +2544,36 @@ impl OfficialSandboxCommandService for OfficialSandboxCommandServiceImpl {
             .get(&team_id)
             .map(|entry| entry.value().clone());
         let Some(join_state) = join_state else {
+            let cleaned_orphans = self
+                .cleanup_orphan_team_sandbox_cars(&team_id, "leave-orphan-reconcile")
+                .await
+                .map_err(|err| {
+                    Status::internal(format!(
+                        "failed to cleanup orphan sandbox cars during leave: {err}"
+                    ))
+                })?;
+            if cleaned_orphans > 0 {
+                return Ok(Response::new(LeaveOfficialSandboxResponse {
+                    status: OfficialSandboxCommandStatus::Ok as i32,
+                    message: "left official sandbox".to_string(),
+                }));
+            }
             return Ok(Response::new(LeaveOfficialSandboxResponse {
                 status: OfficialSandboxCommandStatus::Ok as i32,
                 message: "already left".to_string(),
             }));
         };
 
-        self.cleanup_join_state_locked(&team_id, join_state, "leave-request")
-            .await?;
+        if let Err(err) = self
+            .cleanup_join_state_locked(&team_id, join_state, "leave-request")
+            .await
+        {
+            tracing::warn!(
+                team_id = %team_id,
+                error = %err,
+                "leave official sandbox: cleanup reported error (state already cleaned best-effort)"
+            );
+        }
         Ok(Response::new(LeaveOfficialSandboxResponse {
             status: OfficialSandboxCommandStatus::Ok as i32,
             message: "left official sandbox".to_string(),
@@ -2694,45 +3142,76 @@ async fn prepare_python_wrapper_wheel(
     run_config: &PythonRunConfig,
     events_tx: &mpsc::Sender<Result<SubmitBuildStreamResponse, Status>>,
 ) -> anyhow::Result<()> {
-    emit_build_log_line(events_tx, "[wrapper-fetch/python] resolving release asset").await;
     let (release_tag, asset_version) = normalize_wrapper_version(wrapper_version)?;
-    let asset_name = format!("hackarena3-{asset_version}-py3-none-any.whl");
-    let release =
-        fetch_github_release_by_tag(cfg, &cfg.wrapper_python_gh_repo, &release_tag).await?;
-    let asset = release
-        .assets
-        .into_iter()
-        .find(|entry| entry.name.eq_ignore_ascii_case(&asset_name))
-        .ok_or_else(|| {
-            anyhow!("wrapper-fetch: release `{release_tag}` does not contain asset `{asset_name}`")
-        })?;
+    let expected_asset_name = format!("hackarena3-{asset_version}-py3-none-any.whl");
+    let (asset_name, wheel_bytes) = if let Some((cached_name, cached_bytes)) =
+        load_cached_wrapper_asset_exact(
+            &cfg.wrapper_python_gh_repo,
+            &release_tag,
+            &expected_asset_name,
+        )
+        .await?
+    {
+        emit_build_log_line(
+            events_tx,
+            format!("[wrapper-fetch/python] cache hit `{cached_name}`"),
+        )
+        .await;
+        (cached_name, cached_bytes)
+    } else {
+        emit_build_log_line(events_tx, "[wrapper-fetch/python] resolving release asset").await;
+        let release =
+            fetch_github_release_by_tag(cfg, &cfg.wrapper_python_gh_repo, &release_tag).await?;
+        let asset = release
+            .assets
+            .into_iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(&expected_asset_name))
+            .ok_or_else(|| {
+                anyhow!(
+                    "wrapper-fetch: release `{release_tag}` does not contain asset `{expected_asset_name}`"
+                )
+            })?;
 
-    emit_build_log_line(
-        events_tx,
-        format!(
-            "[wrapper-fetch/python] downloading `{}` from {}/{}",
-            asset.name, cfg.wrapper_gh_owner, cfg.wrapper_python_gh_repo
-        ),
-    )
-    .await;
+        emit_build_log_line(
+            events_tx,
+            format!(
+                "[wrapper-fetch/python] downloading `{}` from {}/{}",
+                asset.name, cfg.wrapper_gh_owner, cfg.wrapper_python_gh_repo
+            ),
+        )
+        .await;
 
-    let wheel_bytes =
-        download_github_release_asset(cfg, &cfg.wrapper_python_gh_repo, &asset).await?;
+        let downloaded =
+            download_github_release_asset(cfg, &cfg.wrapper_python_gh_repo, &asset).await?;
+        store_cached_wrapper_asset(
+            &cfg.wrapper_python_gh_repo,
+            &release_tag,
+            &asset.name,
+            &downloaded,
+        )
+        .await?;
+        emit_build_log_line(
+            events_tx,
+            format!("[wrapper-fetch/python] cached `{}`", asset.name),
+        )
+        .await;
+        (asset.name, downloaded)
+    };
 
     let wheels_dir = context_dir.join("wheels");
     fs::create_dir_all(&wheels_dir)
         .await
         .with_context(|| format!("failed to create wheels directory {}", wheels_dir.display()))?;
-    if asset.name.contains('/') || asset.name.contains('\\') {
+    if asset_name.contains('/') || asset_name.contains('\\') {
         bail!("wrapper-fetch: asset name contains invalid path separators");
     }
-    let wheel_path = wheels_dir.join(&asset.name);
+    let wheel_path = wheels_dir.join(&asset_name);
     fs::write(&wheel_path, wheel_bytes)
         .await
         .with_context(|| format!("failed to write wrapper wheel {}", wheel_path.display()))?;
 
     let dockerfile_path = context_dir.join("Dockerfile");
-    let dockerfile = build_python_dockerfile(&asset.name, run_config)?;
+    let dockerfile = build_python_dockerfile(&asset_name, run_config)?;
     fs::write(&dockerfile_path, dockerfile)
         .await
         .with_context(|| {
@@ -2753,23 +3232,48 @@ async fn prepare_csharp_wrapper_package(
     run_config: &CsharpRunConfig,
     events_tx: &mpsc::Sender<Result<SubmitBuildStreamResponse, Status>>,
 ) -> anyhow::Result<()> {
-    emit_build_log_line(events_tx, "[wrapper-fetch/csharp] resolving release asset").await;
     let (release_tag, asset_version) = normalize_wrapper_version(wrapper_version)?;
-    let release =
-        fetch_github_release_by_tag(cfg, &cfg.wrapper_csharp_gh_repo, &release_tag).await?;
-    let asset = select_csharp_release_asset(release.assets, &asset_version, &release_tag)?;
+    let (asset_name, package_bytes) = if let Some((cached_name, cached_bytes)) =
+        load_cached_csharp_wrapper_asset(&cfg.wrapper_csharp_gh_repo, &release_tag, &asset_version)
+            .await?
+    {
+        emit_build_log_line(
+            events_tx,
+            format!("[wrapper-fetch/csharp] cache hit `{cached_name}`"),
+        )
+        .await;
+        (cached_name, cached_bytes)
+    } else {
+        emit_build_log_line(events_tx, "[wrapper-fetch/csharp] resolving release asset").await;
+        let release =
+            fetch_github_release_by_tag(cfg, &cfg.wrapper_csharp_gh_repo, &release_tag).await?;
+        let asset = select_csharp_release_asset(release.assets, &asset_version, &release_tag)?;
 
-    emit_build_log_line(
-        events_tx,
-        format!(
-            "[wrapper-fetch/csharp] downloading `{}` from {}/{}",
-            asset.name, cfg.wrapper_gh_owner, cfg.wrapper_csharp_gh_repo
-        ),
-    )
-    .await;
+        emit_build_log_line(
+            events_tx,
+            format!(
+                "[wrapper-fetch/csharp] downloading `{}` from {}/{}",
+                asset.name, cfg.wrapper_gh_owner, cfg.wrapper_csharp_gh_repo
+            ),
+        )
+        .await;
 
-    let package_bytes =
-        download_github_release_asset(cfg, &cfg.wrapper_csharp_gh_repo, &asset).await?;
+        let downloaded =
+            download_github_release_asset(cfg, &cfg.wrapper_csharp_gh_repo, &asset).await?;
+        store_cached_wrapper_asset(
+            &cfg.wrapper_csharp_gh_repo,
+            &release_tag,
+            &asset.name,
+            &downloaded,
+        )
+        .await?;
+        emit_build_log_line(
+            events_tx,
+            format!("[wrapper-fetch/csharp] cached `{}`", asset.name),
+        )
+        .await;
+        (asset.name, downloaded)
+    };
 
     let wrappers_dir = context_dir.join("wrappers");
     fs::create_dir_all(&wrappers_dir).await.with_context(|| {
@@ -2778,16 +3282,16 @@ async fn prepare_csharp_wrapper_package(
             wrappers_dir.display()
         )
     })?;
-    if asset.name.contains('/') || asset.name.contains('\\') {
+    if asset_name.contains('/') || asset_name.contains('\\') {
         bail!("wrapper-fetch: asset name contains invalid path separators");
     }
-    let package_path = wrappers_dir.join(&asset.name);
+    let package_path = wrappers_dir.join(&asset_name);
     fs::write(&package_path, package_bytes)
         .await
         .with_context(|| format!("failed to write wrapper package {}", package_path.display()))?;
 
     let dockerfile_path = context_dir.join("Dockerfile");
-    let dockerfile = build_csharp_dockerfile(&asset.name, run_config)?;
+    let dockerfile = build_csharp_dockerfile(&asset_name, run_config)?;
     fs::write(&dockerfile_path, dockerfile)
         .await
         .with_context(|| {
@@ -2808,23 +3312,47 @@ async fn prepare_typescript_wrapper_package(
     run_config: &TypescriptRunConfig,
     events_tx: &mpsc::Sender<Result<SubmitBuildStreamResponse, Status>>,
 ) -> anyhow::Result<()> {
-    emit_build_log_line(events_tx, "[wrapper-fetch/ts] resolving release asset").await;
     let (release_tag, asset_version) = normalize_wrapper_version(wrapper_version)?;
-    let release =
-        fetch_github_release_by_tag(cfg, &cfg.wrapper_typescript_gh_repo, &release_tag).await?;
-    let asset = select_typescript_release_asset(release.assets, &asset_version, &release_tag)?;
+    let expected_asset_name = format!("hackarena3-wrapper-ts-{asset_version}.tgz");
+    let (asset_name, package_bytes) = if let Some((cached_name, cached_bytes)) =
+        load_cached_wrapper_asset_exact(
+            &cfg.wrapper_typescript_gh_repo,
+            &release_tag,
+            &expected_asset_name,
+        )
+        .await?
+    {
+        emit_build_log_line(events_tx, format!("[wrapper-fetch/ts] cache hit `{cached_name}`"))
+            .await;
+        (cached_name, cached_bytes)
+    } else {
+        emit_build_log_line(events_tx, "[wrapper-fetch/ts] resolving release asset").await;
+        let release =
+            fetch_github_release_by_tag(cfg, &cfg.wrapper_typescript_gh_repo, &release_tag).await?;
+        let asset = select_typescript_release_asset(release.assets, &asset_version, &release_tag)?;
 
-    emit_build_log_line(
-        events_tx,
-        format!(
-            "[wrapper-fetch/ts] downloading `{}` from {}/{}",
-            asset.name, cfg.wrapper_gh_owner, cfg.wrapper_typescript_gh_repo
-        ),
-    )
-    .await;
+        emit_build_log_line(
+            events_tx,
+            format!(
+                "[wrapper-fetch/ts] downloading `{}` from {}/{}",
+                asset.name, cfg.wrapper_gh_owner, cfg.wrapper_typescript_gh_repo
+            ),
+        )
+        .await;
 
-    let package_bytes =
-        download_github_release_asset(cfg, &cfg.wrapper_typescript_gh_repo, &asset).await?;
+        let downloaded =
+            download_github_release_asset(cfg, &cfg.wrapper_typescript_gh_repo, &asset).await?;
+        store_cached_wrapper_asset(
+            &cfg.wrapper_typescript_gh_repo,
+            &release_tag,
+            &asset.name,
+            &downloaded,
+        )
+        .await?;
+        emit_build_log_line(events_tx, format!("[wrapper-fetch/ts] cached `{}`", asset.name))
+            .await;
+        (asset.name, downloaded)
+    };
 
     let wrappers_dir = context_dir.join("wrappers");
     fs::create_dir_all(&wrappers_dir).await.with_context(|| {
@@ -2833,10 +3361,10 @@ async fn prepare_typescript_wrapper_package(
             wrappers_dir.display()
         )
     })?;
-    if asset.name.contains('/') || asset.name.contains('\\') {
+    if asset_name.contains('/') || asset_name.contains('\\') {
         bail!("wrapper-fetch: asset name contains invalid path separators");
     }
-    let package_path = wrappers_dir.join(&asset.name);
+    let package_path = wrappers_dir.join(&asset_name);
     fs::write(&package_path, package_bytes)
         .await
         .with_context(|| {
@@ -2847,7 +3375,7 @@ async fn prepare_typescript_wrapper_package(
         })?;
 
     let dockerfile_path = context_dir.join("Dockerfile");
-    let dockerfile = build_typescript_dockerfile(&asset.name, run_config)?;
+    let dockerfile = build_typescript_dockerfile(&asset_name, run_config)?;
     fs::write(&dockerfile_path, dockerfile)
         .await
         .with_context(|| {
@@ -2943,21 +3471,149 @@ async fn download_github_release_asset(
     Ok(bytes.to_vec())
 }
 
+fn wrapper_cache_dir(repo: &str, release_tag: &str) -> PathBuf {
+    PathBuf::from(SUBMISSIONS_ROOT)
+        .join(WRAPPER_CACHE_SUBDIR)
+        .join(sanitize_storage_component(repo))
+        .join(sanitize_storage_component(release_tag))
+}
+
+async fn list_cached_wrapper_files(repo: &str, release_tag: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let cache_dir = wrapper_cache_dir(repo, release_tag);
+    let mut read_dir = match fs::read_dir(&cache_dir).await {
+        Ok(read_dir) => read_dir,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "wrapper-fetch: failed to open cache directory {}",
+                    cache_dir.display()
+                )
+            });
+        }
+    };
+
+    let mut files = Vec::new();
+    while let Some(entry) = read_dir.next_entry().await.with_context(|| {
+        format!(
+            "wrapper-fetch: failed to iterate cache directory {}",
+            cache_dir.display()
+        )
+    })? {
+        let entry_path = entry.path();
+        let file_type = entry.file_type().await.with_context(|| {
+            format!(
+                "wrapper-fetch: failed to inspect cache file type {}",
+                entry_path.display()
+            )
+        })?;
+        if file_type.is_file() {
+            files.push(entry_path);
+        }
+    }
+
+    Ok(files)
+}
+
+async fn load_cached_wrapper_asset_exact(
+    repo: &str,
+    release_tag: &str,
+    expected_name: &str,
+) -> anyhow::Result<Option<(String, Vec<u8>)>> {
+    for path in list_cached_wrapper_files(repo, release_tag).await? {
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !file_name.eq_ignore_ascii_case(expected_name) {
+            continue;
+        }
+        let bytes = fs::read(&path).await.with_context(|| {
+            format!("wrapper-fetch: failed to read cached asset {}", path.display())
+        })?;
+        return Ok(Some((file_name.to_string(), bytes)));
+    }
+    Ok(None)
+}
+
+async fn load_cached_csharp_wrapper_asset(
+    repo: &str,
+    release_tag: &str,
+    asset_version: &str,
+) -> anyhow::Result<Option<(String, Vec<u8>)>> {
+    let mut candidates: Vec<PathBuf> = list_cached_wrapper_files(repo, release_tag)
+        .await?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| is_csharp_asset_name_match(name, asset_version))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    candidates.sort();
+    let selected = candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("wrapper-fetch: failed to select cached C# package"))?;
+    let file_name = selected
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow!("wrapper-fetch: cached C# package path is invalid UTF-8"))?
+        .to_string();
+    let bytes = fs::read(&selected).await.with_context(|| {
+        format!(
+            "wrapper-fetch: failed to read cached C# package {}",
+            selected.display()
+        )
+    })?;
+    Ok(Some((file_name, bytes)))
+}
+
+async fn store_cached_wrapper_asset(
+    repo: &str,
+    release_tag: &str,
+    asset_name: &str,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    if asset_name.contains('/') || asset_name.contains('\\') {
+        bail!("wrapper-fetch: asset name contains invalid path separators");
+    }
+    let cache_dir = wrapper_cache_dir(repo, release_tag);
+    fs::create_dir_all(&cache_dir).await.with_context(|| {
+        format!(
+            "wrapper-fetch: failed to create cache directory {}",
+            cache_dir.display()
+        )
+    })?;
+    let cache_file = cache_dir.join(asset_name);
+    fs::write(&cache_file, bytes).await.with_context(|| {
+        format!(
+            "wrapper-fetch: failed to write cache file {}",
+            cache_file.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn is_csharp_asset_name_match(asset_name: &str, asset_version: &str) -> bool {
+    let asset_version = asset_version.to_ascii_lowercase();
+    let name = asset_name.to_ascii_lowercase();
+    let expected_legacy_prefix = format!("hackarena3-{asset_version}");
+    let expected_dotted_name = format!("hackarena3.wrapper.csharp.{asset_version}.nupkg");
+    name.ends_with(".nupkg")
+        && (name.starts_with(&expected_legacy_prefix) || name == expected_dotted_name)
+}
+
 fn select_csharp_release_asset(
     assets: Vec<GitHubReleaseAsset>,
     asset_version: &str,
     release_tag: &str,
 ) -> anyhow::Result<GitHubReleaseAsset> {
-    let asset_version = asset_version.to_ascii_lowercase();
-    let expected_legacy_prefix = format!("hackarena3-{asset_version}");
-    let expected_dotted_name = format!("hackarena3.wrapper.csharp.{asset_version}.nupkg");
     let mut matches: Vec<GitHubReleaseAsset> = assets
         .into_iter()
-        .filter(|entry| {
-            let name = entry.name.to_ascii_lowercase();
-            name.ends_with(".nupkg")
-                && (name.starts_with(&expected_legacy_prefix) || name == expected_dotted_name)
-        })
+        .filter(|entry| is_csharp_asset_name_match(&entry.name, asset_version))
         .collect();
 
     match matches.len() {
@@ -3043,7 +3699,18 @@ fn build_python_dockerfile(
     Ok(format!(
         r#"FROM python:3.10-slim
 WORKDIR /app
-ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app/src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libfreetype6 \
+    libpng16-16 \
+    libgomp1 \
+    libglib2.0-0 \
+    libgl1 \
+    libxrender1 \
+    libxext6 \
+    libsm6 \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app/src MPLBACKEND=Agg
 COPY wheels/{wheel_file_name} /app/wheels/{wheel_file_name}
 COPY user/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir /app/wheels/{wheel_file_name}
@@ -3855,8 +4522,37 @@ pub(crate) async fn start_bot_container(
     sandbox_id: &str,
     slot_index: i16,
 ) -> anyhow::Result<String> {
+    start_bot_container_with_options(
+        image_ref,
+        container_name,
+        wrapper_backend_endpoint,
+        team_token,
+        wrapper_auth_token,
+        team_id,
+        submission_id,
+        sandbox_id,
+        slot_index,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn start_bot_container_with_options(
+    image_ref: &str,
+    container_name: &str,
+    wrapper_backend_endpoint: &str,
+    team_token: &str,
+    wrapper_auth_token: &str,
+    team_id: &str,
+    submission_id: &str,
+    sandbox_id: &str,
+    slot_index: i16,
+    pull_image: bool,
+) -> anyhow::Result<String> {
     remove_bot_container(container_name).await?;
-    pull_bot_image(image_ref).await?;
+    if pull_image {
+        pull_bot_image(image_ref).await?;
+    }
 
     let mut command = Command::new("docker");
     command
@@ -3944,6 +4640,40 @@ pub(crate) async fn remove_bot_container(container_name: &str) -> anyhow::Result
             let lower = err.to_string().to_ascii_lowercase();
             if lower.contains("no such container") {
                 Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+async fn is_bot_container_running(container_name: &str) -> anyhow::Result<bool> {
+    let mut command = Command::new("docker");
+    command
+        .arg("inspect")
+        .arg("-f")
+        .arg("{{.State.Running}}")
+        .arg(container_name);
+    match run_command_capture(command, "docker/inspect", Some(BOT_DOCKER_TIMEOUT)).await {
+        Ok((stdout, _stderr)) => {
+            let running = stdout
+                .lines()
+                .rev()
+                .find_map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.eq_ignore_ascii_case("true"))
+                    }
+                })
+                .unwrap_or(false);
+            Ok(running)
+        }
+        Err(err) => {
+            let lower = err.to_string().to_ascii_lowercase();
+            if lower.contains("no such container") || lower.contains("container does not exist") {
+                Ok(false)
             } else {
                 Err(err)
             }
@@ -4467,6 +5197,14 @@ fn ssh_error_hint(stderr: &str) -> Option<&'static str> {
 
 fn is_engine_resource_not_found(err: &EngineWorkerError) -> bool {
     matches!(err, EngineWorkerError::Engine(BoinkError::NotFound))
+}
+
+fn is_sandbox_runtime_not_active(err: &EngineWorkerError) -> bool {
+    matches!(
+        err,
+        EngineWorkerError::InvalidArgument(message)
+            if message.to_ascii_lowercase().contains("sandbox runtime is not active")
+    )
 }
 
 fn preflight_ssh_transport(cfg: &Config) -> anyhow::Result<()> {

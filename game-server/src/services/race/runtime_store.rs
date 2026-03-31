@@ -2,6 +2,10 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
+#[cfg(feature = "official")]
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "official")]
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use boink::model::{PitstopZone, TyreType, VehicleRaceMetrics, VehicleState};
@@ -20,7 +24,9 @@ pub struct RuntimeCarIdentity {
     pub team_id: Option<String>,
     pub instance_uuid: Option<String>,
     pub local_bot_index: Option<u32>,
+    pub official_race_start_position_index: Option<u64>,
     pub active_bot_slot: Option<i16>,
+    pub bot_switch_in_progress: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -94,6 +100,14 @@ pub struct RuntimeControlInputSnapshot {
     pub input_brake: f32,
     pub current_brake_balancer: f32,
     pub current_differential_lock: f32,
+}
+
+#[cfg(feature = "official")]
+#[derive(Debug, Clone, Default)]
+pub struct OfficialRacePublicStateSnapshot {
+    pub race_name: String,
+    pub map_id: String,
+    pub prepared_at_ms: u64,
 }
 
 impl Default for RuntimeControlInputSnapshot {
@@ -174,6 +188,14 @@ pub struct RaceRuntimeStore {
     car_pit_state: Arc<DashMap<u64, RuntimePitState>>,
     car_controls_input: Arc<DashMap<u64, RuntimeControlInputSnapshot>>,
     local_bot_next_index: Arc<DashMap<(String, String), u32>>,
+    #[cfg(feature = "official")]
+    official_race_started: Arc<AtomicBool>,
+    #[cfg(feature = "official")]
+    official_race_started_at_ms: Arc<AtomicU64>,
+    #[cfg(feature = "official")]
+    official_race_duration_sec: Arc<AtomicU64>,
+    #[cfg(feature = "official")]
+    official_race_public_state: Arc<RwLock<Option<OfficialRacePublicStateSnapshot>>>,
 }
 
 impl RaceRuntimeStore {
@@ -190,6 +212,14 @@ impl RaceRuntimeStore {
             car_pit_state: Arc::new(DashMap::new()),
             car_controls_input: Arc::new(DashMap::new()),
             local_bot_next_index: Arc::new(DashMap::new()),
+            #[cfg(feature = "official")]
+            official_race_started: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "official")]
+            official_race_started_at_ms: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "official")]
+            official_race_duration_sec: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "official")]
+            official_race_public_state: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -451,11 +481,109 @@ impl RaceRuntimeStore {
         }
     }
 
+    pub fn set_bot_switch_in_progress(&self, car_id: u64, in_progress: bool) {
+        if let Some(mut identity) = self.car_identity.get_mut(&car_id) {
+            identity.bot_switch_in_progress = in_progress;
+        }
+    }
+
+    pub fn is_bot_switch_in_progress(&self, car_id: u64) -> bool {
+        self.car_identity
+            .get(&car_id)
+            .map(|entry| entry.bot_switch_in_progress)
+            .unwrap_or(false)
+    }
+
     pub fn is_in_stationary_fix(&self, car_id: u64) -> bool {
         self.car_pit_state
             .get(&car_id)
             .map(|entry| entry.in_stationary_fix)
             .unwrap_or(false)
+    }
+
+    #[cfg(feature = "official")]
+    pub fn set_official_race_prepared(
+        &self,
+        race_name: &str,
+        map_id: &str,
+        race_duration_sec: u32,
+        prepared_at_ms: u64,
+    ) {
+        self.official_race_duration_sec
+            .store(u64::from(race_duration_sec), Ordering::Relaxed);
+        self.official_race_started_at_ms.store(0, Ordering::Relaxed);
+        self.official_race_started.store(false, Ordering::Relaxed);
+        if let Ok(mut guard) = self.official_race_public_state.write() {
+            *guard = Some(OfficialRacePublicStateSnapshot {
+                race_name: race_name.to_string(),
+                map_id: map_id.to_string(),
+                prepared_at_ms,
+            });
+        }
+    }
+
+    #[cfg(feature = "official")]
+    pub fn mark_official_race_started(&self, started_at_ms: u64) {
+        self.official_race_started_at_ms
+            .store(started_at_ms, Ordering::Relaxed);
+        self.official_race_started.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "official")]
+    pub fn clear_official_race_session(&self) {
+        self.official_race_started.store(false, Ordering::Relaxed);
+        self.official_race_started_at_ms.store(0, Ordering::Relaxed);
+        self.official_race_duration_sec.store(0, Ordering::Relaxed);
+        if let Ok(mut guard) = self.official_race_public_state.write() {
+            *guard = None;
+        }
+    }
+
+    #[cfg(feature = "official")]
+    pub fn is_official_race_started(&self) -> bool {
+        self.official_race_started.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "official")]
+    pub fn official_race_remaining_sec(&self, now_ms: u64) -> Option<f32> {
+        if !self.is_official_race_started() {
+            return None;
+        }
+        let started_at_ms = self.official_race_started_at_ms.load(Ordering::Relaxed);
+        let duration_sec = self.official_race_duration_sec.load(Ordering::Relaxed);
+        if started_at_ms == 0 || duration_sec == 0 {
+            return None;
+        }
+        let end_ms = started_at_ms.saturating_add(duration_sec.saturating_mul(1_000));
+        let remaining_ms = end_ms.saturating_sub(now_ms);
+        Some(remaining_ms as f32 / 1_000.0)
+    }
+
+    #[cfg(feature = "official")]
+    pub fn official_race_duration_sec(&self) -> Option<u32> {
+        let value = self.official_race_duration_sec.load(Ordering::Relaxed);
+        if value == 0 {
+            return None;
+        }
+        u32::try_from(value).ok()
+    }
+
+    #[cfg(feature = "official")]
+    pub fn official_race_started_at_ms(&self) -> Option<u64> {
+        let value = self.official_race_started_at_ms.load(Ordering::Relaxed);
+        if value == 0 {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    #[cfg(feature = "official")]
+    pub fn official_race_public_state(&self) -> Option<OfficialRacePublicStateSnapshot> {
+        self.official_race_public_state
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     pub fn update_pit_state_from_runtime(

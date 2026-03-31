@@ -9,6 +9,11 @@ use proto::race::v1::{
     PublicSandboxRuntimeMode, PublicUpcomingRaceSummary, StreamPublicMenuStateRequest,
     public_runtime_state,
 };
+#[cfg(feature = "official")]
+use proto::race::v1::{
+    PublicOfficialRaceRunningState, PublicOfficialRaceRuntimeInfo, PublicOfficialRaceStagingState,
+    public_official_race_runtime_info,
+};
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -18,6 +23,8 @@ use crate::auth::auth_claims::TokenValidator;
 use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 use crate::db::repos::sandbox_config::{SandboxConfigRecord, SandboxConfigRepo};
 use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
+#[cfg(feature = "official")]
+use crate::runtime::engine_worker::EngineCommandTarget;
 use crate::services::error_map::map_worker_err;
 use crate::services::race::RaceRuntimeStore;
 #[cfg(feature = "official")]
@@ -172,6 +179,79 @@ impl PublicMenuServiceImpl {
         let runtime_state = PublicRuntimeState {
             server_time_utc: Some(utc_now_timestamp()),
             active_mode: match runtime.activity_kind {
+                EngineActivityKind::OfficialRace => {
+                    #[cfg(feature = "official")]
+                    {
+                        let official_state = self.runtime_store.official_race_public_state();
+                        let race_name = official_state
+                            .as_ref()
+                            .map(|state| state.race_name.trim())
+                            .filter(|value| !value.is_empty())
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "Official Race".to_string());
+                        let map_id = if runtime.map_id.trim().is_empty() {
+                            official_state
+                                .as_ref()
+                                .map(|state| state.map_id.clone())
+                                .unwrap_or_default()
+                        } else {
+                            runtime.map_id.clone()
+                        };
+                        let race_duration_sec =
+                            self.runtime_store.official_race_duration_sec().unwrap_or(0);
+                        let start_time_utc = official_state
+                            .as_ref()
+                            .and_then(|state| i64::try_from(state.prepared_at_ms).ok())
+                            .map(unix_ms_to_timestamp);
+                        let phase_state = if self.runtime_store.is_official_race_started() {
+                            let planned_end_at_utc = self
+                                .runtime_store
+                                .official_race_started_at_ms()
+                                .zip(self.runtime_store.official_race_duration_sec())
+                                .and_then(|(started_at_ms, duration_sec)| {
+                                    started_at_ms
+                                        .checked_add(
+                                            u64::from(duration_sec).saturating_mul(1_000),
+                                        )
+                                        .and_then(|end_ms| i64::try_from(end_ms).ok())
+                                        .map(unix_ms_to_timestamp)
+                                });
+                            Some(public_official_race_runtime_info::PhaseState::Running(
+                                PublicOfficialRaceRunningState { planned_end_at_utc },
+                            ))
+                        } else {
+                            let expected_player_count = self
+                                .runtime_store
+                                .car_targets()
+                                .iter()
+                                .filter(|entry| {
+                                    matches!(entry.value(), EngineCommandTarget::OfficialRace)
+                                })
+                                .count()
+                                .try_into()
+                                .unwrap_or(u32::MAX);
+                            Some(public_official_race_runtime_info::PhaseState::Staging(
+                                PublicOfficialRaceStagingState {
+                                    ready_player_count: expected_player_count,
+                                    expected_player_count,
+                                },
+                            ))
+                        };
+                        Some(public_runtime_state::ActiveMode::OfficialRace(
+                            PublicOfficialRaceRuntimeInfo {
+                                race_name,
+                                map_id,
+                                start_time_utc,
+                                race_duration_sec,
+                                phase_state,
+                            },
+                        ))
+                    }
+                    #[cfg(not(feature = "official"))]
+                    {
+                        None
+                    }
+                }
                 EngineActivityKind::Sandbox => Some(public_runtime_state::ActiveMode::SandboxMode(
                     PublicSandboxRuntimeMode {
                         sandboxes: runtime
@@ -197,7 +277,7 @@ impl PublicMenuServiceImpl {
                             .collect(),
                     },
                 )),
-                EngineActivityKind::None | EngineActivityKind::OfficialRace => None,
+                EngineActivityKind::None => None,
             },
         };
 
