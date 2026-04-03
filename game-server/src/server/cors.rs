@@ -14,7 +14,7 @@ pub fn cors_layer(cfg: &Config) -> CorsLayer {
         .allow_origin(cfg.allow_origin.clone())
         .expose_headers(cfg.expose_headers.clone());
 
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     let layer = layer.allow_credentials(true);
 
     layer

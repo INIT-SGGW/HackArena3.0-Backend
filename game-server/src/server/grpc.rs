@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "official")]
 use proto::achievement::v1::achievement_stream_service_server::AchievementStreamServiceServer;
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 use proto::hackarena::connect::v1::connect_service_server::ConnectServiceServer;
 use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "local")]
@@ -55,9 +55,9 @@ use crate::db::repos::sandbox_config::SandboxConfigRepo;
 use crate::db::repos::submission::SubmissionRepo;
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 use crate::local::broker::BrokerRegistrationState;
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 use crate::local::map_assets::LocalMapAssetsSync;
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::LocalSandboxConfigStore;
@@ -65,7 +65,7 @@ use crate::runtime::engine_worker::EngineClient;
 #[cfg(feature = "official")]
 use crate::services::achievement_stream::AchievementStreamServiceImpl;
 use crate::services::asset::AssetServiceImpl;
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 use crate::services::connect::ConnectServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
@@ -103,7 +103,8 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")] official_db_pool: sqlx::PgPool,
     mut shutdown_rx: broadcast::Receiver<()>,
     active_connections: Arc<AtomicUsize>,
-    #[cfg(feature = "local")] broker_registration_state: BrokerRegistrationState,
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
+    broker_registration_state: BrokerRegistrationState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (health_reporter, health_service) = health_reporter();
 
@@ -133,7 +134,7 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<LocalSandboxAdminServiceServer<LocalSandboxAdminServiceImpl>>()
         .await;
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     health_reporter
         .set_serving::<ConnectServiceServer<ConnectServiceImpl>>()
         .await;
@@ -255,17 +256,25 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let asset_impl =
         AssetServiceImpl::for_official(cfg.tracks_dir.clone(), token_validator.clone());
-    #[cfg(feature = "local")]
-    let local_map_sync = Arc::new(
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
+    let local_map_sync = Some(Arc::new(
         LocalMapAssetsSync::new(
             cfg.backend_endpoint.clone(),
             cfg.local_tracks_cache_dir.clone(),
         )
         .map_err(std::io::Error::other)?,
+    ));
+    #[cfg(all(feature = "local", feature = "standalone"))]
+    let local_map_sync: Option<Arc<crate::local::map_assets::LocalMapAssetsSync>> = None;
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
+    let asset_impl = AssetServiceImpl::for_local(
+        cfg.local_tracks_cache_dir.clone(),
+        local_map_sync
+            .clone()
+            .expect("local map sync should be initialized in local mode"),
     );
-    #[cfg(feature = "local")]
-    let asset_impl =
-        AssetServiceImpl::for_local(cfg.local_tracks_cache_dir.clone(), local_map_sync.clone());
+    #[cfg(all(feature = "local", feature = "standalone"))]
+    let asset_impl = AssetServiceImpl::for_standalone(cfg.tracks_dir.clone());
     let race_runtime_store = Arc::new(RaceRuntimeStore::new());
     #[cfg(feature = "official")]
     let official_sandbox_command_impl = OfficialSandboxCommandServiceImpl::new(
@@ -431,11 +440,11 @@ pub async fn serve_grpc(
             local_sandbox_engine,
             race_runtime_store.clone(),
             cfg.local_max_active_sandboxes,
-            local_map_sync.clone(),
+            local_map_sync,
             local_weather_events,
         )
     };
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     let connect_impl = ConnectServiceImpl::new(broker_registration_state);
 
     let cors = cors_layer(&cfg);
@@ -511,7 +520,7 @@ pub async fn serve_grpc(
     let server = server.add_service(LocalSandboxAdminServiceServer::new(
         local_sandbox_admin_impl,
     ));
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     let server = server.add_service(ConnectServiceServer::new(connect_impl));
 
     let serve_result = server

@@ -15,7 +15,7 @@ const DEFAULT_SUBMISSION_BUILD_TIMEOUT_SEC: u64 = 1_800;
 const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
 #[cfg(feature = "local")]
 const LOCAL_SANDBOX_STORE_RELATIVE_PATH: &str = "local/sandbox-configs.json";
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 const LOCAL_TRACKS_CACHE_RELATIVE_PATH: &str = "local/tracks-cache";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,10 +140,16 @@ impl Config {
         #[cfg(not(feature = "official"))]
         let issuers_env = "GAME_JWT_LOCAL_ISSUERS";
 
+        #[cfg(not(feature = "standalone"))]
         let jwt_audience =
             parse_list_env(audience_env)?.ok_or_else(|| format!("{audience_env} must be set"))?;
+        #[cfg(not(feature = "standalone"))]
         let jwt_issuers =
             parse_list_env(issuers_env)?.ok_or_else(|| format!("{issuers_env} must be set"))?;
+        #[cfg(feature = "standalone")]
+        let jwt_audience = parse_list_env(audience_env)?.unwrap_or_default();
+        #[cfg(feature = "standalone")]
+        let jwt_issuers = parse_list_env(issuers_env)?.unwrap_or_default();
 
         let listen_addr = std::env::var("LISTEN_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
@@ -152,7 +158,7 @@ impl Config {
 
         let raw_allow_origins = std::env::var("CORS_ALLOWED_ORIGINS").ok();
 
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         {
             let has_wildcard = match raw_allow_origins.as_deref() {
                 None => true,
@@ -203,12 +209,24 @@ impl Config {
             }
             tracks_dir
         };
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let tracks_dir = {
             let dir = resolve_local_tracks_cache_dir()
                 .map_err(|e| format!("Failed to resolve local tracks cache directory: {e}"))?;
             tracing::info!(path = %dir.display(), "using local tracks cache directory");
             dir
+        };
+        #[cfg(all(feature = "local", feature = "standalone"))]
+        let tracks_dir = {
+            let tracks_rel = PathBuf::from("assets").join("tracks");
+            let tracks_dir = resolve_dir("TRACKS_DIR", tracks_rel)
+                .map_err(|e| format!("Failed to resolve tracks directory: {}", e))?;
+
+            tracing::info!(
+                path = %tracks_dir.display(),
+                "using standalone tracks bundle directory"
+            );
+            tracks_dir
         };
 
         let bolids_rel = PathBuf::from("assets").join("bolids");
@@ -247,13 +265,20 @@ impl Config {
         }
 
         let api_url = read_env_string("API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        #[cfg(not(feature = "standalone"))]
         let game_token_jwks_endpoint = to_game_token_jwks_endpoint(&api_url)?;
+        #[cfg(feature = "standalone")]
+        let game_token_jwks_endpoint = "http://127.0.0.1:65535/gametoken".to_string();
         #[cfg(feature = "official")]
         let game_token_issuer_endpoint = to_game_token_issuer_endpoint(&api_url)?;
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let broker_endpoint = to_broker_endpoint(&api_url)?;
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let backend_endpoint = to_backend_endpoint(&api_url)?;
+        #[cfg(all(feature = "local", feature = "standalone"))]
+        let broker_endpoint = String::new();
+        #[cfg(all(feature = "local", feature = "standalone"))]
+        let backend_endpoint = String::new();
 
         #[cfg(feature = "local")]
         let local_sandbox_store_path = default_local_sandbox_store_path();
@@ -435,12 +460,13 @@ fn default_local_sandbox_store_path() -> PathBuf {
     PathBuf::from(LOCAL_SANDBOX_STORE_RELATIVE_PATH)
 }
 
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 fn to_broker_endpoint(api_url: &str) -> Result<String, String> {
     let trimmed = validate_api_url(api_url)?;
     Ok(format!("{trimmed}/broker"))
 }
 
+#[cfg(not(feature = "standalone"))]
 fn to_game_token_jwks_endpoint(api_url: &str) -> Result<String, String> {
     let trimmed = validate_api_url(api_url)?;
     Ok(format!("{trimmed}/gametoken"))
@@ -452,12 +478,13 @@ fn to_game_token_issuer_endpoint(api_url: &str) -> Result<String, String> {
     Ok(format!("{trimmed}/gametoken"))
 }
 
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 fn to_backend_endpoint(api_url: &str) -> Result<String, String> {
     let trimmed = validate_api_url(api_url)?;
     Ok(format!("{trimmed}/backend"))
 }
 
+#[cfg(not(feature = "standalone"))]
 fn validate_api_url(api_url: &str) -> Result<&str, String> {
     let trimmed = api_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -501,7 +528,7 @@ fn exe_dir() -> Option<PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 fn resolve_local_tracks_cache_dir() -> anyhow::Result<PathBuf> {
     let path = if let Some(raw) = read_env_string("LOCAL_TRACKS_CACHE_DIR") {
         PathBuf::from(raw)

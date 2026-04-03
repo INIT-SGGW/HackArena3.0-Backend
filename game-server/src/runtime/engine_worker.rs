@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -2115,7 +2115,7 @@ fn current_unix_ms() -> i64 {
     seconds.saturating_mul(1000).saturating_add(nanos_ms)
 }
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
     if map_id.trim().is_empty() {
         return Err(EngineWorkerError::InvalidArgument(
@@ -2130,7 +2130,7 @@ fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
     Ok(())
 }
 
-#[cfg(not(feature = "official"))]
+#[cfg(all(not(feature = "official"), not(feature = "standalone")))]
 fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
     if map_id.trim().is_empty() {
         return Err(EngineWorkerError::InvalidArgument(
@@ -2151,9 +2151,9 @@ fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
 /// Builds the engine instance using server configuration defaults.
 fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError> {
     validate_map_id(map_id)?;
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     let track_glb = resolve_official_track_glb_path(&cfg.tracks_dir, map_id)?;
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     let track_glb = cfg.local_tracks_cache_dir.join(format!("{map_id}.glb"));
     tracing::info!(
         env = ?cfg.env,
@@ -2186,7 +2186,7 @@ fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError>
     builder.build().map_err(EngineWorkerError::Engine)
 }
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 fn resolve_official_track_glb_path(
     tracks_dir: &Path,
     storage_key: &str,

@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 #[cfg(feature = "official")]
-use std::sync::atomic::AtomicBool;
-#[cfg(feature = "official")]
 use std::sync::RwLock;
+#[cfg(feature = "official")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use boink::model::{PitstopZone, TyreType, VehicleRaceMetrics, VehicleState};
@@ -571,11 +571,7 @@ impl RaceRuntimeStore {
     #[cfg(feature = "official")]
     pub fn official_race_started_at_ms(&self) -> Option<u64> {
         let value = self.official_race_started_at_ms.load(Ordering::Relaxed);
-        if value == 0 {
-            None
-        } else {
-            Some(value)
-        }
+        if value == 0 { None } else { Some(value) }
     }
 
     #[cfg(feature = "official")]

@@ -3,6 +3,10 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(any(
+    feature = "official",
+    all(feature = "local", not(feature = "standalone"))
+))]
 use std::sync::Arc;
 
 use async_stream::try_stream;
@@ -24,22 +28,22 @@ use tonic::{Request, Response, Status};
 
 #[cfg(feature = "official")]
 use crate::auth::auth_claims::TokenValidator;
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 use crate::local::map_assets::LocalMapAssetsSync;
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 use std::collections::HashMap;
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 use std::time::{Duration, Instant};
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 use tokio::sync::RwLock;
 
 type BoxStream<T> = Pin<Box<dyn tokio_stream::Stream<Item = Result<T, Status>> + Send + 'static>>;
 
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 const MAX_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 const MAP_BUNDLE_META_CACHE_TTL: Duration = Duration::from_secs(120);
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 const LOCAL_MARKER_FILE: &str = ".local";
 
 #[derive(Debug, Deserialize)]
@@ -155,15 +159,15 @@ pub struct AssetServiceImpl {
     serving_enabled: bool,
     tracks_dir: PathBuf,
     hash_cache: HashCache,
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     map_bundle_meta_cache: RwLock<HashMap<String, CachedMapBundleMeta>>,
     #[cfg(feature = "official")]
     admin_token_validator: Option<Arc<TokenValidator>>,
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     local_sync: Option<Arc<LocalMapAssetsSync>>,
 }
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 #[derive(Debug, Clone)]
 struct MapBundlePaths {
     storage_key: String,
@@ -177,7 +181,7 @@ struct MapBundlePaths {
     local_marker_path: PathBuf,
 }
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 #[derive(Debug, Clone)]
 struct CachedMapBundleMeta {
     bundle: MapAssetBundleMeta,
@@ -190,7 +194,9 @@ impl AssetServiceImpl {
         serving_enabled: bool,
         #[cfg(feature = "official")] admin_token_validator: Option<Arc<TokenValidator>>,
         use_tracks_hash_sidecar_dir: bool,
-        #[cfg(feature = "local")] local_sync: Option<Arc<LocalMapAssetsSync>>,
+        #[cfg(all(feature = "local", not(feature = "standalone")))] local_sync: Option<
+            Arc<LocalMapAssetsSync>,
+        >,
     ) -> Self {
         let hash_cache = if use_tracks_hash_sidecar_dir {
             let sidecars = tracks_dir.join(".hashes");
@@ -203,11 +209,11 @@ impl AssetServiceImpl {
             serving_enabled,
             tracks_dir,
             hash_cache,
-            #[cfg(feature = "official")]
+            #[cfg(any(feature = "official", feature = "standalone"))]
             map_bundle_meta_cache: RwLock::new(HashMap::new()),
             #[cfg(feature = "official")]
             admin_token_validator,
-            #[cfg(feature = "local")]
+            #[cfg(all(feature = "local", not(feature = "standalone")))]
             local_sync,
         }
     }
@@ -217,9 +223,14 @@ impl AssetServiceImpl {
         Self::new_internal(tracks_dir, true, Some(admin_token_validator), false)
     }
 
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     pub fn for_local(tracks_cache_dir: PathBuf, local_sync: Arc<LocalMapAssetsSync>) -> Self {
         Self::new_internal(tracks_cache_dir, true, true, Some(local_sync))
+    }
+
+    #[cfg(feature = "standalone")]
+    pub fn for_standalone(tracks_dir: PathBuf) -> Self {
+        Self::new_internal(tracks_dir, true, false)
     }
 
     fn sanitize_internal_map_id(id: &str) -> Result<(), Status> {
@@ -233,7 +244,7 @@ impl AssetServiceImpl {
         }
     }
 
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     fn is_valid_storage_key(storage_key: &str) -> bool {
         storage_key.chars().all(|c| c.is_ascii_alphanumeric())
     }
@@ -243,13 +254,13 @@ impl AssetServiceImpl {
         if map_id.is_empty() {
             return Err(Status::invalid_argument("map_id is required"));
         }
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         if !Self::is_valid_storage_key(map_id) {
             return Err(Status::invalid_argument(
                 "map_id(storage_key) must be alphanumeric",
             ));
         }
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         Self::sanitize_internal_map_id(map_id)?;
         Ok(map_id.to_string())
     }
@@ -294,7 +305,7 @@ impl AssetServiceImpl {
         Some(map_id.to_string())
     }
 
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     fn has_required_bundle_assets(root: &Path, internal_map_id: &str) -> bool {
         let main = Self::resolve_main_glb_path(root, internal_map_id);
         let minimap_svg = Self::resolve_minimap_svg_path(root, internal_map_id);
@@ -346,7 +357,7 @@ impl AssetServiceImpl {
         }
     }
 
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     fn bundle_paths(
         storage_key: &str,
         internal_map_id: &str,
@@ -368,7 +379,7 @@ impl AssetServiceImpl {
         }
     }
 
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     fn bundle_is_complete(bundle: &MapBundlePaths) -> bool {
         bundle.main_glb_path.is_file()
             && bundle.minimap_svg_path.is_file()
@@ -376,7 +387,7 @@ impl AssetServiceImpl {
             && bundle.map_metadata_path.is_file()
     }
 
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     async fn resolve_official_bundle_paths(
         &self,
         storage_key: &str,
@@ -593,7 +604,7 @@ impl AssetServiceImpl {
         Ok(map_metadata)
     }
 
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     async fn ensure_local_map_cached_if_needed(&self, map_id: &str) -> Result<(), Status> {
         if let Some(sync) = &self.local_sync {
             if !Self::has_required_bundle_assets(&self.tracks_dir, map_id) {
@@ -603,12 +614,12 @@ impl AssetServiceImpl {
         Ok(())
     }
 
-    #[cfg(not(feature = "local"))]
+    #[cfg(any(not(feature = "local"), feature = "standalone"))]
     async fn ensure_local_map_cached_if_needed(&self, _map_id: &str) -> Result<(), Status> {
         Ok(())
     }
 
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     async fn list_maps_from_dir(&self, root: &Path) -> Result<Vec<MapCatalogEntry>, Status> {
         let mut maps = Vec::new();
         let mut entries = fs::read_dir(root).await.map_err(|e| {
@@ -657,7 +668,7 @@ impl AssetServiceImpl {
         Ok(maps)
     }
 
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     async fn list_official_maps(
         &self,
         only_local_marked: bool,
@@ -769,7 +780,7 @@ impl AssetServiceImpl {
         Ok(())
     }
 
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     async fn try_get_cached_bundle_meta(&self, map_id: &str) -> Option<MapAssetBundleMeta> {
         let now = Instant::now();
         {
@@ -791,7 +802,7 @@ impl AssetServiceImpl {
         None
     }
 
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     async fn store_cached_bundle_meta(&self, map_id: String, bundle: MapAssetBundleMeta) {
         let mut cache = self.map_bundle_meta_cache.write().await;
         cache.insert(
@@ -810,7 +821,7 @@ impl AssetService for AssetServiceImpl {
         &self,
         _request: Request<ListMapsRequest>,
     ) -> Result<Response<ListMapsResponse>, Status> {
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         if let Some(sync) = &self.local_sync {
             let maps = sync.list_maps_remote_or_cached().await?;
             return Ok(Response::new(ListMapsResponse { maps }));
@@ -822,7 +833,9 @@ impl AssetService for AssetServiceImpl {
 
         #[cfg(feature = "official")]
         let maps = self.list_official_maps(true).await?;
-        #[cfg(feature = "local")]
+        #[cfg(feature = "standalone")]
+        let maps = self.list_official_maps(false).await?;
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let maps = self.list_maps_from_dir(&self.tracks_dir).await?;
         Ok(Response::new(ListMapsResponse { maps }))
     }
@@ -857,7 +870,7 @@ impl AssetService for AssetServiceImpl {
         if !self.serving_enabled {
             return Err(Status::not_found("map asset bundle not found"));
         }
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         if let Some(bundle) = self.try_get_cached_bundle_meta(&map_id).await {
             tracing::debug!(%map_id, "map asset bundle meta cache hit");
             return Ok(Response::new(GetMapAssetBundleMetaResponse {
@@ -865,31 +878,31 @@ impl AssetService for AssetServiceImpl {
             }));
         }
 
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let bundle_paths = self.resolve_official_bundle_paths(&map_id).await?;
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let main_glb_path = Self::resolve_main_glb_path(&self.tracks_dir, &map_id);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let main_glb_path = bundle_paths.main_glb_path.clone();
 
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let animation_glb_path = Self::resolve_animation_glb_path(&self.tracks_dir, &map_id);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let animation_glb_path = bundle_paths.animation_glb_path.clone();
 
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let minimap_svg_path = Self::resolve_minimap_svg_path(&self.tracks_dir, &map_id);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let minimap_svg_path = bundle_paths.minimap_svg_path.clone();
 
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let minimap_metadata_path = Self::resolve_minimap_metadata_path(&self.tracks_dir, &map_id);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let minimap_metadata_path = bundle_paths.minimap_metadata_path.clone();
 
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let map_metadata_path = Self::resolve_map_metadata_path(&self.tracks_dir, &map_id);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let map_metadata_path = bundle_paths.map_metadata_path.clone();
 
         let main_glb = self
@@ -901,9 +914,6 @@ impl AssetService for AssetServiceImpl {
         let minimap_metadata = self
             .read_minimap_metadata(&map_id, &minimap_metadata_path)
             .await?;
-        #[cfg(feature = "official")]
-        let map_metadata = self.read_map_metadata(&map_id, &map_metadata_path).await?;
-        #[cfg(feature = "local")]
         let map_metadata = self.read_map_metadata(&map_id, &map_metadata_path).await?;
 
         let animation_glb = match fs::metadata(&animation_glb_path).await {
@@ -932,7 +942,7 @@ impl AssetService for AssetServiceImpl {
             map_metadata: Some(map_metadata),
         };
 
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         self.store_cached_bundle_meta(map_id.clone(), bundle.clone())
             .await;
         tracing::debug!(%map_id, "map asset bundle meta resolved");
@@ -961,11 +971,11 @@ impl AssetService for AssetServiceImpl {
             return Err(Status::not_found("map asset not found"));
         }
         let kind = MapAssetKind::try_from(kind).unwrap_or(MapAssetKind::Unspecified);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let bundle_paths = self.resolve_official_bundle_paths(&map_id).await?;
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let path = Self::resolve_path_for_kind(&self.tracks_dir, &map_id, kind)?;
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let path = Self::resolve_path_for_kind(
             &bundle_paths.bundle_dir,
             &bundle_paths.internal_map_id,
@@ -1072,7 +1082,7 @@ impl AssetService for AssetServiceImpl {
         &self,
         request: Request<GetMapAssetSyncMetaRequest>,
     ) -> Result<Response<GetMapAssetSyncMetaResponse>, Status> {
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         if self.local_sync.is_some() {
             return Err(Status::unimplemented(
                 "GetMapAssetSyncMeta is not supported on local backend",
@@ -1085,21 +1095,21 @@ impl AssetService for AssetServiceImpl {
             return Err(Status::not_found("map sync metadata not found"));
         }
 
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let bundle_paths = self.resolve_official_bundle_paths(&map_id).await?;
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let minimap_svg_path = Self::resolve_minimap_svg_path(&self.tracks_dir, &map_id);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let minimap_svg_path = bundle_paths.minimap_svg_path.clone();
 
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let map_metadata_path = Self::resolve_map_metadata_path(&self.tracks_dir, &map_id);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let map_metadata_path = bundle_paths.map_metadata_path.clone();
 
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let minimap_metadata_path = Self::resolve_minimap_metadata_path(&self.tracks_dir, &map_id);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let minimap_metadata_path = bundle_paths.minimap_metadata_path.clone();
 
         let minimap_svg = fs::read(&minimap_svg_path)
@@ -1136,7 +1146,7 @@ impl AssetService for AssetServiceImpl {
         &self,
         request: Request<StreamMapAssetGlbRequest>,
     ) -> Result<Response<Self::StreamMapAssetGlbStream>, Status> {
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         if self.local_sync.is_some() {
             return Err(Status::unimplemented(
                 "StreamMapAssetGlb is not supported on local backend",
@@ -1154,11 +1164,11 @@ impl AssetService for AssetServiceImpl {
             return Err(Status::not_found("map glb not found"));
         }
         let kind = MapGlbKind::try_from(kind).unwrap_or(MapGlbKind::Unspecified);
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let bundle_paths = self.resolve_official_bundle_paths(&map_id).await?;
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let path = Self::resolve_path_for_glb_kind(&self.tracks_dir, &map_id, kind)?;
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let path = Self::resolve_path_for_glb_kind(
             &bundle_paths.bundle_dir,
             &bundle_paths.internal_map_id,

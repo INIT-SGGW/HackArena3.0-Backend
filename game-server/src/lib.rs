@@ -86,7 +86,7 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
     )
     .await?;
 
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     let (broker_registration_state, broker_task): (
         crate::local::broker::BrokerRegistrationState,
         Option<JoinHandle<()>>,
@@ -118,7 +118,7 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
                 db_pool.clone(),
                 grpc_shutdown_rx,
                 active_connections,
-                #[cfg(feature = "local")]
+                #[cfg(all(feature = "local", not(feature = "standalone")))]
                 broker_registration_state.clone(),
             )
             .await
@@ -137,7 +137,7 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
     )
     .await;
 
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     if let Some(task) = broker_task {
         let _ = task.await;
     }

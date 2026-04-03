@@ -13,11 +13,17 @@ name = "ha3-backend-local"
 path = "src/bin/ha3-backend-local.rs"
 required-features = ["local"]
 
+[[bin]]
+name = "ha3-standalone"
+path = "src/bin/ha3-standalone.rs"
+required-features = ["standalone"]
+
 [features]
 default = []
 ide = []
 official = ["sqlx"]
 local = []
+standalone = ["local"]
 
 [dependencies]
 bytes = { workspace = true }

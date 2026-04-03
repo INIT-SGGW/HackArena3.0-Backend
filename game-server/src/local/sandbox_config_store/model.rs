@@ -121,10 +121,13 @@ pub fn validate_local_sandbox_config_input(
             message: "map_id must be non-empty".to_string(),
         });
     }
-    if !map_id
+    #[cfg(feature = "standalone")]
+    let is_valid_map_id = map_id.chars().all(|c| c.is_ascii_alphanumeric());
+    #[cfg(not(feature = "standalone"))]
+    let is_valid_map_id = map_id
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !is_valid_map_id {
         return Err(LocalSandboxConfigStoreError::InvalidConfig {
             message: "map_id contains invalid characters".to_string(),
         });

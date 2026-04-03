@@ -6,19 +6,19 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "official")]
 use std::process::Stdio;
-#[cfg(feature = "official")]
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+#[cfg(feature = "official")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "official")]
-use dashmap::DashMap;
+use boink::model::TyreType;
 #[cfg(feature = "official")]
 use boink::model::ghost::GhostModeSettings;
 use boink::model::{Controls, GearShift as EngineGearShift};
 #[cfg(feature = "official")]
-use boink::model::TyreType;
+use dashmap::DashMap;
 use proto::race::v1::{
     CarDimensions, LocalSandboxJoinRequest, LocalSandboxJoinResponse, ParticipantBootstrap,
     ParticipantCommandAck, ParticipantCommandRejectReason, ParticipantCommandStatus,
@@ -32,38 +32,40 @@ use proto::race::v1::{
 #[cfg(feature = "local")]
 use rand::Rng;
 #[cfg(feature = "official")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "official")]
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(feature = "official")]
+use tokio::process::Command;
+#[cfg(feature = "official")]
 use tokio::sync::Mutex;
 #[cfg(feature = "official")]
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 #[cfg(feature = "official")]
 use tokio::sync::oneshot;
-#[cfg(feature = "official")]
-use tokio::process::Command;
 #[cfg(feature = "official")]
 use tokio::task::JoinHandle;
 #[cfg(feature = "official")]
 use tokio::time::MissedTickBehavior;
 #[cfg(feature = "official")]
 use tokio::{fs, select};
-#[cfg(feature = "official")]
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-#[cfg(feature = "official")]
-use serde::{Deserialize, Serialize};
 
-use crate::auth::game_token::{GameTokenValidator, parse_game_token};
+use crate::auth::game_token::GameTokenValidator;
+#[cfg(not(feature = "standalone"))]
+use crate::auth::game_token::parse_game_token;
 #[cfg(feature = "official")]
 use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 #[cfg(feature = "official")]
 use crate::db::repos::submission::SubmissionRepo;
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
-#[cfg(feature = "official")]
-use crate::runtime::engine_worker::{EngineActivityKind, EngineRuntimeTimeOfDayPreset};
 #[cfg(feature = "local")]
 use crate::runtime::engine_worker::{EngineActiveSandboxState, EngineRuntimeState};
+#[cfg(feature = "official")]
+use crate::runtime::engine_worker::{EngineActivityKind, EngineRuntimeTimeOfDayPreset};
 use crate::runtime::engine_worker::{EngineClient, EngineCommandTarget};
 
 use super::error_map::map_worker_err;
@@ -276,7 +278,8 @@ impl OfficialRaceResultsRecorder {
             }
             if team.has_started_moving {
                 team.current_lap_distance_m = Some(lap_progress_m);
-                team.total_distance_m = Some(metrics.completed_laps as f32 * lap_length_m + lap_progress_m);
+                team.total_distance_m =
+                    Some(metrics.completed_laps as f32 * lap_length_m + lap_progress_m);
             } else {
                 team.current_lap_distance_m = None;
                 team.total_distance_m = None;
@@ -439,9 +442,7 @@ async fn stream_official_race_bot_logs_to_file<R>(
                 );
                 let mut guard = writer.lock().await;
                 let _ = guard
-                    .write_all(
-                        format!("[{channel}] <stream read error: {err}>\n").as_bytes(),
-                    )
+                    .write_all(format!("[{channel}] <stream read error: {err}>\n").as_bytes())
                     .await;
                 let _ = guard.flush().await;
                 break;
@@ -456,6 +457,7 @@ pub struct RaceParticipantServiceImpl {
     simulation_hz: u32,
     runtime_store: Arc<RaceRuntimeStore>,
     frame_hub: FrameHub,
+    #[cfg_attr(feature = "standalone", allow(dead_code))]
     token_validator: Arc<GameTokenValidator>,
     next_stream_seq: Arc<AtomicU64>,
     #[cfg(feature = "official")]
@@ -708,9 +710,7 @@ impl RaceParticipantServiceImpl {
             "stdout",
         ));
         let stderr_task = tokio::spawn(stream_official_race_bot_logs_to_file(
-            stderr,
-            writer,
-            "stderr",
+            stderr, writer, "stderr",
         ));
 
         let capture_task = tokio::spawn(async move {
@@ -773,7 +773,7 @@ impl RaceParticipantServiceImpl {
     async fn local_sandbox_join_impl(
         &self,
         requested_sandbox_id: String,
-        auth: String,
+        auth: Option<String>,
     ) -> Result<LocalSandboxJoinResponse, Status> {
         let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
         let active_sandbox = select_local_join_sandbox(&runtime_state, &requested_sandbox_id)?;
@@ -810,17 +810,23 @@ impl RaceParticipantServiceImpl {
 
         let public_car_id = self.runtime_store.allocate_public_car_id();
         let mut identity = RuntimeCarIdentity::default();
-        identity.subject = Some(self.token_validator.subject_from_token(&auth).await?);
-        identity.team_id = self.token_validator.team_id_from_token(&auth).await?;
-        identity.instance_uuid = self.token_validator.instance_uuid_from_token(&auth).await?;
-        if let Some(instance_uuid) = identity.instance_uuid.clone() {
-            self.runtime_store
-                .instance_cars()
-                .insert(instance_uuid.clone(), public_car_id);
-            self.runtime_store
-                .car_owners()
-                .insert(public_car_id, instance_uuid);
+        #[cfg(not(feature = "standalone"))]
+        {
+            let auth = auth.ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            identity.subject = Some(self.token_validator.subject_from_token(&auth).await?);
+            identity.team_id = self.token_validator.team_id_from_token(&auth).await?;
+            identity.instance_uuid = self.token_validator.instance_uuid_from_token(&auth).await?;
+            if let Some(instance_uuid) = identity.instance_uuid.clone() {
+                self.runtime_store
+                    .instance_cars()
+                    .insert(instance_uuid.clone(), public_car_id);
+                self.runtime_store
+                    .car_owners()
+                    .insert(public_car_id, instance_uuid);
+            }
         }
+        #[cfg(feature = "standalone")]
+        let _ = auth;
         let local_user_id = identity
             .subject
             .clone()
@@ -1036,11 +1042,16 @@ impl RaceParticipantServiceImpl {
         current: &TeamOfficialRaceBotState,
     ) -> Result<Option<String>, Status> {
         let race_started = self.runtime_store.is_official_race_started();
-        if race_started && current.auto_restart_attempts >= OFFICIAL_RACE_BOT_AUTO_RESTART_MAX_ATTEMPTS {
+        if race_started
+            && current.auto_restart_attempts >= OFFICIAL_RACE_BOT_AUTO_RESTART_MAX_ATTEMPTS
+        {
             return Ok(None);
         }
         let runtime_state = self.engine.runtime_state().await.map_err(map_worker_err)?;
-        if !matches!(runtime_state.activity_kind, EngineActivityKind::OfficialRace) {
+        if !matches!(
+            runtime_state.activity_kind,
+            EngineActivityKind::OfficialRace
+        ) {
             return Ok(None);
         }
 
@@ -1113,7 +1124,10 @@ impl RaceParticipantServiceImpl {
 
         for (team_id, current) in bots {
             let restart_result = async {
-                let team_bot_token = self.game_token_issuer.issue_team_bot_token(&team_id).await?;
+                let team_bot_token = self
+                    .game_token_issuer
+                    .issue_team_bot_token(&team_id)
+                    .await?;
                 let wrapper_auth_token = self
                     .wrapper_auth_token_issuer
                     .issue_wrapper_auth_token()
@@ -1167,7 +1181,10 @@ impl RaceParticipantServiceImpl {
                     self.runtime_store
                         .set_active_bot_slot(current.public_car_id, current.slot_index);
                     let _ = self.slot_updates_tx.send(team_id.clone());
-                    self.spawn_official_race_bot_exit_monitor(team_id.clone(), container_id.clone());
+                    self.spawn_official_race_bot_exit_monitor(
+                        team_id.clone(),
+                        container_id.clone(),
+                    );
                     restarted = restarted.saturating_add(1);
                     tracing::info!(
                         team_id = %team_id,
@@ -1261,7 +1278,10 @@ impl RaceParticipantServiceImpl {
             if entry.container_id != exited_container_id {
                 return true;
             }
-            entry.container_id = format!("awaiting-slot-switch-{}", self.frame_hub.latest().server_time_ms);
+            entry.container_id = format!(
+                "awaiting-slot-switch-{}",
+                self.frame_hub.latest().server_time_ms
+            );
             entry.auto_restart_attempts = 0;
         } else {
             return true;
@@ -1298,7 +1318,8 @@ impl RaceParticipantServiceImpl {
             }
         }
 
-        self.runtime_store.clear_active_bot_slot(current.public_car_id);
+        self.runtime_store
+            .clear_active_bot_slot(current.public_car_id);
         let _ = self.slot_updates_tx.send(team_id.to_string());
         tracing::warn!(
             team_id = %team_id,
@@ -1555,7 +1576,8 @@ impl RaceParticipantServiceImpl {
     ) {
         let service = self.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_millis(OFFICIAL_RACE_LAUNCHER_TICK_MS));
+            let mut ticker =
+                tokio::time::interval(Duration::from_millis(OFFICIAL_RACE_LAUNCHER_TICK_MS));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut prepare_signal_present_prev = false;
             let mut start_signal_present_prev = false;
@@ -1671,12 +1693,15 @@ impl RaceParticipantServiceImpl {
                     }
 
                     if race_prepared && !race_started {
-                        let (refreshed_count, failed_count) =
-                            service.refresh_official_race_bots_before_start_locked().await;
+                        let (refreshed_count, failed_count) = service
+                            .refresh_official_race_bots_before_start_locked()
+                            .await;
                         let (forced_hard_count, forced_hard_failed_count) =
                             service.force_official_race_hard_tyres().await;
                         let start_unix_ms = service.frame_hub.latest().server_time_ms;
-                        service.runtime_store.mark_official_race_started(start_unix_ms);
+                        service
+                            .runtime_store
+                            .mark_official_race_started(start_unix_ms);
                         race_started = true;
                         tracing::info!(
                             start_unix_ms,
@@ -1761,13 +1786,12 @@ impl RaceParticipantServiceImpl {
             .await?;
         let stats = launch_result.stats;
         let prepared_at_ms = current_unix_ms();
-        self.runtime_store
-            .set_official_race_prepared(
-                &race_config.config.race_name,
-                &race_config.config.map_id,
-                race_config.config.race_duration_sec,
-                prepared_at_ms,
-            );
+        self.runtime_store.set_official_race_prepared(
+            &race_config.config.race_name,
+            &race_config.config.map_id,
+            race_config.config.race_duration_sec,
+            prepared_at_ms,
+        );
 
         let recorder = OfficialRaceResultsRecorder::new(
             assets_dir,
@@ -1775,10 +1799,11 @@ impl RaceParticipantServiceImpl {
             launch_result,
             prepared_at_ms,
         );
-        recorder
-            .write_snapshot()
-            .await
-            .map_err(|err| Status::internal(format!("failed to write initial race results snapshot: {err}")))?;
+        recorder.write_snapshot().await.map_err(|err| {
+            Status::internal(format!(
+                "failed to write initial race results snapshot: {err}"
+            ))
+        })?;
 
         tracing::info!(
             race_id = %race_config.race_id,
@@ -1800,7 +1825,10 @@ impl RaceParticipantServiceImpl {
     }
 
     #[cfg(feature = "official")]
-    async fn read_official_race_team_ids(&self, teams_file_path: &Path) -> Result<Vec<String>, Status> {
+    async fn read_official_race_team_ids(
+        &self,
+        teams_file_path: &Path,
+    ) -> Result<Vec<String>, Status> {
         let content = fs::read_to_string(teams_file_path).await.map_err(|err| {
             Status::internal(format!(
                 "failed to read official race team roster file {}: {err}",
@@ -1927,8 +1955,9 @@ impl RaceParticipantServiceImpl {
         let (prepare_grid_stop_tx, mut prepare_grid_stop_rx) = oneshot::channel::<()>();
         let prepare_grid_service = self.clone();
         let prepare_grid_task = tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(Duration::from_millis(OFFICIAL_RACE_PREPARE_GRID_PIN_INTERVAL_MS));
+            let mut ticker = tokio::time::interval(Duration::from_millis(
+                OFFICIAL_RACE_PREPARE_GRID_PIN_INTERVAL_MS,
+            ));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
                 select! {
@@ -2060,8 +2089,8 @@ impl RaceParticipantServiceImpl {
                         best_lap_time_ms: None,
                         lap_times_ms: Vec::new(),
                         last_recorded_completed_laps: 0,
-                    has_started_moving: false,
-                    initial_lap_progress_m: None,
+                        has_started_moving: false,
+                        initial_lap_progress_m: None,
                     });
                     tracing::warn!(
                         team_id = %team_id,
@@ -2139,8 +2168,8 @@ impl RaceParticipantServiceImpl {
                         best_lap_time_ms: None,
                         lap_times_ms: Vec::new(),
                         last_recorded_completed_laps: 0,
-                    has_started_moving: false,
-                    initial_lap_progress_m: None,
+                        has_started_moving: false,
+                        initial_lap_progress_m: None,
                     });
                     tracing::warn!(
                         team_id = %team_id,
@@ -2176,8 +2205,8 @@ impl RaceParticipantServiceImpl {
                         best_lap_time_ms: None,
                         lap_times_ms: Vec::new(),
                         last_recorded_completed_laps: 0,
-                    has_started_moving: false,
-                    initial_lap_progress_m: None,
+                        has_started_moving: false,
+                        initial_lap_progress_m: None,
                     });
                     tracing::warn!(
                         team_id = %team_id,
@@ -2210,8 +2239,8 @@ impl RaceParticipantServiceImpl {
                         best_lap_time_ms: None,
                         lap_times_ms: Vec::new(),
                         last_recorded_completed_laps: 0,
-                    has_started_moving: false,
-                    initial_lap_progress_m: None,
+                        has_started_moving: false,
+                        initial_lap_progress_m: None,
                     });
                     tracing::warn!(
                         team_id = %team_id,
@@ -2254,8 +2283,8 @@ impl RaceParticipantServiceImpl {
                         best_lap_time_ms: None,
                         lap_times_ms: Vec::new(),
                         last_recorded_completed_laps: 0,
-                    has_started_moving: false,
-                    initial_lap_progress_m: None,
+                        has_started_moving: false,
+                        initial_lap_progress_m: None,
                     });
                     tracing::warn!(
                         team_id = %team_id,
@@ -2294,7 +2323,8 @@ impl RaceParticipantServiceImpl {
                     auto_restart_attempts: 0,
                 },
             );
-            self.runtime_store.set_active_bot_slot(public_car_id, slot_index);
+            self.runtime_store
+                .set_active_bot_slot(public_car_id, slot_index);
             if let Err(err) = self
                 .submission_repo
                 .upsert_selected_slot_index(&team_id, slot_index)
@@ -2326,8 +2356,8 @@ impl RaceParticipantServiceImpl {
                 best_lap_time_ms: None,
                 lap_times_ms: Vec::new(),
                 last_recorded_completed_laps: 0,
-                    has_started_moving: false,
-                    initial_lap_progress_m: None,
+                has_started_moving: false,
+                initial_lap_progress_m: None,
             });
             tracing::info!(
                 team_id = %team_id,
@@ -2383,7 +2413,8 @@ impl RaceParticipantServiceImpl {
                     "official race launcher: despawn of previous car failed"
                 );
             }
-            self.runtime_store.clear_active_bot_slot(bot_state.public_car_id);
+            self.runtime_store
+                .clear_active_bot_slot(bot_state.public_car_id);
             self.runtime_store.remove_car(bot_state.public_car_id);
             let _ = self.slot_updates_tx.send(team_id);
         }
@@ -2447,7 +2478,10 @@ impl RaceParticipantServiceImpl {
             }
         };
 
-        if matches!(runtime_state.activity_kind, EngineActivityKind::OfficialRace) {
+        if matches!(
+            runtime_state.activity_kind,
+            EngineActivityKind::OfficialRace
+        ) {
             let map_id = runtime_state.map_id.clone();
             if let Err(err) = self
                 .engine
@@ -2516,7 +2550,9 @@ impl RaceParticipantServiceImpl {
         identity.official_race_start_position_index = Some(start_position_index);
         self.runtime_store.set_car_identity(public_car_id, identity);
         self.runtime_store.known_cars().insert(public_car_id, ());
-        self.runtime_store.last_client_seq().insert(public_car_id, 0);
+        self.runtime_store
+            .last_client_seq()
+            .insert(public_car_id, 0);
         self.runtime_store
             .car_engine_ids()
             .insert(public_car_id, engine_car_id);
@@ -2585,7 +2621,12 @@ impl RaceParticipantServiceImpl {
             .set_bot_switch_in_progress(race_bot_state.public_car_id, false);
         let container_id = switch_result?;
         let log_file_path = self
-            .start_official_race_bot_log_capture(team_id, &submission_id, selected_slot, &container_id)
+            .start_official_race_bot_log_capture(
+                team_id,
+                &submission_id,
+                selected_slot,
+                &container_id,
+            )
             .await;
 
         self.official_race_bots.insert(
@@ -2622,7 +2663,9 @@ impl RaceParticipantServiceImpl {
                     return None;
                 }
                 let public_car_id = *entry.key();
-                let engine_car_id = car_engine_ids.get(&public_car_id).map(|value| *value.value())?;
+                let engine_car_id = car_engine_ids
+                    .get(&public_car_id)
+                    .map(|value| *value.value())?;
                 let start_position_index = car_identities
                     .get(&public_car_id)
                     .and_then(|identity| identity.value().official_race_start_position_index)?;
@@ -2690,8 +2733,10 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
         &self,
         request: Request<Streaming<proto::race::v1::ParticipantClientMessage>>,
     ) -> Result<Response<Self::StreamStream>, Status> {
+        #[cfg(not(feature = "standalone"))]
         let token = parse_game_token(request.metadata())?
             .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+        #[cfg(not(feature = "standalone"))]
         let self_public_car_id = if let Some(instance_uuid) = self
             .token_validator
             .instance_uuid_from_token(&token)
@@ -2728,6 +2773,14 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
                 return Err(Status::unauthenticated("missing instance_uuid claim"));
             }
         };
+        #[cfg(feature = "standalone")]
+        let self_public_car_id = {
+            let car_id = parse_standalone_car_id(request.metadata())?;
+            if self.runtime_store.car_target(car_id).is_none() {
+                return Err(Status::not_found("unknown x-ha3-car-id"));
+            }
+            car_id
+        };
         let self_target = self
             .runtime_store
             .car_target(self_public_car_id)
@@ -2736,7 +2789,10 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
             .runtime_store
             .car_engine_id(self_public_car_id)
             .ok_or_else(|| Status::not_found("unknown car target"))?;
+        #[cfg(not(feature = "standalone"))]
         let scopes = self.token_validator.scopes_from_token(&token).await?;
+        #[cfg(feature = "standalone")]
+        let scopes = Vec::new();
 
         let incoming = request.into_inner();
         let stream_id = self.next_stream_seq.fetch_add(1, Ordering::Relaxed);
@@ -2807,8 +2863,11 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
                     .ok_or_else(|| {
                         Status::failed_precondition("official-race runtime map is not available")
                     })?;
-                let (public_car_id, engine_car_id) = self.require_team_official_race_car(&team_id)?;
-                if public_car_id != existing.public_car_id || engine_car_id != existing.engine_car_id {
+                let (public_car_id, engine_car_id) =
+                    self.require_team_official_race_car(&team_id)?;
+                if public_car_id != existing.public_car_id
+                    || engine_car_id != existing.engine_car_id
+                {
                     tracing::warn!(
                         team_id = %team_id,
                         registry_public_car_id = existing.public_car_id,
@@ -2874,10 +2933,12 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
                 EngineActivityKind::OfficialRace => Err(Status::not_found(
                     "team is not part of active official-race roster",
                 )),
-                EngineActivityKind::Sandbox => {
-                    Err(Status::not_found("no active official sandbox join for team"))
+                EngineActivityKind::Sandbox => Err(Status::not_found(
+                    "no active official sandbox join for team",
+                )),
+                EngineActivityKind::None => {
+                    Err(Status::failed_precondition("runtime is not active"))
                 }
-                EngineActivityKind::None => Err(Status::failed_precondition("runtime is not active")),
             }
         }
     }
@@ -2895,13 +2956,35 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
         }
         #[cfg(feature = "local")]
         {
-            let auth = parse_game_token(request.metadata())?
-                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            #[cfg(not(feature = "standalone"))]
+            let auth = Some(
+                parse_game_token(request.metadata())?
+                    .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?,
+            );
+            #[cfg(feature = "standalone")]
+            let auth: Option<String> = None;
             let req = request.into_inner();
             let joined = self.local_sandbox_join_impl(req.sandbox_id, auth).await?;
             Ok(Response::new(joined))
         }
     }
+}
+
+#[cfg(feature = "standalone")]
+fn parse_standalone_car_id(metadata: &tonic::metadata::MetadataMap) -> Result<u64, Status> {
+    let value = metadata
+        .get("x-ha3-car-id")
+        .ok_or_else(|| Status::invalid_argument("missing x-ha3-car-id"))?;
+    let raw = value
+        .to_str()
+        .map_err(|_| Status::invalid_argument("invalid x-ha3-car-id header"))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(Status::invalid_argument("x-ha3-car-id must be a valid u64"));
+    }
+    trimmed
+        .parse::<u64>()
+        .map_err(|_| Status::invalid_argument("x-ha3-car-id must be a valid u64"))
 }
 
 fn resolve_view(
