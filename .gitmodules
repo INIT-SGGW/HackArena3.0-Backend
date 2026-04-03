@@ -7,3 +7,6 @@
 	path = third_party/HackArena-Proto
 	url = https://github.com/INIT-SGGW/HackArena-Proto.git
 	branch = main
+[submodule "third_party/HackArena3.0-Frontend"]
+	path = third_party/HackArena3.0-Frontend
+	url = https://github.com/INIT-SGGW/HackArena3.0-Frontend.git
