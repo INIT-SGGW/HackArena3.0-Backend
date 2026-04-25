@@ -3,6 +3,7 @@ param(
     [string]$Target = "x86_64-pc-windows-msvc",
     [string]$OutputDir = "deploy/releases",
     [switch]$SkipBuild,
+    [switch]$SkipFrontendBuild,
     [switch]$FrontendDocker,
     [string]$FrontendDockerImage = "node:22-alpine",
     [string]$FrontendPnpmVersion = "10.19.0",
@@ -195,26 +196,30 @@ New-Item -ItemType Directory -Force -Path $zipRoot | Out-Null
 if (-not $SkipBuild) {
     Assert-CommandAvailable -CommandName "cargo" -Hint "Install Rust toolchain and retry."
 
-    if ($FrontendDocker) {
-        Assert-CommandAvailable -CommandName "docker" -Hint "Install Docker and retry, or run script without -FrontendDocker."
-        Invoke-FrontendDockerBuild `
-            -FrontendRoot $frontendRoot `
-            -DockerImage $FrontendDockerImage `
-            -PnpmVersion $FrontendPnpmVersion `
-            -NodeModulesVolume $FrontendNodeModulesVolume `
-            -PnpmStoreVolume $FrontendPnpmStoreVolume
-    }
-    else {
-        Assert-CommandAvailable -CommandName "pnpm" -Hint "Install pnpm and retry, or run script with -FrontendDocker."
-        Invoke-Step -Command "pnpm install --frozen-lockfile" -WorkingDir $frontendRoot
-        Invoke-Step -Command "pnpm build" -WorkingDir $frontendRoot
+    if ($SkipFrontendBuild) {
+        Write-Host "==> Skipping frontend build; using existing dist: $frontendDistDir" -ForegroundColor Cyan
+    } else {
+        if ($FrontendDocker) {
+            Assert-CommandAvailable -CommandName "docker" -Hint "Install Docker and retry, or run script without -FrontendDocker."
+            Invoke-FrontendDockerBuild `
+                -FrontendRoot $frontendRoot `
+                -DockerImage $FrontendDockerImage `
+                -PnpmVersion $FrontendPnpmVersion `
+                -NodeModulesVolume $FrontendNodeModulesVolume `
+                -PnpmStoreVolume $FrontendPnpmStoreVolume
+        }
+        else {
+            Assert-CommandAvailable -CommandName "pnpm" -Hint "Install pnpm and retry, or run script with -FrontendDocker."
+            Invoke-Step -Command "pnpm install --frozen-lockfile" -WorkingDir $frontendRoot
+            Invoke-Step -Command "pnpm build" -WorkingDir $frontendRoot
+        }
     }
 
     Invoke-Step -Command "cargo build -p game-server --bin ha3-standalone --features standalone --release --target $Target"
 }
 
 if (-not (Test-Path $frontendDistDir)) {
-    throw "Frontend dist missing: $frontendDistDir. Run frontend build first or execute this script without -SkipBuild."
+    throw "Frontend dist missing: $frontendDistDir. Run frontend build first, omit -SkipFrontendBuild, or use -FrontendDocker."
 }
 
 $standaloneExePath = Join-Path $targetReleaseDir "ha3-standalone.exe"

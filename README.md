@@ -51,6 +51,12 @@ If you want frontend build in Docker (and backend build locally in Rust), use:
 .\scripts\build-standalone-win-x64.ps1 -FrontendDocker
 ```
 
+If frontend `dist/` already exists and you only want to rebuild backend and package, use:
+
+```powershell
+.\scripts\build-standalone-win-x64.ps1 -SkipFrontendBuild
+```
+
 Skip all build steps and only package existing artifacts:
 
 ```powershell
