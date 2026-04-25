@@ -36,7 +36,7 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = "0.2.3"
-time = { version = "0.3.44", features = ["formatting"] }
+time = { version = "0.3.47", features = ["formatting"] }
 base64 = "0.22.1"
 serde_json = "1.0.145"
 
@@ -54,11 +54,11 @@ jsonwebtoken = "9.3.1"
 flate2 = "1.1.5"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "0.8.23"
-rand = "0.8.5"
+rand = "0.8.6"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 regex = "1.12.2"
 sha2 = "0.10.9"
-tar = "0.4.44"
+tar = "0.4.45"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 tokio-stream = { version = "0.1.17", features = ["net"] }
