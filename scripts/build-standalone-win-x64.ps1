@@ -2,7 +2,12 @@ param(
     [string]$Version = "",
     [string]$Target = "x86_64-pc-windows-msvc",
     [string]$OutputDir = "deploy/releases",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$FrontendDocker,
+    [string]$FrontendDockerImage = "node:22-alpine",
+    [string]$FrontendPnpmVersion = "10.19.0",
+    [string]$FrontendNodeModulesVolume = "ha3_fe_nm",
+    [string]$FrontendPnpmStoreVolume = "ha3_fe_store"
 )
 
 Set-StrictMode -Version Latest
@@ -53,6 +58,38 @@ function Assert-CommandAvailable {
     }
 }
 
+function Invoke-FrontendDockerBuild {
+    param(
+        [Parameter(Mandatory = $true)][string]$FrontendRoot,
+        [Parameter(Mandatory = $true)][string]$DockerImage,
+        [Parameter(Mandatory = $true)][string]$PnpmVersion,
+        [Parameter(Mandatory = $true)][string]$NodeModulesVolume,
+        [Parameter(Mandatory = $true)][string]$PnpmStoreVolume
+    )
+
+    $resolvedFrontendRoot = (Resolve-Path $FrontendRoot).Path
+    $dockerShellCommand = "corepack enable && corepack prepare pnpm@$PnpmVersion --activate && pnpm config set store-dir /pnpm-store && pnpm install --frozen-lockfile && pnpm build"
+
+    $dockerArgs = @(
+        "run",
+        "--rm",
+        "-v", "$resolvedFrontendRoot`:/app",
+        "-v", "$NodeModulesVolume`:/app/node_modules",
+        "-v", "$PnpmStoreVolume`:/pnpm-store",
+        "-w", "/app",
+        $DockerImage,
+        "sh",
+        "-lc",
+        $dockerShellCommand
+    )
+
+    Write-Host "==> docker $($dockerArgs -join ' ')" -ForegroundColor Cyan
+    & docker @dockerArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker frontend build failed with exit code $LASTEXITCODE."
+    }
+}
+
 function Write-PackagedStandaloneEnv {
     param(
         [Parameter(Mandatory = $true)][string]$PackageRoot
@@ -60,10 +97,15 @@ function Write-PackagedStandaloneEnv {
 
     $envContent = @'
 # Application environment: development | preprod | production
-APP_ENV=production
+APP_ENV=development
 
 # gRPC server listen address
-LISTEN_ADDR=127.0.0.1:50051
+LISTEN_ADDR=0.0.0.0:50051
+
+# Standalone frontend HTTP server
+FRONTEND_ENABLE=true
+FRONTEND_LISTEN_ADDR=0.0.0.0:8080
+FRONTEND_DIR=frontend
 
 # Logging
 RUST_LOG=warn,boink=info,tonic_web=info,game_server=info,game_engine=info
@@ -151,11 +193,23 @@ New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $zipRoot | Out-Null
 
 if (-not $SkipBuild) {
-    Assert-CommandAvailable -CommandName "pnpm" -Hint "Install pnpm and retry."
     Assert-CommandAvailable -CommandName "cargo" -Hint "Install Rust toolchain and retry."
 
-    Invoke-Step -Command "pnpm install --frozen-lockfile" -WorkingDir $frontendRoot
-    Invoke-Step -Command "pnpm build" -WorkingDir $frontendRoot
+    if ($FrontendDocker) {
+        Assert-CommandAvailable -CommandName "docker" -Hint "Install Docker and retry, or run script without -FrontendDocker."
+        Invoke-FrontendDockerBuild `
+            -FrontendRoot $frontendRoot `
+            -DockerImage $FrontendDockerImage `
+            -PnpmVersion $FrontendPnpmVersion `
+            -NodeModulesVolume $FrontendNodeModulesVolume `
+            -PnpmStoreVolume $FrontendPnpmStoreVolume
+    }
+    else {
+        Assert-CommandAvailable -CommandName "pnpm" -Hint "Install pnpm and retry, or run script with -FrontendDocker."
+        Invoke-Step -Command "pnpm install --frozen-lockfile" -WorkingDir $frontendRoot
+        Invoke-Step -Command "pnpm build" -WorkingDir $frontendRoot
+    }
+
     Invoke-Step -Command "cargo build -p game-server --bin ha3-standalone --features standalone --release --target $Target"
 }
 

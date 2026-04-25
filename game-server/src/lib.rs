@@ -1,7 +1,9 @@
 //! Game server library entrypoints and shared runtime helpers.
 
-#[cfg(all(feature = "official", feature = "local"))]
+#[cfg(all(feature = "official", feature = "local", not(feature = "standalone")))]
 compile_error!("features `official` and `local` are mutually exclusive");
+#[cfg(all(feature = "official", feature = "standalone"))]
+compile_error!("features `official` and `standalone` are mutually exclusive");
 
 pub mod auth;
 pub mod config;
@@ -103,6 +105,30 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
         (state, Some(handle))
     };
 
+    #[cfg(feature = "standalone")]
+    let frontend_shutdown_tx = grpc_shutdown_tx.clone();
+    #[cfg(feature = "standalone")]
+    let mut frontend_task: Option<JoinHandle<()>> = if cfg.frontend_enable {
+        Some(tokio::task::spawn_local({
+            let cfg = cfg.clone();
+            let shutdown_tx_frontend = frontend_shutdown_tx.clone();
+            let frontend_shutdown_rx = grpc_shutdown_tx.subscribe();
+            async move {
+                info!(
+                    "Starting standalone frontend HTTP server on {}",
+                    cfg.frontend_listen_addr
+                );
+                if let Err(e) = crate::server::serve_frontend(cfg, frontend_shutdown_rx).await {
+                    error!("standalone frontend HTTP server terminated with error: {e}");
+                    let _ = shutdown_tx_frontend.send(());
+                }
+            }
+        }))
+    } else {
+        info!("Standalone frontend HTTP server is disabled");
+        None
+    };
+
     // Run gRPC server until shutdown.
     let active_connections = Arc::new(AtomicUsize::new(0));
     let shutdown_tx_grpc = grpc_shutdown_tx.clone();
@@ -136,6 +162,19 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
         active_connections,
     )
     .await;
+
+    #[cfg(feature = "standalone")]
+    if let Some(mut task) = frontend_task.take() {
+        let _ = frontend_shutdown_tx.send(());
+        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("standalone frontend HTTP shutdown timeout after 3s; aborting");
+            task.abort();
+            let _ = task.await;
+        }
+    }
 
     #[cfg(all(feature = "local", not(feature = "standalone")))]
     if let Some(task) = broker_task {

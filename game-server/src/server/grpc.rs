@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(feature = "official")]
 use proto::achievement::v1::achievement_stream_service_server::AchievementStreamServiceServer;
-#[cfg(all(feature = "local", not(feature = "standalone")))]
+#[cfg(feature = "local")]
 use proto::hackarena::connect::v1::connect_service_server::ConnectServiceServer;
 use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "local")]
@@ -65,7 +65,7 @@ use crate::runtime::engine_worker::EngineClient;
 #[cfg(feature = "official")]
 use crate::services::achievement_stream::AchievementStreamServiceImpl;
 use crate::services::asset::AssetServiceImpl;
-#[cfg(all(feature = "local", not(feature = "standalone")))]
+#[cfg(feature = "local")]
 use crate::services::connect::ConnectServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
@@ -134,7 +134,7 @@ pub async fn serve_grpc(
     health_reporter
         .set_serving::<LocalSandboxAdminServiceServer<LocalSandboxAdminServiceImpl>>()
         .await;
-    #[cfg(all(feature = "local", not(feature = "standalone")))]
+    #[cfg(feature = "local")]
     health_reporter
         .set_serving::<ConnectServiceServer<ConnectServiceImpl>>()
         .await;
@@ -446,6 +446,8 @@ pub async fn serve_grpc(
     };
     #[cfg(all(feature = "local", not(feature = "standalone")))]
     let connect_impl = ConnectServiceImpl::new(broker_registration_state);
+    #[cfg(all(feature = "local", feature = "standalone"))]
+    let connect_impl = ConnectServiceImpl::new_standalone();
 
     let cors = cors_layer(&cfg);
 
@@ -520,7 +522,7 @@ pub async fn serve_grpc(
     let server = server.add_service(LocalSandboxAdminServiceServer::new(
         local_sandbox_admin_impl,
     ));
-    #[cfg(all(feature = "local", not(feature = "standalone")))]
+    #[cfg(feature = "local")]
     let server = server.add_service(ConnectServiceServer::new(connect_impl));
 
     let serve_result = server
