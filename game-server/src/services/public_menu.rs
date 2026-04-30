@@ -22,9 +22,9 @@ use tonic::{Request, Response, Status};
 use crate::auth::auth_claims::TokenValidator;
 use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 use crate::db::repos::sandbox_config::{SandboxConfigRecord, SandboxConfigRepo};
-use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 #[cfg(feature = "official")]
 use crate::runtime::engine_worker::EngineCommandTarget;
+use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
 use crate::services::race::RaceRuntimeStore;
 #[cfg(feature = "official")]
@@ -210,9 +210,7 @@ impl PublicMenuServiceImpl {
                                 .zip(self.runtime_store.official_race_duration_sec())
                                 .and_then(|(started_at_ms, duration_sec)| {
                                     started_at_ms
-                                        .checked_add(
-                                            u64::from(duration_sec).saturating_mul(1_000),
-                                        )
+                                        .checked_add(u64::from(duration_sec).saturating_mul(1_000))
                                         .and_then(|end_ms| i64::try_from(end_ms).ok())
                                         .map(unix_ms_to_timestamp)
                                 });
@@ -277,7 +275,7 @@ impl PublicMenuServiceImpl {
                             .collect(),
                     },
                 )),
-                EngineActivityKind::None => None,
+                EngineActivityKind::LocalRace | EngineActivityKind::None => None,
             },
         };
 

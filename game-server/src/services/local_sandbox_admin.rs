@@ -6,6 +6,7 @@ mod mappers;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::local::local_race_state::LocalRaceStateStore;
 use crate::local::map_assets::LocalMapAssetsSync;
 use crate::local::sandbox_config_store::{
     LocalSandboxConfigRecord, LocalSandboxConfigStore, LocalTimeOfDaySettingsRecord,
@@ -52,6 +53,7 @@ pub struct LocalSandboxAdminServiceImpl {
     map_assets_sync: Option<Arc<LocalMapAssetsSync>>,
     started_at_utc: Arc<RwLock<HashMap<String, prost_types::Timestamp>>>,
     weather_events: LocalWeatherEventHub,
+    local_race_state: LocalRaceStateStore,
 }
 
 impl LocalSandboxAdminServiceImpl {
@@ -65,6 +67,7 @@ impl LocalSandboxAdminServiceImpl {
         max_active_sandboxes: u32,
         map_assets_sync: Option<Arc<LocalMapAssetsSync>>,
         weather_events: LocalWeatherEventHub,
+        local_race_state: LocalRaceStateStore,
     ) -> Self {
         Self {
             store,
@@ -74,6 +77,7 @@ impl LocalSandboxAdminServiceImpl {
             map_assets_sync,
             started_at_utc: Arc::new(RwLock::new(HashMap::new())),
             weather_events,
+            local_race_state,
         }
     }
 
@@ -200,6 +204,7 @@ impl LocalSandboxAdminServiceImpl {
         let snapshot = self.store.get_snapshot().await;
         let started_at = self.started_at_utc.read().await.clone();
         let active_car_counts = self.runtime_store.active_car_counts_by_sandbox();
+        let active_local_race_counts = self.runtime_store.active_car_counts_by_local_race();
 
         let mut active_sandboxes = Vec::with_capacity(runtime.active_sandboxes.len());
         for active in &runtime.active_sandboxes {
@@ -234,10 +239,19 @@ impl LocalSandboxAdminServiceImpl {
             });
         }
 
+        let active_race = self.local_race_state.active_race().await.map(|mut race| {
+            race.joined_participant_count = active_local_race_counts
+                .get(&race.race_id)
+                .copied()
+                .unwrap_or(race.joined_participant_count);
+            race
+        });
+
         Ok(LocalRuntimeState {
             revision: runtime.revision,
             server_time_utc: Some(utc_now_timestamp()),
             active_sandboxes,
+            active_race,
         })
     }
 }

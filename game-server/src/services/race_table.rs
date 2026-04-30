@@ -8,7 +8,8 @@ use std::time::Duration;
 use boink::model::{PitstopZone, VehicleRaceMetrics};
 use proto::race::v1::race_table_query_service_server::RaceTableQueryService;
 use proto::race::v1::{
-    GetRaceTableRequest, GetRaceTableResponse, LocalBotIdentity, OfficialRaceTableEntry,
+    GetRaceTableRequest, GetRaceTableResponse, LocalBotIdentity, LocalRaceParticipantIdentity,
+    LocalRaceTableEntry, LocalRaceTableSnapshot, LocalRaceTableTarget, OfficialRaceTableEntry,
     OfficialRaceTableSnapshot, OfficialRaceTableTarget, RaceTableEntryStatus, RaceTableEvent,
     RaceTableSnapshot, RaceTableTarget, SandboxRaceTableEntry, SandboxRaceTableSnapshot,
     SandboxRaceTableTarget, StreamRaceTableRequest, StreamRaceTableResponse, TeamIdentity,
@@ -18,6 +19,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
+#[cfg(feature = "local")]
+use crate::local::local_race_state::LocalRaceStateStore;
 use crate::runtime::engine_worker::{EngineActivityKind, EngineCommandTarget, EngineRuntimeState};
 
 use super::race::FrameHub;
@@ -41,6 +44,7 @@ const TEAM_NAME_FETCH_FAILED: &str = "failed to fetch";
 enum ParsedRaceTableTarget {
     Sandbox { sandbox_id: String },
     OfficialRace,
+    LocalRace { race_id: String },
 }
 
 #[derive(Default)]
@@ -96,6 +100,8 @@ struct TrajectorySample {
 pub struct RaceTableQueryServiceImpl {
     runtime_store: Arc<RaceRuntimeStore>,
     frame_hub: FrameHub,
+    #[cfg(feature = "local")]
+    local_race_state: LocalRaceStateStore,
     #[cfg(feature = "official")]
     team_resolver: Arc<HpsTeamResolver>,
     cache: Arc<Mutex<RaceTableCache>>,
@@ -105,11 +111,14 @@ impl RaceTableQueryServiceImpl {
     pub fn new(
         runtime_store: Arc<RaceRuntimeStore>,
         frame_hub: FrameHub,
+        #[cfg(feature = "local")] local_race_state: LocalRaceStateStore,
         #[cfg(feature = "official")] team_resolver: Arc<HpsTeamResolver>,
     ) -> Self {
         Self {
             runtime_store,
             frame_hub,
+            #[cfg(feature = "local")]
+            local_race_state,
             #[cfg(feature = "official")]
             team_resolver,
             cache: Arc::new(Mutex::new(RaceTableCache::default())),
@@ -138,6 +147,9 @@ impl RaceTableQueryServiceImpl {
                 self.build_official_race_snapshot(runtime_state, &frame)
                     .await
             }
+            ParsedRaceTableTarget::LocalRace { race_id } => {
+                self.build_local_race_snapshot(race_id, &frame).await
+            }
         }?;
 
         #[cfg(feature = "official")]
@@ -151,6 +163,9 @@ impl RaceTableQueryServiceImpl {
             ParsedRaceTableTarget::OfficialRace => {
                 self.build_official_race_snapshot(runtime_state, &frame)
                     .await
+            }
+            ParsedRaceTableTarget::LocalRace { race_id } => {
+                self.build_local_race_snapshot(race_id, &frame).await
             }
         }?;
 
@@ -221,6 +236,91 @@ impl RaceTableQueryServiceImpl {
                 OfficialRaceTableSnapshot {
                     target: Some(OfficialRaceTableTarget {}),
                     entries,
+                },
+            )),
+        })
+    }
+
+    async fn build_local_race_snapshot(
+        &self,
+        race_id: String,
+        frame: &RuntimeFrame,
+    ) -> Result<RaceTableSnapshot, Status> {
+        let lap_length_m = f64::from(
+            frame
+                .local_race_lap_length_m
+                .get(&race_id)
+                .copied()
+                .unwrap_or(1.0)
+                .max(1.0),
+        );
+        let mut entries = Vec::new();
+        for car in frame.cars.values() {
+            if !matches!(&car.target, EngineCommandTarget::LocalRace { race_id: car_race_id } if car_race_id == &race_id)
+            {
+                continue;
+            }
+            let Some(metrics) = car.race_metrics else {
+                continue;
+            };
+            let identity = car
+                .identity
+                .as_ref()
+                .map(|identity| LocalRaceParticipantIdentity {
+                    display_name: identity
+                        .local_race_display_name
+                        .clone()
+                        .unwrap_or_else(|| format!("car-{}", car.public_car_id)),
+                    participant_index: identity.local_race_participant_index.unwrap_or(0),
+                });
+            #[cfg(feature = "local")]
+            let identity = match identity {
+                Some(identity) => Some(identity),
+                None => {
+                    self.local_race_state
+                        .participant_identity(car.public_car_id)
+                        .await
+                }
+            };
+            entries.push((
+                metrics.completed_laps,
+                metrics.completed_laps as f64 * lap_length_m
+                    + f64::from(metrics.lap_progress_m.max(0.0)),
+                LocalRaceTableEntry {
+                    car_id: car.public_car_id,
+                    participant: identity,
+                    position: 0,
+                    gap_to_leader_ms: None,
+                    laps_behind: 0,
+                    in_pit: car.state.pitstop_state.has_zone(PitstopZone::Fix),
+                    status: RaceTableEntryStatus::Active as i32,
+                },
+            ));
+        }
+        entries.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| left.2.car_id.cmp(&right.2.car_id))
+        });
+        let leader_laps = entries.first().map(|entry| entry.0).unwrap_or(0);
+        let rows = entries
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (completed_laps, _progress, mut row))| {
+                row.position = (idx + 1) as u32;
+                row.laps_behind = leader_laps.saturating_sub(completed_laps);
+                row.gap_to_leader_ms = if idx == 0 { Some(0) } else { None };
+                row
+            })
+            .collect();
+
+        Ok(RaceTableSnapshot {
+            snapshot: Some(race_table_snapshot::Snapshot::LocalRace(
+                LocalRaceTableSnapshot {
+                    target: Some(LocalRaceTableTarget { race_id }),
+                    entries: rows,
                 },
             )),
         })
@@ -424,6 +524,7 @@ impl RaceTableQueryServiceImpl {
                     team.team_name = resolve_team_name(&team.team_id, team_names.as_ref());
                 }
             }
+            Some(race_table_snapshot::Snapshot::LocalRace(_)) => {}
             None => {}
         }
     }
@@ -521,6 +622,17 @@ fn parse_required_target(target: Option<RaceTableTarget>) -> Result<ParsedRaceTa
             })
         }
         Some(race_table_target::Target::OfficialRace(_)) => Ok(ParsedRaceTableTarget::OfficialRace),
+        Some(race_table_target::Target::LocalRace(value)) => {
+            let race_id = value.race_id.trim();
+            if race_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "race table local race target requires non-empty race_id",
+                ));
+            }
+            Ok(ParsedRaceTableTarget::LocalRace {
+                race_id: race_id.to_string(),
+            })
+        }
         None => Err(Status::invalid_argument("race table target is required")),
     }
 }
@@ -531,6 +643,14 @@ fn ensure_target_supported(target: &ParsedRaceTableTarget) -> Result<(), Status>
         {
             return Err(Status::unimplemented(
                 "official race-table target is not supported by local backend mode",
+            ));
+        }
+    }
+    if matches!(target, ParsedRaceTableTarget::LocalRace { .. }) {
+        #[cfg(not(feature = "local"))]
+        {
+            return Err(Status::unimplemented(
+                "local race-table target is supported only by local backend mode",
             ));
         }
     }
@@ -561,6 +681,19 @@ fn ensure_target_active(
             }
             Ok(())
         }
+        ParsedRaceTableTarget::LocalRace { race_id } => {
+            if runtime_state
+                .active_local_race
+                .as_ref()
+                .map(|race| race.race_id.as_str())
+                != Some(race_id.as_str())
+            {
+                return Err(Status::not_found(
+                    "active local race session was not found for race-table target",
+                ));
+            }
+            Ok(())
+        }
     }
 }
 
@@ -569,7 +702,7 @@ fn matches_sandbox_target(sandbox_id: &str, car_target: &EngineCommandTarget) ->
         EngineCommandTarget::Sandbox {
             sandbox_id: car_sandbox_id,
         } => sandbox_id == car_sandbox_id,
-        EngineCommandTarget::OfficialRace => false,
+        EngineCommandTarget::OfficialRace | EngineCommandTarget::LocalRace { .. } => false,
     }
 }
 

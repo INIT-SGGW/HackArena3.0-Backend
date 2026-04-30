@@ -971,6 +971,9 @@ impl RaceServiceImpl {
                     },
                 ))
             }
+            EngineActivityKind::LocalRace => Err(Status::failed_precondition(
+                "team command car is not available in local race",
+            )),
             EngineActivityKind::None => Err(Status::failed_precondition("runtime is not active")),
         }
     }
@@ -1057,6 +1060,27 @@ impl RaceServiceImpl {
                     }
                     Ok(Some(EngineCommandTarget::OfficialRace))
                 }
+                FrontendSpectatorTarget::LocalRace(value) => {
+                    let race_id = value.race_id.trim();
+                    if race_id.is_empty() {
+                        return Err(Status::invalid_argument(
+                            "race_id is required for local race spectator target",
+                        ));
+                    }
+                    if runtime_state
+                        .active_local_race
+                        .as_ref()
+                        .map(|race| race.race_id.as_str())
+                        != Some(race_id)
+                    {
+                        return Err(Status::failed_precondition(
+                            "local race runtime is not active",
+                        ));
+                    }
+                    Ok(Some(EngineCommandTarget::LocalRace {
+                        race_id: race_id.to_string(),
+                    }))
+                }
             };
         }
 
@@ -1100,6 +1124,13 @@ fn resolve_runtime_map_id(
             .find(|entry| entry.sandbox_id == *sandbox_id)
         {
             return active.map_id.clone();
+        }
+    }
+    if let Some(EngineCommandTarget::LocalRace { race_id }) = visible_target {
+        if let Some(active) = runtime_state.active_local_race.as_ref() {
+            if active.race_id == *race_id {
+                return active.map_id.clone();
+            }
         }
     }
 
@@ -1290,6 +1321,22 @@ async fn run_frontend_spectator_stream(
                 break;
             }
         }
+        if let Some(EngineCommandTarget::LocalRace { race_id }) = visible_target.as_ref() {
+            let runtime_is_local_race = frame
+                .runtime_state
+                .as_ref()
+                .and_then(|state| state.active_local_race.as_ref())
+                .map(|race| race.race_id.as_str() == race_id)
+                .unwrap_or(false);
+            if !runtime_is_local_race {
+                tracing::info!(
+                    stream_id,
+                    target = ?visible_target,
+                    "frontend spectator stream ended: local race runtime is no longer active"
+                );
+                break;
+            }
+        }
         let mut frame_cars: Vec<_> = frame
             .cars
             .values()
@@ -1302,9 +1349,9 @@ async fn run_frontend_spectator_stream(
         frame_cars.sort_by_key(|entry| entry.public_car_id);
 
         let mut cars = Vec::with_capacity(frame_cars.len());
-        let official_race_leader_completed_laps = if matches!(
+        let race_leader_completed_laps = if matches!(
             visible_target.as_ref(),
-            Some(EngineCommandTarget::OfficialRace)
+            Some(EngineCommandTarget::OfficialRace) | Some(EngineCommandTarget::LocalRace { .. })
         ) {
             Some(
                 frame_cars
@@ -1359,6 +1406,13 @@ async fn run_frontend_spectator_stream(
                     .map(|duration_s| FrontendSpectatorDebugInfo {
                         engine_race_elapsed_sec: duration_s,
                     }),
+                Some(EngineCommandTarget::LocalRace { race_id }) => frame
+                    .local_race_duration_s
+                    .get(race_id)
+                    .copied()
+                    .map(|duration_s| FrontendSpectatorDebugInfo {
+                        engine_race_elapsed_sec: duration_s,
+                    }),
                 None => None,
             }
         } else {
@@ -1368,6 +1422,9 @@ async fn run_frontend_spectator_stream(
         let runtime_elapsed_sec = match visible_target.as_ref() {
             Some(EngineCommandTarget::Sandbox { sandbox_id }) => {
                 frame.sandbox_race_duration_s.get(sandbox_id).copied()
+            }
+            Some(EngineCommandTarget::LocalRace { race_id }) => {
+                frame.local_race_duration_s.get(race_id).copied()
             }
             _ => None,
         };
@@ -1393,16 +1450,19 @@ async fn run_frontend_spectator_stream(
                     None
                 }
             }
+            Some(EngineCommandTarget::LocalRace { .. }) => None,
             None => None,
         };
 
+        #[allow(deprecated)]
         let snapshot = FrontendSpectatorSnapshot {
             tick: frame.tick,
             server_time_ms: frame.server_time_ms,
             cars,
             debug,
             runtime_elapsed_sec,
-            official_race_leader_completed_laps,
+            official_race_leader_completed_laps: race_leader_completed_laps,
+            race_leader_completed_laps,
             runtime_remaining_sec,
         };
         let msg = FrontendSpectatorEvent {

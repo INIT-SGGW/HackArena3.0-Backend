@@ -20,11 +20,12 @@ use boink::model::{Controls, GearShift as EngineGearShift};
 #[cfg(feature = "official")]
 use dashmap::DashMap;
 use proto::race::v1::{
-    CarDimensions, LocalSandboxJoinRequest, LocalSandboxJoinResponse, ParticipantBootstrap,
-    ParticipantCommandAck, ParticipantCommandRejectReason, ParticipantCommandStatus,
-    ParticipantCommandType, ParticipantServerEvent, ParticipantSnapshot,
-    PrepareOfficialJoinRequest, PrepareOfficialJoinResponse, SpectatorView, StreamClampReason,
-    StreamSettings, TireType as ProtoTireType, ViewDowngradeReason,
+    CarDimensions, LocalRaceJoinRequest, LocalRaceJoinResponse, LocalSandboxJoinRequest,
+    LocalSandboxJoinResponse, ParticipantBootstrap, ParticipantCommandAck,
+    ParticipantCommandRejectReason, ParticipantCommandStatus, ParticipantCommandType,
+    ParticipantServerEvent, ParticipantSnapshot, PrepareOfficialJoinRequest,
+    PrepareOfficialJoinResponse, SpectatorView, StreamClampReason, StreamSettings,
+    TireType as ProtoTireType, ViewDowngradeReason,
     participant_client_message::Payload as ParticipantClientPayload,
     participant_server_event::Payload as ParticipantServerPayload,
     race_participant_service_server::RaceParticipantService,
@@ -60,6 +61,8 @@ use crate::auth::game_token::parse_game_token;
 use crate::db::repos::race_config::{RaceConfigRecord, RaceConfigRepo};
 #[cfg(feature = "official")]
 use crate::db::repos::submission::SubmissionRepo;
+#[cfg(feature = "local")]
+use crate::local::local_race_state::{LocalRaceStateError, LocalRaceStateStore};
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
 #[cfg(feature = "local")]
@@ -482,6 +485,8 @@ pub struct RaceParticipantServiceImpl {
     log_capture_tasks: Arc<DashMap<String, JoinHandle<()>>>,
     #[cfg(feature = "local")]
     local_sandbox_store: LocalSandboxConfigStore,
+    #[cfg(feature = "local")]
+    local_race_state: LocalRaceStateStore,
 }
 
 impl RaceParticipantServiceImpl {
@@ -501,6 +506,7 @@ impl RaceParticipantServiceImpl {
         #[cfg(feature = "official")] wrapper_backend_endpoint: String,
         #[cfg(feature = "official")] slot_updates_tx: broadcast::Sender<String>,
         #[cfg(feature = "local")] local_sandbox_store: LocalSandboxConfigStore,
+        #[cfg(feature = "local")] local_race_state: LocalRaceStateStore,
     ) -> Self {
         Self {
             engine,
@@ -535,6 +541,8 @@ impl RaceParticipantServiceImpl {
             log_capture_tasks: Arc::new(DashMap::new()),
             #[cfg(feature = "local")]
             local_sandbox_store,
+            #[cfg(feature = "local")]
+            local_race_state,
         }
     }
 }
@@ -851,6 +859,129 @@ impl RaceParticipantServiceImpl {
         Ok(LocalSandboxJoinResponse {
             car_id: public_car_id,
             map_id,
+        })
+    }
+
+    #[cfg(feature = "local")]
+    async fn local_race_join_impl(
+        &self,
+        race_id: String,
+        display_name: String,
+    ) -> Result<LocalRaceJoinResponse, Status> {
+        let race_id = race_id.trim().to_string();
+        if race_id.is_empty() {
+            return Err(Status::invalid_argument("race_id must be non-empty"));
+        }
+        let display_name = {
+            let value = display_name.trim();
+            if value.is_empty() {
+                "Local bot".to_string()
+            } else {
+                value.chars().take(64).collect()
+            }
+        };
+        let active_race = self
+            .local_race_state
+            .active_race()
+            .await
+            .ok_or_else(|| Status::failed_precondition("local race runtime is not active"))?;
+        if active_race.race_id != race_id {
+            return Err(Status::not_found(
+                "local race runtime is not active for requested race_id",
+            ));
+        }
+
+        let target = EngineCommandTarget::LocalRace {
+            race_id: race_id.clone(),
+        };
+        let engine_car_id = self
+            .engine
+            .spawn_local_race_car(race_id.clone())
+            .await
+            .map_err(map_worker_err)?;
+        let public_car_id = self.runtime_store.allocate_public_car_id();
+
+        let participant = match self
+            .local_race_state
+            .register_participant(&race_id, public_car_id, display_name.clone())
+            .await
+        {
+            Ok(participant) => participant,
+            Err(err) => {
+                if let Err(despawn_err) = self
+                    .engine
+                    .despawn_car_in(target.clone(), engine_car_id)
+                    .await
+                {
+                    tracing::warn!(
+                        race_id = %race_id,
+                        engine_car_id,
+                        error = %despawn_err,
+                        "failed to despawn local race car after join rejection"
+                    );
+                }
+                return Err(map_local_race_state_err(err));
+            }
+        };
+
+        let slots = self
+            .engine
+            .get_number_of_start_pos_in(target.clone())
+            .await
+            .map_err(map_worker_err)?;
+        if slots == 0 {
+            return Err(Status::failed_precondition(
+                "no start slots available for selected map",
+            ));
+        }
+        let start_slot = u64::from(participant.participant_index)
+            .saturating_sub(1)
+            .rem_euclid(slots)
+            .saturating_add(1);
+        if let Err(status) = self
+            .engine
+            .set_car_at_start_pos_in(target.clone(), engine_car_id, start_slot)
+            .await
+            .map_err(map_worker_err)
+        {
+            if let Err(err) = self
+                .engine
+                .despawn_car_in(target.clone(), engine_car_id)
+                .await
+            {
+                tracing::warn!(
+                    race_id = %race_id,
+                    engine_car_id,
+                    error = %err,
+                    "failed to despawn local race car after start-position failure"
+                );
+            }
+            self.local_race_state
+                .remove_participant(public_car_id)
+                .await;
+            return Err(status);
+        }
+
+        let mut identity = RuntimeCarIdentity::default();
+        identity.local_race_display_name = Some(display_name);
+        identity.local_race_participant_index = Some(participant.participant_index);
+        self.runtime_store.set_car_identity(public_car_id, identity);
+        self.runtime_store.known_cars().insert(public_car_id, ());
+        self.runtime_store
+            .last_client_seq()
+            .insert(public_car_id, 0);
+        self.runtime_store
+            .car_engine_ids()
+            .insert(public_car_id, engine_car_id);
+        self.runtime_store
+            .car_targets()
+            .insert(public_car_id, target);
+
+        Ok(LocalRaceJoinResponse {
+            car_id: public_car_id,
+            race_id,
+            map_id: active_race.map_id,
+            participant_index: participant.participant_index,
         })
     }
 
@@ -2425,7 +2556,7 @@ impl RaceParticipantServiceImpl {
             .iter()
             .filter_map(|entry| match entry.value() {
                 EngineCommandTarget::OfficialRace => Some(*entry.key()),
-                EngineCommandTarget::Sandbox { .. } => None,
+                EngineCommandTarget::Sandbox { .. } | EngineCommandTarget::LocalRace { .. } => None,
             })
             .collect();
 
@@ -2763,6 +2894,11 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
                         .ok_or_else(|| {
                             Status::not_found("no active official sandbox join for team")
                         })?,
+                    EngineActivityKind::LocalRace => {
+                        return Err(Status::failed_precondition(
+                            "official token stream is not available for local race",
+                        ));
+                    }
                     EngineActivityKind::None => {
                         return Err(Status::failed_precondition("runtime is not active"));
                     }
@@ -2936,6 +3072,9 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
                 EngineActivityKind::Sandbox => Err(Status::not_found(
                     "no active official sandbox join for team",
                 )),
+                EngineActivityKind::LocalRace => Err(Status::failed_precondition(
+                    "official join is not available in local race",
+                )),
                 EngineActivityKind::None => {
                     Err(Status::failed_precondition("runtime is not active"))
                 }
@@ -2966,6 +3105,45 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
             let req = request.into_inner();
             let joined = self.local_sandbox_join_impl(req.sandbox_id, auth).await?;
             Ok(Response::new(joined))
+        }
+    }
+
+    async fn local_race_join(
+        &self,
+        request: Request<LocalRaceJoinRequest>,
+    ) -> Result<Response<LocalRaceJoinResponse>, Status> {
+        #[cfg(not(feature = "local"))]
+        {
+            let _ = request;
+            return Err(Status::unimplemented(
+                "LocalRaceJoin is supported only in local backend mode",
+            ));
+        }
+        #[cfg(feature = "local")]
+        {
+            let req = request.into_inner();
+            let joined = self
+                .local_race_join_impl(req.race_id, req.display_name)
+                .await?;
+            Ok(Response::new(joined))
+        }
+    }
+}
+
+#[cfg(feature = "local")]
+fn map_local_race_state_err(err: LocalRaceStateError) -> Status {
+    match err {
+        LocalRaceStateError::NoActiveRace => {
+            Status::failed_precondition("local race runtime is not active")
+        }
+        LocalRaceStateError::RaceMismatch => {
+            Status::not_found("local race runtime is not active for requested race_id")
+        }
+        LocalRaceStateError::JoinClosed => {
+            Status::failed_precondition("local race join is allowed only in staging phase")
+        }
+        LocalRaceStateError::ParticipantLimitReached => {
+            Status::resource_exhausted("local race participant limit reached")
         }
     }
 }
@@ -3031,6 +3209,13 @@ fn resolve_runtime_map_id(frame_hub: &FrameHub, visible_target: &EngineCommandTa
             .find(|entry| entry.sandbox_id == *sandbox_id)
         {
             return active.map_id.clone();
+        }
+    }
+    if let EngineCommandTarget::LocalRace { race_id } = visible_target {
+        if let Some(active) = runtime_state.active_local_race.as_ref() {
+            if active.race_id == *race_id {
+                return active.map_id.clone();
+            }
         }
     }
 
@@ -3151,6 +3336,42 @@ async fn cleanup_participant_car(
                 target = ?target,
                 reason,
                 "participant cleanup: preserving official race car after participant disconnect"
+            );
+        }
+        EngineCommandTarget::LocalRace { .. } => {
+            match tokio::time::timeout(
+                PARTICIPANT_DESPAWN_TIMEOUT,
+                engine.despawn_car_in(target.clone(), engine_car_id),
+            )
+            .await
+            {
+                Err(_) => {
+                    tracing::warn!(
+                        public_car_id,
+                        engine_car_id,
+                        target = ?target,
+                        timeout_sec = PARTICIPANT_DESPAWN_TIMEOUT.as_secs(),
+                        "participant cleanup: local race despawn timed out"
+                    );
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        public_car_id,
+                        engine_car_id,
+                        target = ?target,
+                        error = %err,
+                        "failed to despawn local race car during cleanup"
+                    );
+                }
+                Ok(Ok(())) => {}
+            }
+            runtime_store.remove_car(public_car_id);
+            tracing::info!(
+                public_car_id,
+                engine_car_id,
+                target = ?target,
+                reason,
+                "participant cleanup: local race car removed"
             );
         }
     }

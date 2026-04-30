@@ -9,6 +9,8 @@ use proto::achievement::v1::achievement_stream_service_server::AchievementStream
 use proto::hackarena::connect::v1::connect_service_server::ConnectServiceServer;
 use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "local")]
+use proto::race::v1::local_race_admin_service_server::LocalRaceAdminServiceServer;
+#[cfg(feature = "local")]
 use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::public_menu_service_server::PublicMenuServiceServer;
@@ -57,6 +59,8 @@ use crate::db::repos::submission::SubmissionRepo;
 use crate::db::repos::weather::WeatherRepo;
 #[cfg(all(feature = "local", not(feature = "standalone")))]
 use crate::local::broker::BrokerRegistrationState;
+#[cfg(feature = "local")]
+use crate::local::local_race_state::LocalRaceStateStore;
 #[cfg(all(feature = "local", not(feature = "standalone")))]
 use crate::local::map_assets::LocalMapAssetsSync;
 #[cfg(feature = "local")]
@@ -67,6 +71,8 @@ use crate::services::achievement_stream::AchievementStreamServiceImpl;
 use crate::services::asset::AssetServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::connect::ConnectServiceImpl;
+#[cfg(feature = "local")]
+use crate::services::local_race_admin::LocalRaceAdminServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
 #[cfg(feature = "official")]
@@ -129,6 +135,10 @@ pub async fn serve_grpc(
         .await;
     health_reporter
         .set_serving::<WeatherQueryServiceServer<WeatherQueryServiceImpl>>()
+        .await;
+    #[cfg(feature = "local")]
+    health_reporter
+        .set_serving::<LocalRaceAdminServiceServer<LocalRaceAdminServiceImpl>>()
         .await;
     #[cfg(feature = "local")]
     health_reporter
@@ -302,6 +312,8 @@ pub async fn serve_grpc(
     let local_sandbox_store =
         LocalSandboxConfigStore::load_or_create(cfg.local_sandbox_store_path.clone()).await?;
     #[cfg(feature = "local")]
+    let local_race_state = LocalRaceStateStore::new();
+    #[cfg(feature = "local")]
     tracing::info!(
         path = %local_sandbox_store.path().display(),
         max_active_sandboxes = cfg.local_max_active_sandboxes,
@@ -347,6 +359,8 @@ pub async fn serve_grpc(
         slot_updates_tx.clone(),
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
+        #[cfg(feature = "local")]
+        local_race_state.clone(),
     );
     #[cfg(feature = "official")]
     race_participant_impl.spawn_slot_switch_poller();
@@ -371,6 +385,8 @@ pub async fn serve_grpc(
     let race_table_impl = RaceTableQueryServiceImpl::new(
         race_runtime_store.clone(),
         frame_hub.clone(),
+        #[cfg(feature = "local")]
+        local_race_state.clone(),
         #[cfg(feature = "official")]
         team_resolver.clone(),
     );
@@ -430,9 +446,13 @@ pub async fn serve_grpc(
     let weather_query_impl = WeatherQueryServiceImpl::for_local(
         local_sandbox_engine.clone(),
         local_weather_events.clone(),
+        local_race_state.clone(),
     );
     #[cfg(all(not(feature = "official"), not(feature = "local")))]
     let weather_query_impl = WeatherQueryServiceImpl::default();
+    #[cfg(feature = "local")]
+    let local_race_admin_impl =
+        LocalRaceAdminServiceImpl::new(local_sandbox_engine.clone(), local_race_state.clone());
     #[cfg(feature = "local")]
     let local_sandbox_admin_impl = {
         LocalSandboxAdminServiceImpl::new(
@@ -442,6 +462,7 @@ pub async fn serve_grpc(
             cfg.local_max_active_sandboxes,
             local_map_sync,
             local_weather_events,
+            local_race_state,
         )
     };
     #[cfg(all(feature = "local", not(feature = "standalone")))]
@@ -518,6 +539,8 @@ pub async fn serve_grpc(
     let server = server.add_service(OfficialSandboxCommandServiceServer::new(
         official_sandbox_command_impl,
     ));
+    #[cfg(feature = "local")]
+    let server = server.add_service(LocalRaceAdminServiceServer::new(local_race_admin_impl));
     #[cfg(feature = "local")]
     let server = server.add_service(LocalSandboxAdminServiceServer::new(
         local_sandbox_admin_impl,

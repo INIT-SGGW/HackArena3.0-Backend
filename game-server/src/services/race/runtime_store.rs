@@ -24,6 +24,8 @@ pub struct RuntimeCarIdentity {
     pub team_id: Option<String>,
     pub instance_uuid: Option<String>,
     pub local_bot_index: Option<u32>,
+    pub local_race_display_name: Option<String>,
+    pub local_race_participant_index: Option<u32>,
     pub official_race_start_position_index: Option<u64>,
     pub active_bot_slot: Option<i16>,
     pub bot_switch_in_progress: bool,
@@ -279,6 +281,17 @@ impl RaceRuntimeStore {
         counts
     }
 
+    pub fn active_car_counts_by_local_race(&self) -> HashMap<String, u32> {
+        let mut counts = HashMap::new();
+        for entry in self.car_targets.iter() {
+            if let EngineCommandTarget::LocalRace { race_id } = entry.value() {
+                let counter = counts.entry(race_id.clone()).or_insert(0u32);
+                *counter = (*counter).saturating_add(1);
+            }
+        }
+        counts
+    }
+
     pub fn joined_sandbox_ids_for_team(&self, team_id: &str) -> HashSet<String> {
         let mut sandboxes = HashSet::new();
         let team_id = team_id.trim();
@@ -290,7 +303,9 @@ impl RaceRuntimeStore {
             let car_id = *target.key();
             let sandbox_id = match target.value() {
                 EngineCommandTarget::Sandbox { sandbox_id } => sandbox_id.clone(),
-                EngineCommandTarget::OfficialRace => continue,
+                EngineCommandTarget::OfficialRace | EngineCommandTarget::LocalRace { .. } => {
+                    continue;
+                }
             };
 
             let team_matches = self
