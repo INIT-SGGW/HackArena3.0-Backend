@@ -33,7 +33,12 @@ pub enum AppEnv {
 
 impl AppEnv {
     pub fn from_env() -> Self {
-        let v = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
+        #[cfg(feature = "standalone")]
+        let default_env = "production";
+        #[cfg(not(feature = "standalone"))]
+        let default_env = "development";
+
+        let v = std::env::var("APP_ENV").unwrap_or_else(|_| default_env.to_string());
         match v.to_ascii_lowercase().as_str() {
             "preprod" => AppEnv::Preprod,
             "production" | "prod" => AppEnv::Production,
@@ -212,6 +217,13 @@ impl Config {
             }
         }
 
+        #[cfg(feature = "standalone")]
+        let allow_origin = match raw_allow_origins.as_deref() {
+            Some(v) if !v.trim().is_empty() => parse_allow_origin(v)?,
+            _ => AllowOrigin::any(),
+        };
+
+        #[cfg(not(feature = "standalone"))]
         let allow_origin = match (app_env.is_production(), raw_allow_origins.as_deref()) {
             (true, None) => return Err("CORS_ALLOWED_ORIGINS must be set in production".into()),
             (true, Some(v)) if v.trim().is_empty() => {

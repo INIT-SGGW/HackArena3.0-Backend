@@ -25,6 +25,7 @@ use tokio::sync::broadcast;
 use tokio::task::{JoinHandle, LocalSet};
 use tracing::{error, info};
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use runtime::engine_worker::EngineClient;
@@ -40,6 +41,14 @@ pub async fn run(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
 
 /// Initialize tracing with environment-configured filters and file persistence.
 pub fn init_tracing(binary_name: &str) -> Result<WorkerGuard, Box<dyn Error>> {
+    init_tracing_with_default_filter(binary_name, None)
+}
+
+/// Initialize tracing with optional default filter when `RUST_LOG` is not set.
+pub fn init_tracing_with_default_filter(
+    binary_name: &str,
+    default_filter: Option<&str>,
+) -> Result<WorkerGuard, Box<dyn Error>> {
     let logs_dir = std::path::PathBuf::from(".logs");
     std::fs::create_dir_all(&logs_dir)?;
     let now = OffsetDateTime::now_utc();
@@ -49,9 +58,18 @@ pub fn init_tracing(binary_name: &str) -> Result<WorkerGuard, Box<dyn Error>> {
     let filename = format!("{binary_name}_{timestamp}_{:03}.log", now.millisecond());
     let file_appender = tracing_appender::rolling::never(logs_dir, filename);
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let env_filter = if std::env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::EnvFilter::from_default_env()
+    } else if let Some(default_filter) = default_filter {
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(LevelFilter::ERROR.into())
+            .parse_lossy(default_filter)
+    } else {
+        tracing_subscriber::EnvFilter::from_default_env()
+    };
 
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(env_filter)
         .with(tracing_subscriber::fmt::layer())
         .with(
             tracing_subscriber::fmt::layer()

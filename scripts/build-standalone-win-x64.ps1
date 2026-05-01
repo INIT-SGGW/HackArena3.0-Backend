@@ -91,40 +91,24 @@ function Invoke-FrontendDockerBuild {
     }
 }
 
-function Write-PackagedStandaloneEnv {
+function Copy-VersionedStandaloneConfig {
     param(
-        [Parameter(Mandatory = $true)][string]$PackageRoot
+        [Parameter(Mandatory = $true)][string]$PackageRoot,
+        [Parameter(Mandatory = $true)][string]$RepoRoot
     )
 
-    $envContent = @'
-# Application environment: development | preprod | production
-APP_ENV=development
+    $templatePath = Join-Path $RepoRoot "standalone.toml.default"
+    if (-not (Test-Path $templatePath)) {
+        throw "Standalone config template missing: $templatePath"
+    }
 
-# gRPC server listen address
-LISTEN_ADDR=0.0.0.0:50051
-
-# Standalone frontend HTTP server
-FRONTEND_ENABLE=true
-FRONTEND_LISTEN_ADDR=0.0.0.0:8080
-FRONTEND_DIR=frontend
-
-# Logging
-RUST_LOG=warn,boink=info,tonic_web=info,game_server=info,game_engine=info
-
-# Standalone bundled assets
-TRACKS_DIR=assets/tracks
-BOLIDS_DIR=assets/bolids
-
-# Optional simulation tickrate
-# SIMULATION_HZ=60
-'@
-
-    Set-Content -Path (Join-Path $PackageRoot ".env.standalone") -Value $envContent -NoNewline
+    Copy-Item $templatePath -Destination (Join-Path $PackageRoot "standalone.toml") -Force
 }
 
 function Copy-StandalonePackageFiles {
     param(
         [Parameter(Mandatory = $true)][string]$PackageRoot,
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$ExePath,
         [Parameter(Mandatory = $true)][string]$TargetReleaseDir,
         [Parameter(Mandatory = $true)][string]$NativeRuntimeDir,
@@ -157,7 +141,7 @@ function Copy-StandalonePackageFiles {
 
     Copy-Item $FrontendDistSource -Destination (Join-Path $PackageRoot "frontend") -Recurse -Force
 
-    Write-PackagedStandaloneEnv -PackageRoot $PackageRoot
+    Copy-VersionedStandaloneConfig -PackageRoot $PackageRoot -RepoRoot $RepoRoot
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -232,6 +216,7 @@ $packageDir = Join-Path $stagingRoot $packageName
 
 Copy-StandalonePackageFiles `
     -PackageRoot $packageDir `
+    -RepoRoot $repoRoot `
     -ExePath $standaloneExePath `
     -TargetReleaseDir $targetReleaseDir `
     -NativeRuntimeDir $nativeRuntimeDir `

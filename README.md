@@ -33,11 +33,14 @@ What it does:
   - runtime DLLs
   - `assets/tracks` and `assets/bolids`
   - `frontend` (from frontend `dist`)
-  - `.env.standalone` with bundled asset/frontend paths
+  - `standalone.toml` with bundled asset/frontend paths
 
 Important:
 - the script does not run any git/submodule commands
 - frontend sources must already exist in `third_party/HackArena3.0-Frontend`
+- `standalone.toml` is the main user config file for packaged standalone releases
+- `log_level` in `standalone.toml` controls user-facing log verbosity: `verbose`, `debug`, `info`, `warn`, `error`
+- advanced overrides can still be provided through real process environment variables
 
 Example:
 
@@ -67,6 +70,12 @@ After unpacking the release zip, run:
 
 ```powershell
 .\ha3-standalone.exe
+```
+
+If you want to change ports or asset/frontend paths, edit:
+
+```
+standalone.toml
 ```
 
 Default standalone endpoints:

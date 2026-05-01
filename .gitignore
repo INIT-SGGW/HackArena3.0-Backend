@@ -25,6 +25,7 @@ target
 .env.local
 .env.official
 .env.standalone
+standalone.toml
 
 # Generated protobuf code
 proto/gen/
