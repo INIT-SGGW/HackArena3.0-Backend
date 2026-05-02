@@ -23,7 +23,7 @@ use std::sync::atomic::AtomicUsize;
 use time::{OffsetDateTime, format_description};
 use tokio::sync::broadcast;
 use tokio::task::{JoinHandle, LocalSet};
-use tracing::{error, info};
+use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -32,8 +32,12 @@ use runtime::engine_worker::EngineClient;
 
 use crate::config::Config;
 
+#[cfg(feature = "standalone")]
+const USER_LOG_TARGET: &str = "ha3_standalone::user";
+
 /// Run the game server using the provided configuration.
 pub async fn run(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
+    #[cfg(not(feature = "standalone"))]
     tracing::info!("gRPC bind address: {}", cfg.listen_addr);
     let local = LocalSet::new();
     local.run_until(async move { run_app(cfg).await }).await
@@ -132,9 +136,9 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
             let shutdown_tx_frontend = frontend_shutdown_tx.clone();
             let frontend_shutdown_rx = grpc_shutdown_tx.subscribe();
             async move {
-                info!(
-                    "Starting standalone frontend HTTP server on {}",
-                    cfg.frontend_listen_addr
+                tracing::debug!(
+                    listen_addr = %cfg.frontend_listen_addr,
+                    "starting standalone frontend HTTP server task"
                 );
                 if let Err(e) = crate::server::serve_frontend(cfg, frontend_shutdown_rx).await {
                     error!("standalone frontend HTTP server terminated with error: {e}");
@@ -143,7 +147,10 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
             }
         }))
     } else {
-        info!("Standalone frontend HTTP server is disabled");
+        tracing::info!(
+            target: USER_LOG_TARGET,
+            "Frontend hosting is disabled; standalone is running without browser UI"
+        );
         None
     };
 
@@ -154,7 +161,7 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
         let cfg = cfg.clone();
         let active_connections = active_connections.clone();
         async move {
-            info!("Starting gRPC server on {}", cfg.listen_addr);
+            tracing::debug!(listen_addr = %cfg.listen_addr, "starting gRPC server task");
             if let Err(e) = crate::server::serve_grpc(
                 cfg,
                 engine,

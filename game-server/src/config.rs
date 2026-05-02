@@ -270,7 +270,7 @@ impl Config {
             let tracks_dir = resolve_dir("TRACKS_DIR", tracks_rel)
                 .map_err(|e| format!("Failed to resolve tracks directory: {}", e))?;
 
-            tracing::info!(
+            tracing::debug!(
                 path = %tracks_dir.display(),
                 "using standalone tracks bundle directory"
             );
@@ -281,6 +281,9 @@ impl Config {
         let bolids_dir = resolve_dir("BOLIDS_DIR", bolids_rel)
             .map_err(|e| format!("Failed to resolve bolids directory: {}", e))?;
 
+        #[cfg(feature = "standalone")]
+        tracing::debug!(path = %bolids_dir.display(), "using bolids directory");
+        #[cfg(not(feature = "standalone"))]
         tracing::info!(path = %bolids_dir.display(), "using bolids directory");
 
         if bolids_dir
@@ -300,9 +303,12 @@ impl Config {
             return Err("SIMULATION_HZ must be >= 1".into());
         }
 
+        #[cfg(feature = "standalone")]
+        tracing::debug!(simulation_hz, "server config");
+        #[cfg(not(feature = "standalone"))]
         tracing::info!(simulation_hz, "server config");
         #[cfg(feature = "standalone")]
-        tracing::info!(
+        tracing::debug!(
             frontend_enable,
             frontend_listen_addr = %frontend_listen_addr,
             frontend_dir = %frontend_dir.display(),

@@ -20,6 +20,7 @@ const STANDALONE_CONFIG_FILENAME: &str = "standalone.toml";
 const LEGACY_STANDALONE_ENV_FILENAME: &str = ".env.standalone";
 const FALLBACK_ENV_FILENAME: &str = ".env";
 const STANDALONE_CONFIG_VERSION: u32 = 1;
+const USER_LOG_TARGET: &str = "ha3_standalone::user";
 
 #[derive(Debug, Deserialize)]
 struct StandaloneTomlConfig {
@@ -51,20 +52,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     )?;
 
     if let Some(path) = &load_summary.standalone_toml {
-        tracing::info!(path = %path.display(), "loaded standalone TOML config");
+        tracing::info!(
+            target: USER_LOG_TARGET,
+            path = %display_path(path),
+            "Using standalone config file"
+        );
     } else {
-        tracing::info!("standalone TOML config not found; using legacy env fallbacks if present");
+        tracing::debug!("standalone TOML config not found; using legacy env fallbacks if present");
     }
     if let Some(path) = &load_summary.legacy_env {
-        tracing::info!(path = %path.display(), "loaded legacy standalone env fallback");
+        tracing::warn!(
+            target: USER_LOG_TARGET,
+            path = %display_path(path),
+            "Using legacy .env.standalone fallback; migrate to standalone.toml"
+        );
     }
     if let Some(path) = &load_summary.fallback_env {
-        tracing::info!(path = %path.display(), "loaded generic env fallback");
+        tracing::warn!(
+            target: USER_LOG_TARGET,
+            path = %display_path(path),
+            "Using generic .env fallback; migrate to standalone.toml"
+        );
     }
 
     let cfg = Arc::new(Config::load_or_exit());
-
-    tracing::info!("ha3-standalone starting");
 
     game_server::run(cfg).await
 }
@@ -143,6 +154,7 @@ fn set_env_if_missing(name: &str, value: Option<String>) {
 fn standalone_log_filter(value: Option<&str>) -> Result<&'static str, Box<dyn Error>> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         None => Ok("info"),
+        Some("minimal") => Ok("warn,ha3_standalone::user=info"),
         Some("verbose") => Ok("trace"),
         Some("debug") => Ok("debug"),
         Some("info") => Ok("info"),
@@ -151,7 +163,7 @@ fn standalone_log_filter(value: Option<&str>) -> Result<&'static str, Box<dyn Er
         Some(other) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
-                "invalid standalone log_level `{other}`; expected one of: verbose, debug, info, warn, error"
+                "invalid standalone log_level `{other}`; expected one of: minimal, verbose, debug, info, warn, error"
             ),
         )
         .into()),
@@ -168,6 +180,7 @@ fn load_env_file_if_present(file_name: &str) -> Result<Option<PathBuf>, Box<dyn 
         return Ok(None);
     };
 
+    let mut applied_any = false;
     for item in dotenv::from_path_iter(&path)? {
         let (key, value) = item?;
         if is_reserved_file_env_key(&key) || std::env::var_os(&key).is_some() {
@@ -175,9 +188,10 @@ fn load_env_file_if_present(file_name: &str) -> Result<Option<PathBuf>, Box<dyn 
         }
         // SAFETY: standalone startup mutates process env before spawning worker tasks.
         unsafe { std::env::set_var(key, value) };
+        applied_any = true;
     }
 
-    Ok(Some(path))
+    Ok(applied_any.then_some(path))
 }
 
 fn find_file_upwards(file_name: &str) -> Option<PathBuf> {
@@ -191,4 +205,8 @@ fn find_file_upwards(file_name: &str) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+fn display_path(path: &Path) -> String {
+    path.display().to_string().replace("\\\\?\\", "")
 }

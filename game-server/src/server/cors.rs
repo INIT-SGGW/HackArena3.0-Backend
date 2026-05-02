@@ -18,6 +18,9 @@ pub fn cors_layer(cfg: &Config) -> CorsLayer {
     #[cfg(not(all(feature = "local", feature = "standalone")))]
     let allow_origin = cfg.allow_origin.clone();
 
+    #[cfg(feature = "standalone")]
+    tracing::debug!("CORS allow_origin: {:?}", allow_origin);
+    #[cfg(not(feature = "standalone"))]
     tracing::info!("CORS allow_origin: {:?}", allow_origin);
 
     let layer = CorsLayer::new()

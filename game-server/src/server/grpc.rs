@@ -102,6 +102,9 @@ use crate::services::weather::WeatherQueryServiceImpl;
 use super::cors::cors_layer;
 use super::shutdown::shutdown_signal;
 
+#[cfg(feature = "standalone")]
+const USER_LOG_TARGET: &str = "ha3_standalone::user";
+
 /// Runs the gRPC server (with gRPC-web and CORS) until shutdown is requested.
 pub async fn serve_grpc(
     cfg: Arc<Config>,
@@ -314,6 +317,13 @@ pub async fn serve_grpc(
     #[cfg(feature = "local")]
     let local_race_state = LocalRaceStateStore::new();
     #[cfg(feature = "local")]
+    #[cfg(feature = "standalone")]
+    tracing::debug!(
+        path = %local_sandbox_store.path().display(),
+        max_active_sandboxes = cfg.local_max_active_sandboxes,
+        "local sandbox config store ready"
+    );
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     tracing::info!(
         path = %local_sandbox_store.path().display(),
         max_active_sandboxes = cfg.local_max_active_sandboxes,
@@ -472,12 +482,18 @@ pub async fn serve_grpc(
 
     let cors = cors_layer(&cfg);
 
+    let listener = TcpListener::bind(cfg.listen_addr).await?;
+    #[cfg(feature = "standalone")]
+    tracing::info!(
+        target: USER_LOG_TARGET,
+        url = %http_url_for_grpc(cfg.listen_addr),
+        "gRPC / gRPC-web endpoint"
+    );
+    #[cfg(not(feature = "standalone"))]
     tracing::info!(
         "Starting gRPC server (gRPC-web enabled) on {}",
         cfg.listen_addr
     );
-
-    let listener = TcpListener::bind(cfg.listen_addr).await?;
     let incoming = TcpListenerStream::new(listener).filter_map(move |conn| {
         let active_connections = active_connections.clone();
         match conn {
@@ -562,6 +578,16 @@ pub async fn serve_grpc(
     }
 
     serve_result
+}
+
+#[cfg(feature = "standalone")]
+fn http_url_for_grpc(addr: std::net::SocketAddr) -> String {
+    let host = if addr.ip().is_unspecified() {
+        "localhost".to_string()
+    } else {
+        addr.ip().to_string()
+    };
+    format!("http://{host}:{}", addr.port())
 }
 
 fn client_ip_from_headers(headers: &http::HeaderMap) -> String {

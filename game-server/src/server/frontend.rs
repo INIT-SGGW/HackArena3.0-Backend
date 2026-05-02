@@ -13,6 +13,8 @@ use tower_http::services::{ServeDir, ServeFile};
 
 use crate::config::Config;
 
+const USER_LOG_TARGET: &str = "ha3_standalone::user";
+
 #[derive(Clone)]
 struct FrontendRuntimeState {
     grpc_port: u16,
@@ -24,7 +26,7 @@ pub async fn serve_frontend(
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !cfg.frontend_enable {
-        tracing::info!("standalone frontend HTTP server disabled");
+        tracing::debug!("standalone frontend HTTP server disabled");
         return Ok(());
     }
 
@@ -51,17 +53,22 @@ pub async fn serve_frontend(
         .with_state(state);
 
     let listener = TcpListener::bind(cfg.frontend_listen_addr).await?;
-    tracing::info!(
+    tracing::debug!(
         listen_addr = %cfg.frontend_listen_addr,
         grpc_addr = %cfg.listen_addr,
-        frontend_dir = %cfg.frontend_dir.display(),
+        frontend_dir = %display_path(&cfg.frontend_dir),
         "standalone frontend HTTP server starting"
+    );
+    tracing::info!(
+        target: USER_LOG_TARGET,
+        url = %http_url_for_browser(cfg.frontend_listen_addr),
+        "Open in browser"
     );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.recv().await;
-            tracing::info!("standalone frontend HTTP shutdown requested");
+            tracing::debug!("standalone frontend HTTP shutdown requested");
         })
         .await
         .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)
@@ -118,4 +125,17 @@ fn build_runtime_config_js(grpc_port: u16) -> String {
 "#,
         grpc_port = grpc_port,
     )
+}
+
+fn http_url_for_browser(addr: std::net::SocketAddr) -> String {
+    let host = if addr.ip().is_unspecified() {
+        "localhost".to_string()
+    } else {
+        addr.ip().to_string()
+    };
+    format!("http://{host}:{}", addr.port())
+}
+
+fn display_path(path: &std::path::Path) -> String {
+    path.display().to_string().replace("\\\\?\\", "")
 }

@@ -2,7 +2,7 @@
 # Config format version. Do not change.
 config_version = 1
 
-# Logging verbosity: verbose | debug | info | warn | error
+# Logging verbosity: minimal | verbose | debug | info | warn | error
 log_level = "info"
 
 # gRPC / gRPC-web endpoint used by wrappers and frontend

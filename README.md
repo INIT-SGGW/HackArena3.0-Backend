@@ -39,7 +39,8 @@ Important:
 - the script does not run any git/submodule commands
 - frontend sources must already exist in `third_party/HackArena3.0-Frontend`
 - `standalone.toml` is the main user config file for packaged standalone releases
-- `log_level` in `standalone.toml` controls user-facing log verbosity: `verbose`, `debug`, `info`, `warn`, `error`
+- `log_level` in `standalone.toml` controls user-facing log verbosity: `minimal`, `verbose`, `debug`, `info`, `warn`, `error`
+- `minimal` keeps warnings/errors plus the key startup messages such as config path and browser URL
 - advanced overrides can still be provided through real process environment variables
 
 Example:

@@ -919,6 +919,9 @@ pub async fn spawn(
     let official_engine: Option<EngineWorldSlot> = None;
     let local_race_engines: HashMap<String, SandboxEngineHandle> = HashMap::new();
 
+    #[cfg(feature = "standalone")]
+    tracing::debug!("engine worker: startup runtime is idle");
+    #[cfg(not(feature = "standalone"))]
     tracing::info!("engine worker: startup runtime is idle");
 
     let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f32;
@@ -963,6 +966,9 @@ async fn run_worker(
         );
         weather_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        #[cfg(feature = "standalone")]
+        tracing::debug!("weather sync enabled (interval=60s)");
+        #[cfg(not(feature = "standalone"))]
         tracing::info!("weather sync enabled (interval=60s)");
         if matches!(
             runtime_state.activity_kind,
