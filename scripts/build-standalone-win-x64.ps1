@@ -110,6 +110,7 @@ function Copy-StandalonePackageFiles {
         [Parameter(Mandatory = $true)][string]$PackageRoot,
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][string]$UpdaterExePath,
         [Parameter(Mandatory = $true)][string]$TargetReleaseDir,
         [Parameter(Mandatory = $true)][string]$NativeRuntimeDir,
         [Parameter(Mandatory = $true)][string]$TracksSource,
@@ -123,6 +124,7 @@ function Copy-StandalonePackageFiles {
     New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
 
     Copy-Item $ExePath -Destination $PackageRoot -Force
+    Copy-Item $UpdaterExePath -Destination $PackageRoot -Force
 
     Get-ChildItem $TargetReleaseDir -Filter "*.dll" -File | ForEach-Object {
         Copy-Item $_.FullName -Destination $PackageRoot -Force
@@ -199,7 +201,7 @@ if (-not $SkipBuild) {
         }
     }
 
-    Invoke-Step -Command "cargo build -p game-server --bin ha3-standalone --features standalone --release --target $Target"
+    Invoke-Step -Command "cargo build -p game-server --bin ha3-standalone --bin ha3-standalone-update --features standalone --release --target $Target"
 }
 
 if (-not (Test-Path $frontendDistDir)) {
@@ -210,6 +212,10 @@ $standaloneExePath = Join-Path $targetReleaseDir "ha3-standalone.exe"
 if (-not (Test-Path $standaloneExePath)) {
     throw "Standalone executable missing: $standaloneExePath. Run cargo build first or execute this script without -SkipBuild."
 }
+$standaloneUpdaterExePath = Join-Path $targetReleaseDir "ha3-standalone-update.exe"
+if (-not (Test-Path $standaloneUpdaterExePath)) {
+    throw "Standalone updater executable missing: $standaloneUpdaterExePath. Run cargo build first or execute this script without -SkipBuild."
+}
 
 $packageName = "ha3-standalone-$archLabel-v$resolvedVersion"
 $packageDir = Join-Path $stagingRoot $packageName
@@ -218,6 +224,7 @@ Copy-StandalonePackageFiles `
     -PackageRoot $packageDir `
     -RepoRoot $repoRoot `
     -ExePath $standaloneExePath `
+    -UpdaterExePath $standaloneUpdaterExePath `
     -TargetReleaseDir $targetReleaseDir `
     -NativeRuntimeDir $nativeRuntimeDir `
     -TracksSource $tracksSource `
