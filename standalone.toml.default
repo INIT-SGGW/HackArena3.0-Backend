@@ -1,0 +1,24 @@
+# HackArena 3 Standalone configuration
+# Config format version. Do not change.
+config_version = 1
+
+# Logging verbosity: minimal | verbose | debug | info | warn | error
+log_level = "info"
+
+# Metadata cache TTL for GitHub update checks. Default: 30
+# update_check_cache_ttl_minutes = 30
+
+# gRPC / gRPC-web endpoint used by wrappers and frontend
+listen_addr = "0.0.0.0:50051"
+
+# Standalone frontend HTTP server
+frontend_enable = true
+frontend_listen_addr = "0.0.0.0:8080"
+frontend_dir = "frontend"
+
+# Bundled assets shipped with the standalone package
+tracks_dir = "assets/tracks"
+bolids_dir = "assets/bolids"
+
+# Simulation tickrate. Default: 60
+# simulation_hz = 60

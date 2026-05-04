@@ -36,6 +36,8 @@ use crate::domain::weather::{
     clamp_schedule_temperature_c, temperature_c_for_weather_type, weather_at,
 };
 #[cfg(feature = "local")]
+use crate::local::local_race_state::LocalRaceStateStore;
+#[cfg(feature = "local")]
 use crate::runtime::engine_worker::{EngineClient, EngineRuntimeWeatherType};
 #[cfg(feature = "local")]
 use crate::services::error_map::map_worker_err;
@@ -93,12 +95,14 @@ struct CachedForecast {
 struct LocalWeatherQueryInner {
     engine: EngineClient,
     weather_events: LocalWeatherEventHub,
+    local_race_state: LocalRaceStateStore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedWeatherTarget {
     OfficialRace,
     Sandbox { sandbox_id: String },
+    LocalRace { race_id: String },
 }
 
 impl WeatherQueryServiceImpl {
@@ -120,11 +124,16 @@ impl WeatherQueryServiceImpl {
     }
 
     #[cfg(feature = "local")]
-    pub fn for_local(engine: EngineClient, weather_events: LocalWeatherEventHub) -> Self {
+    pub fn for_local(
+        engine: EngineClient,
+        weather_events: LocalWeatherEventHub,
+        local_race_state: LocalRaceStateStore,
+    ) -> Self {
         Self {
             local_inner: Some(LocalWeatherQueryInner {
                 engine,
                 weather_events,
+                local_race_state,
             }),
             ..Self::default()
         }
@@ -226,6 +235,57 @@ impl WeatherQueryService for WeatherQueryServiceImpl {
                     return self
                         .stream_weather_updates_local(stream_id, peer_addr, sandbox_id)
                         .await;
+                }
+            }
+            ParsedWeatherTarget::LocalRace { race_id } => {
+                #[cfg(not(feature = "local"))]
+                {
+                    let _ = race_id;
+                    return Err(Status::unimplemented(
+                        "local-race weather target is available only in local backend",
+                    ));
+                }
+
+                #[cfg(feature = "local")]
+                {
+                    let service = self.clone();
+                    let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
+                    let initial = service.local_race_weather_now(&race_id).await?;
+                    tokio::spawn(async move {
+                        debug!(stream_id, peer = ?peer_addr, race_id = %race_id, "local race weather stream started");
+                        if tx
+                            .send(Ok(WeatherUpdateEvent {
+                                now: Some(initial.clone()),
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let mut last = initial;
+                        let mut ticker = tokio::time::interval(Duration::from_millis(1_000));
+                        loop {
+                            ticker.tick().await;
+                            match service.local_race_weather_now(&race_id).await {
+                                Ok(now) if now != last => {
+                                    last = now.clone();
+                                    if tx
+                                        .send(Ok(WeatherUpdateEvent { now: Some(now) }))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(status) => {
+                                    let _ = tx.send(Err(status)).await;
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                    return Ok(Response::new(ReceiverStream::new(rx)));
                 }
             }
         }
@@ -405,6 +465,20 @@ impl WeatherQueryServiceImpl {
                     ))
                 }
             }
+            ParsedWeatherTarget::LocalRace { race_id } => {
+                #[cfg(feature = "local")]
+                {
+                    return self.local_race_weather_now(&race_id).await;
+                }
+
+                #[cfg(not(feature = "local"))]
+                {
+                    let _ = race_id;
+                    Err(Status::unimplemented(
+                        "local-race weather target is available only in local backend",
+                    ))
+                }
+            }
         }
     }
 
@@ -430,6 +504,29 @@ impl WeatherQueryServiceImpl {
         Ok(WeatherNow {
             r#type: runtime_weather_type_to_proto(snapshot.weather_type) as i32,
             temperature_c: snapshot.temperature_c,
+        })
+    }
+
+    #[cfg(feature = "local")]
+    async fn local_race_weather_now(&self, race_id: &str) -> Result<WeatherNow, Status> {
+        let local = self.local_inner.as_ref().ok_or_else(|| {
+            Status::failed_precondition("weather query service is not configured")
+        })?;
+        let race =
+            local.local_race_state.active_race().await.ok_or_else(|| {
+                Status::not_found("active local race not found for weather target")
+            })?;
+        if race.race_id != race_id {
+            return Err(Status::not_found(
+                "active local race not found for weather target",
+            ));
+        }
+        let weather = race
+            .weather
+            .ok_or_else(|| Status::failed_precondition("local race weather is unavailable"))?;
+        Ok(WeatherNow {
+            r#type: weather.weather_type,
+            temperature_c: weather.temperature_c,
         })
     }
 
@@ -764,6 +861,16 @@ fn parse_required_weather_target(
             }
             Ok(ParsedWeatherTarget::Sandbox {
                 sandbox_id: sandbox.sandbox_id,
+            })
+        }
+        Some(weather_target::Target::LocalRace(local_race)) => {
+            if local_race.race_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "weather target race_id must be non-empty",
+                ));
+            }
+            Ok(ParsedWeatherTarget::LocalRace {
+                race_id: local_race.race_id,
             })
         }
         None => Err(Status::invalid_argument(

@@ -1,6 +1,6 @@
 [package]
 name = "game-server"
-version = "0.1.0-beta.203"
+version = "0.2.0-beta.10"
 edition.workspace = true
 
 [[bin]]
@@ -13,11 +13,22 @@ name = "ha3-backend-local"
 path = "src/bin/ha3-backend-local.rs"
 required-features = ["local"]
 
+[[bin]]
+name = "ha3-standalone"
+path = "src/bin/ha3-standalone.rs"
+required-features = ["standalone"]
+
+[[bin]]
+name = "ha3-standalone-update"
+path = "src/bin/ha3-standalone-update.rs"
+required-features = ["standalone"]
+
 [features]
 default = []
 ide = []
 official = ["sqlx"]
 local = []
+standalone = ["local"]
 
 [dependencies]
 bytes = { workspace = true }
@@ -30,7 +41,7 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = "0.2.3"
-time = { version = "0.3.44", features = ["formatting"] }
+time = { version = "0.3.47", features = ["formatting"] }
 base64 = "0.22.1"
 serde_json = "1.0.145"
 
@@ -48,16 +59,20 @@ jsonwebtoken = "9.3.1"
 flate2 = "1.1.5"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "0.8.23"
-rand = "0.8.5"
+rand = "0.8.6"
 reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 regex = "1.12.2"
+semver = "1.0.27"
 sha2 = "0.10.9"
-tar = "0.4.44"
+tar = "0.4.45"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 tokio-stream = { version = "0.1.17", features = ["net"] }
 tonic-health = "0.14.2"
 tonic-web = "0.14.2"
-tower-http = { version = "0.6.6", features = ["cors", "trace"] }
+tower-http = { version = "0.6.6", features = ["cors", "trace", "fs"] }
+axum = "0.8.8"
 uuid = { version = "1.21.0", features = ["v4", "v5"] }
 sqlx = { version = "0.8.4", default-features = false, features = ["runtime-tokio-rustls", "postgres", "migrate", "macros"], optional = true }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+zip = { version = "4.6.1", default-features = false, features = ["deflate"] }

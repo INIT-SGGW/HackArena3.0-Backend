@@ -44,7 +44,9 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, server::NamedService};
 
-use crate::auth::game_token::{GameTokenValidator, parse_game_token};
+use crate::auth::game_token::GameTokenValidator;
+#[cfg(not(feature = "standalone"))]
+use crate::auth::game_token::parse_game_token;
 use crate::config::AppEnv;
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
@@ -117,6 +119,7 @@ pub struct RaceServiceImpl {
     car_owners: Arc<DashMap<u64, String>>,
     car_engine_ids: Arc<DashMap<u64, u64>>,
     car_targets: Arc<DashMap<u64, EngineCommandTarget>>,
+    #[cfg_attr(feature = "standalone", allow(dead_code))]
     token_validator: Arc<GameTokenValidator>,
     #[cfg(feature = "official")]
     official_sandbox_joins: OfficialSandboxJoinRegistry,
@@ -189,8 +192,13 @@ impl RaceService for RaceServiceImpl {
             ));
         }
 
-        let auth = parse_game_token(request.metadata())?
-            .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+        #[cfg(not(feature = "standalone"))]
+        let auth = Some(
+            parse_game_token(request.metadata())?
+                .ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?,
+        );
+        #[cfg(feature = "standalone")]
+        let auth: Option<String> = None;
         let req = request.into_inner();
         let response = self.join_sandbox(req.sandbox_id, auth).await?;
         Ok(Response::new(response))
@@ -616,10 +624,12 @@ impl RaceService for RaceServiceImpl {
         &self,
         request: Request<GetFrontendSpectatorRequest>,
     ) -> Result<Response<Self::StreamFrontendSpectatorStream>, Status> {
+        #[cfg(not(feature = "standalone"))]
         let auth = parse_game_token(request.metadata())?;
         let req = request.into_inner();
 
         let requested_view = normalize_requested_view(req.requested_view);
+        #[cfg(not(feature = "standalone"))]
         let (scopes, cleanup_instance_uuid) = match auth {
             Some(token) => {
                 let scopes = self.token_validator.scopes_from_token(&token).await?;
@@ -631,6 +641,8 @@ impl RaceService for RaceServiceImpl {
             }
             None => (Vec::new(), None),
         };
+        #[cfg(feature = "standalone")]
+        let (scopes, cleanup_instance_uuid) = (Vec::new(), None);
         let (resolved_view, view_downgrade_reason) = resolve_view(requested_view, &scopes);
 
         let engine = self.engine.clone();
@@ -770,7 +782,7 @@ impl RaceServiceImpl {
     async fn join_sandbox(
         &self,
         requested_sandbox_id: String,
-        auth: String,
+        auth: Option<String>,
     ) -> Result<QuickJoinDevResponse, Status> {
         let engine = self.engine.clone();
         let runtime_state = engine.runtime_state().await.map_err(map_worker_err)?;
@@ -813,14 +825,20 @@ impl RaceServiceImpl {
 
         let public_car_id = self.runtime_store.allocate_public_car_id();
         let mut identity = RuntimeCarIdentity::default();
-        identity.subject = Some(self.token_validator.subject_from_token(&auth).await?);
-        identity.team_id = self.token_validator.team_id_from_token(&auth).await?;
-        identity.instance_uuid = self.token_validator.instance_uuid_from_token(&auth).await?;
-        if let Some(instance_uuid) = identity.instance_uuid.clone() {
-            self.instance_cars
-                .insert(instance_uuid.clone(), public_car_id);
-            self.car_owners.insert(public_car_id, instance_uuid);
+        #[cfg(not(feature = "standalone"))]
+        {
+            let auth = auth.ok_or_else(|| Status::unauthenticated("missing x-ha3-game-token"))?;
+            identity.subject = Some(self.token_validator.subject_from_token(&auth).await?);
+            identity.team_id = self.token_validator.team_id_from_token(&auth).await?;
+            identity.instance_uuid = self.token_validator.instance_uuid_from_token(&auth).await?;
+            if let Some(instance_uuid) = identity.instance_uuid.clone() {
+                self.instance_cars
+                    .insert(instance_uuid.clone(), public_car_id);
+                self.car_owners.insert(public_car_id, instance_uuid);
+            }
         }
+        #[cfg(feature = "standalone")]
+        let _ = auth;
         let local_user_id = identity
             .subject
             .clone()
@@ -953,6 +971,9 @@ impl RaceServiceImpl {
                     },
                 ))
             }
+            EngineActivityKind::LocalRace => Err(Status::failed_precondition(
+                "team command car is not available in local race",
+            )),
             EngineActivityKind::None => Err(Status::failed_precondition("runtime is not active")),
         }
     }
@@ -1039,6 +1060,27 @@ impl RaceServiceImpl {
                     }
                     Ok(Some(EngineCommandTarget::OfficialRace))
                 }
+                FrontendSpectatorTarget::LocalRace(value) => {
+                    let race_id = value.race_id.trim();
+                    if race_id.is_empty() {
+                        return Err(Status::invalid_argument(
+                            "race_id is required for local race spectator target",
+                        ));
+                    }
+                    if runtime_state
+                        .active_local_race
+                        .as_ref()
+                        .map(|race| race.race_id.as_str())
+                        != Some(race_id)
+                    {
+                        return Err(Status::failed_precondition(
+                            "local race runtime is not active",
+                        ));
+                    }
+                    Ok(Some(EngineCommandTarget::LocalRace {
+                        race_id: race_id.to_string(),
+                    }))
+                }
             };
         }
 
@@ -1082,6 +1124,13 @@ fn resolve_runtime_map_id(
             .find(|entry| entry.sandbox_id == *sandbox_id)
         {
             return active.map_id.clone();
+        }
+    }
+    if let Some(EngineCommandTarget::LocalRace { race_id }) = visible_target {
+        if let Some(active) = runtime_state.active_local_race.as_ref() {
+            if active.race_id == *race_id {
+                return active.map_id.clone();
+            }
         }
     }
 
@@ -1216,6 +1265,9 @@ async fn run_frontend_spectator_stream(
     cleanup_instance_uuid: Option<String>,
     tx: mpsc::Sender<Result<FrontendSpectatorEvent, Status>>,
 ) {
+    #[cfg(not(feature = "official"))]
+    let _ = &runtime_store;
+
     static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
     let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
     active_streams.insert(stream_id, ());
@@ -1251,7 +1303,10 @@ async fn run_frontend_spectator_stream(
     loop {
         ticker.tick().await;
         let frame = frame_rx.borrow().clone();
-        if matches!(visible_target.as_ref(), Some(EngineCommandTarget::OfficialRace)) {
+        if matches!(
+            visible_target.as_ref(),
+            Some(EngineCommandTarget::OfficialRace)
+        ) {
             let runtime_is_official_race = frame
                 .runtime_state
                 .as_ref()
@@ -1262,6 +1317,22 @@ async fn run_frontend_spectator_stream(
                     stream_id,
                     target = ?visible_target,
                     "frontend spectator stream ended: official race runtime is no longer active"
+                );
+                break;
+            }
+        }
+        if let Some(EngineCommandTarget::LocalRace { race_id }) = visible_target.as_ref() {
+            let runtime_is_local_race = frame
+                .runtime_state
+                .as_ref()
+                .and_then(|state| state.active_local_race.as_ref())
+                .map(|race| race.race_id.as_str() == race_id)
+                .unwrap_or(false);
+            if !runtime_is_local_race {
+                tracing::info!(
+                    stream_id,
+                    target = ?visible_target,
+                    "frontend spectator stream ended: local race runtime is no longer active"
                 );
                 break;
             }
@@ -1278,9 +1349,9 @@ async fn run_frontend_spectator_stream(
         frame_cars.sort_by_key(|entry| entry.public_car_id);
 
         let mut cars = Vec::with_capacity(frame_cars.len());
-        let official_race_leader_completed_laps = if matches!(
+        let race_leader_completed_laps = if matches!(
             visible_target.as_ref(),
-            Some(EngineCommandTarget::OfficialRace)
+            Some(EngineCommandTarget::OfficialRace) | Some(EngineCommandTarget::LocalRace { .. })
         ) {
             Some(
                 frame_cars
@@ -1335,6 +1406,13 @@ async fn run_frontend_spectator_stream(
                     .map(|duration_s| FrontendSpectatorDebugInfo {
                         engine_race_elapsed_sec: duration_s,
                     }),
+                Some(EngineCommandTarget::LocalRace { race_id }) => frame
+                    .local_race_duration_s
+                    .get(race_id)
+                    .copied()
+                    .map(|duration_s| FrontendSpectatorDebugInfo {
+                        engine_race_elapsed_sec: duration_s,
+                    }),
                 None => None,
             }
         } else {
@@ -1344,6 +1422,9 @@ async fn run_frontend_spectator_stream(
         let runtime_elapsed_sec = match visible_target.as_ref() {
             Some(EngineCommandTarget::Sandbox { sandbox_id }) => {
                 frame.sandbox_race_duration_s.get(sandbox_id).copied()
+            }
+            Some(EngineCommandTarget::LocalRace { race_id }) => {
+                frame.local_race_duration_s.get(race_id).copied()
             }
             _ => None,
         };
@@ -1369,16 +1450,19 @@ async fn run_frontend_spectator_stream(
                     None
                 }
             }
+            Some(EngineCommandTarget::LocalRace { .. }) => None,
             None => None,
         };
 
+        #[allow(deprecated)]
         let snapshot = FrontendSpectatorSnapshot {
             tick: frame.tick,
             server_time_ms: frame.server_time_ms,
             cars,
             debug,
             runtime_elapsed_sec,
-            official_race_leader_completed_laps,
+            official_race_leader_completed_laps: race_leader_completed_laps,
+            race_leader_completed_laps,
             runtime_remaining_sec,
         };
         let msg = FrontendSpectatorEvent {

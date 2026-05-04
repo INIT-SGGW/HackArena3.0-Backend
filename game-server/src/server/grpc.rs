@@ -9,6 +9,8 @@ use proto::achievement::v1::achievement_stream_service_server::AchievementStream
 use proto::hackarena::connect::v1::connect_service_server::ConnectServiceServer;
 use proto::race::v1::asset_service_server::AssetServiceServer;
 #[cfg(feature = "local")]
+use proto::race::v1::local_race_admin_service_server::LocalRaceAdminServiceServer;
+#[cfg(feature = "local")]
 use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminServiceServer;
 #[cfg(feature = "official")]
 use proto::race::v1::public_menu_service_server::PublicMenuServiceServer;
@@ -55,9 +57,11 @@ use crate::db::repos::sandbox_config::SandboxConfigRepo;
 use crate::db::repos::submission::SubmissionRepo;
 #[cfg(feature = "official")]
 use crate::db::repos::weather::WeatherRepo;
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 use crate::local::broker::BrokerRegistrationState;
 #[cfg(feature = "local")]
+use crate::local::local_race_state::LocalRaceStateStore;
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 use crate::local::map_assets::LocalMapAssetsSync;
 #[cfg(feature = "local")]
 use crate::local::sandbox_config_store::LocalSandboxConfigStore;
@@ -67,6 +71,8 @@ use crate::services::achievement_stream::AchievementStreamServiceImpl;
 use crate::services::asset::AssetServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::connect::ConnectServiceImpl;
+#[cfg(feature = "local")]
+use crate::services::local_race_admin::LocalRaceAdminServiceImpl;
 #[cfg(feature = "local")]
 use crate::services::local_sandbox_admin::LocalSandboxAdminServiceImpl;
 #[cfg(feature = "official")]
@@ -96,6 +102,9 @@ use crate::services::weather::WeatherQueryServiceImpl;
 use super::cors::cors_layer;
 use super::shutdown::shutdown_signal;
 
+#[cfg(feature = "standalone")]
+const USER_LOG_TARGET: &str = "ha3_standalone::user";
+
 /// Runs the gRPC server (with gRPC-web and CORS) until shutdown is requested.
 pub async fn serve_grpc(
     cfg: Arc<Config>,
@@ -103,7 +112,8 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")] official_db_pool: sqlx::PgPool,
     mut shutdown_rx: broadcast::Receiver<()>,
     active_connections: Arc<AtomicUsize>,
-    #[cfg(feature = "local")] broker_registration_state: BrokerRegistrationState,
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
+    broker_registration_state: BrokerRegistrationState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (health_reporter, health_service) = health_reporter();
 
@@ -128,6 +138,10 @@ pub async fn serve_grpc(
         .await;
     health_reporter
         .set_serving::<WeatherQueryServiceServer<WeatherQueryServiceImpl>>()
+        .await;
+    #[cfg(feature = "local")]
+    health_reporter
+        .set_serving::<LocalRaceAdminServiceServer<LocalRaceAdminServiceImpl>>()
         .await;
     #[cfg(feature = "local")]
     health_reporter
@@ -255,17 +269,25 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")]
     let asset_impl =
         AssetServiceImpl::for_official(cfg.tracks_dir.clone(), token_validator.clone());
-    #[cfg(feature = "local")]
-    let local_map_sync = Arc::new(
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
+    let local_map_sync = Some(Arc::new(
         LocalMapAssetsSync::new(
             cfg.backend_endpoint.clone(),
             cfg.local_tracks_cache_dir.clone(),
         )
         .map_err(std::io::Error::other)?,
+    ));
+    #[cfg(all(feature = "local", feature = "standalone"))]
+    let local_map_sync: Option<Arc<crate::local::map_assets::LocalMapAssetsSync>> = None;
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
+    let asset_impl = AssetServiceImpl::for_local(
+        cfg.local_tracks_cache_dir.clone(),
+        local_map_sync
+            .clone()
+            .expect("local map sync should be initialized in local mode"),
     );
-    #[cfg(feature = "local")]
-    let asset_impl =
-        AssetServiceImpl::for_local(cfg.local_tracks_cache_dir.clone(), local_map_sync.clone());
+    #[cfg(all(feature = "local", feature = "standalone"))]
+    let asset_impl = AssetServiceImpl::for_standalone(cfg.tracks_dir.clone());
     let race_runtime_store = Arc::new(RaceRuntimeStore::new());
     #[cfg(feature = "official")]
     let official_sandbox_command_impl = OfficialSandboxCommandServiceImpl::new(
@@ -293,6 +315,15 @@ pub async fn serve_grpc(
     let local_sandbox_store =
         LocalSandboxConfigStore::load_or_create(cfg.local_sandbox_store_path.clone()).await?;
     #[cfg(feature = "local")]
+    let local_race_state = LocalRaceStateStore::new();
+    #[cfg(feature = "local")]
+    #[cfg(feature = "standalone")]
+    tracing::debug!(
+        path = %local_sandbox_store.path().display(),
+        max_active_sandboxes = cfg.local_max_active_sandboxes,
+        "local sandbox config store ready"
+    );
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     tracing::info!(
         path = %local_sandbox_store.path().display(),
         max_active_sandboxes = cfg.local_max_active_sandboxes,
@@ -338,6 +369,8 @@ pub async fn serve_grpc(
         slot_updates_tx.clone(),
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
+        #[cfg(feature = "local")]
+        local_race_state.clone(),
     );
     #[cfg(feature = "official")]
     race_participant_impl.spawn_slot_switch_poller();
@@ -362,6 +395,8 @@ pub async fn serve_grpc(
     let race_table_impl = RaceTableQueryServiceImpl::new(
         race_runtime_store.clone(),
         frame_hub.clone(),
+        #[cfg(feature = "local")]
+        local_race_state.clone(),
         #[cfg(feature = "official")]
         team_resolver.clone(),
     );
@@ -421,9 +456,13 @@ pub async fn serve_grpc(
     let weather_query_impl = WeatherQueryServiceImpl::for_local(
         local_sandbox_engine.clone(),
         local_weather_events.clone(),
+        local_race_state.clone(),
     );
     #[cfg(all(not(feature = "official"), not(feature = "local")))]
     let weather_query_impl = WeatherQueryServiceImpl::default();
+    #[cfg(feature = "local")]
+    let local_race_admin_impl =
+        LocalRaceAdminServiceImpl::new(local_sandbox_engine.clone(), local_race_state.clone());
     #[cfg(feature = "local")]
     let local_sandbox_admin_impl = {
         LocalSandboxAdminServiceImpl::new(
@@ -431,21 +470,30 @@ pub async fn serve_grpc(
             local_sandbox_engine,
             race_runtime_store.clone(),
             cfg.local_max_active_sandboxes,
-            local_map_sync.clone(),
+            local_map_sync,
             local_weather_events,
+            local_race_state,
         )
     };
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     let connect_impl = ConnectServiceImpl::new(broker_registration_state);
+    #[cfg(all(feature = "local", feature = "standalone"))]
+    let connect_impl = ConnectServiceImpl::new_standalone();
 
     let cors = cors_layer(&cfg);
 
+    let listener = TcpListener::bind(cfg.listen_addr).await?;
+    #[cfg(feature = "standalone")]
+    tracing::info!(
+        target: USER_LOG_TARGET,
+        url = %http_url_for_grpc(cfg.listen_addr),
+        "gRPC / gRPC-web endpoint"
+    );
+    #[cfg(not(feature = "standalone"))]
     tracing::info!(
         "Starting gRPC server (gRPC-web enabled) on {}",
         cfg.listen_addr
     );
-
-    let listener = TcpListener::bind(cfg.listen_addr).await?;
     let incoming = TcpListenerStream::new(listener).filter_map(move |conn| {
         let active_connections = active_connections.clone();
         match conn {
@@ -508,6 +556,8 @@ pub async fn serve_grpc(
         official_sandbox_command_impl,
     ));
     #[cfg(feature = "local")]
+    let server = server.add_service(LocalRaceAdminServiceServer::new(local_race_admin_impl));
+    #[cfg(feature = "local")]
     let server = server.add_service(LocalSandboxAdminServiceServer::new(
         local_sandbox_admin_impl,
     ));
@@ -528,6 +578,16 @@ pub async fn serve_grpc(
     }
 
     serve_result
+}
+
+#[cfg(feature = "standalone")]
+fn http_url_for_grpc(addr: std::net::SocketAddr) -> String {
+    let host = if addr.ip().is_unspecified() {
+        "localhost".to_string()
+    } else {
+        addr.ip().to_string()
+    };
+    format!("http://{host}:{}", addr.port())
 }
 
 fn client_ip_from_headers(headers: &http::HeaderMap) -> String {

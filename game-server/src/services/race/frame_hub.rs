@@ -41,8 +41,10 @@ pub struct RuntimeFrame {
     pub runtime_state: Option<EngineRuntimeState>,
     pub cars: HashMap<u64, RuntimeCarFrame>,
     pub official_race_duration_s: Option<f32>,
+    pub local_race_duration_s: HashMap<String, f32>,
     pub sandbox_race_duration_s: HashMap<String, f32>,
     pub official_lap_length_m: Option<f32>,
+    pub local_race_lap_length_m: HashMap<String, f32>,
     pub sandbox_lap_length_m: HashMap<String, f32>,
 }
 
@@ -67,7 +69,9 @@ struct FrameCollectorCache {
     official_lap_length_m: Option<f32>,
     // sandbox_id -> (map_id, lap_length_m)
     sandbox_lap_length_m: HashMap<String, (String, f32)>,
-    #[cfg(feature = "official")]
+    // race_id -> (map_id, lap_length_m)
+    local_race_lap_length_m: HashMap<String, (String, f32)>,
+    #[cfg(any(feature = "official", feature = "standalone"))]
     // public_car_id -> best completed lap in current runtime session.
     best_lap_time_ms: HashMap<u64, u32>,
 }
@@ -170,7 +174,67 @@ async fn collect_frame(
                 }
                 frame.official_lap_length_m = cache.official_lap_length_m;
             }
-            EngineActivityKind::Sandbox | EngineActivityKind::None => {}
+            EngineActivityKind::Sandbox
+            | EngineActivityKind::LocalRace
+            | EngineActivityKind::None => {}
+        }
+
+        let active_local_race = runtime_state.active_local_race.as_ref();
+        cache.local_race_lap_length_m.retain(|race_id, _| {
+            active_local_race
+                .map(|race| race.race_id.as_str() == race_id.as_str())
+                .unwrap_or(false)
+        });
+        if let Some(active) = active_local_race {
+            let target = EngineCommandTarget::LocalRace {
+                race_id: active.race_id.clone(),
+            };
+            match engine.race_duration_in(target.clone()).await {
+                Ok(duration_s) => {
+                    frame
+                        .local_race_duration_s
+                        .insert(active.race_id.clone(), duration_s);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        race_id = %active.race_id,
+                        error = %err,
+                        "frame hub: failed to read local race duration"
+                    );
+                }
+            }
+
+            let should_refresh_lap_length = cache
+                .local_race_lap_length_m
+                .get(&active.race_id)
+                .map(|(cached_map_id, _)| cached_map_id != &active.map_id)
+                .unwrap_or(true);
+            if should_refresh_lap_length {
+                match engine.track_data_in(target).await {
+                    Ok(track_data) => {
+                        cache.local_race_lap_length_m.insert(
+                            active.race_id.clone(),
+                            (
+                                active.map_id.clone(),
+                                track_data.lap_length_m.max(1.0_f64) as f32,
+                            ),
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            race_id = %active.race_id,
+                            map_id = %active.map_id,
+                            error = %err,
+                            "frame hub: failed to read local race lap length"
+                        );
+                    }
+                }
+            }
+            if let Some((_, lap_length_m)) = cache.local_race_lap_length_m.get(&active.race_id) {
+                frame
+                    .local_race_lap_length_m
+                    .insert(active.race_id.clone(), *lap_length_m);
+            }
         }
 
         let active_sandbox_map: HashMap<String, String> = runtime_state
@@ -280,7 +344,7 @@ async fn collect_frame(
         };
 
         let race_metrics = {
-            #[cfg(feature = "official")]
+            #[cfg(any(feature = "official", feature = "standalone"))]
             {
                 match engine
                     .read_car_race_metrics_in(target.clone(), engine_car_id)
@@ -312,13 +376,13 @@ async fn collect_frame(
                     }
                 }
             }
-            #[cfg(not(feature = "official"))]
+            #[cfg(not(any(feature = "official", feature = "standalone")))]
             {
                 None
             }
         };
 
-        #[cfg(feature = "official")]
+        #[cfg(any(feature = "official", feature = "standalone"))]
         let best_lap_time_ms = {
             if let Some(last_lap_time_ms) =
                 race_metrics.and_then(|metrics| metrics.last_lap_time_ms)
@@ -333,7 +397,7 @@ async fn collect_frame(
                 cache.best_lap_time_ms.get(&public_car_id).copied()
             }
         };
-        #[cfg(not(feature = "official"))]
+        #[cfg(not(any(feature = "official", feature = "standalone")))]
         let best_lap_time_ms = None;
 
         #[cfg(feature = "official")]
@@ -495,11 +559,11 @@ fn current_time_ms() -> u64 {
 }
 
 fn invalidate_best_lap_cache(cache: &mut FrameCollectorCache, car_id: u64) {
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     {
         cache.best_lap_time_ms.remove(&car_id);
     }
-    #[cfg(not(feature = "official"))]
+    #[cfg(not(any(feature = "official", feature = "standalone")))]
     {
         let _ = (cache, car_id);
     }

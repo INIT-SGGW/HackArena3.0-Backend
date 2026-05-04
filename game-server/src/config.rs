@@ -5,8 +5,14 @@ use http::{HeaderName, HeaderValue};
 use tower_http::cors::{AllowOrigin, ExposeHeaders};
 
 const DEFAULT_EXPOSE_HEADERS: &[&str] = &["grpc-status", "grpc-message"];
+#[cfg(feature = "official")]
 const DEFAULT_HPS_ENDPOINT: &str = "http://127.0.0.1:50052";
+#[cfg(not(feature = "standalone"))]
 const DEFAULT_API_URL: &str = "https://ha3-api.hackarena.pl";
+#[cfg(feature = "standalone")]
+const DEFAULT_FRONTEND_LISTEN_ADDR: &str = "0.0.0.0:8080";
+#[cfg(feature = "standalone")]
+const DEFAULT_FRONTEND_DIR_RELATIVE_PATH: &str = "frontend";
 #[cfg(feature = "official")]
 const DEFAULT_SUBMISSION_ARCHIVE_MAX_MB: u32 = 25;
 #[cfg(feature = "official")]
@@ -15,7 +21,7 @@ const DEFAULT_SUBMISSION_BUILD_TIMEOUT_SEC: u64 = 1_800;
 const LOCAL_MAX_ACTIVE_SANDBOXES: u32 = 10;
 #[cfg(feature = "local")]
 const LOCAL_SANDBOX_STORE_RELATIVE_PATH: &str = "local/sandbox-configs.json";
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 const LOCAL_TRACKS_CACHE_RELATIVE_PATH: &str = "local/tracks-cache";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +33,12 @@ pub enum AppEnv {
 
 impl AppEnv {
     pub fn from_env() -> Self {
-        let v = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
+        #[cfg(feature = "standalone")]
+        let default_env = "production";
+        #[cfg(not(feature = "standalone"))]
+        let default_env = "development";
+
+        let v = std::env::var("APP_ENV").unwrap_or_else(|_| default_env.to_string());
         match v.to_ascii_lowercase().as_str() {
             "preprod" => AppEnv::Preprod,
             "production" | "prod" => AppEnv::Production,
@@ -48,16 +59,26 @@ impl AppEnv {
 pub struct Config {
     pub env: AppEnv,
     pub listen_addr: SocketAddr,
+    #[cfg(feature = "standalone")]
+    pub frontend_enable: bool,
+    #[cfg(feature = "standalone")]
+    pub frontend_listen_addr: SocketAddr,
+    #[cfg(feature = "standalone")]
+    pub frontend_dir: PathBuf,
     pub allow_origin: AllowOrigin,
+    #[cfg(feature = "local")]
+    pub cors_allow_any: bool,
     pub expose_headers: ExposeHeaders,
     pub tracks_dir: PathBuf,
     pub bolids_dir: PathBuf,
     pub simulation_hz: u32,
     pub debug_drawer_enabled: bool,
+    #[cfg(feature = "official")]
     pub hps_endpoint: String,
     pub game_token_jwks_endpoint: String,
     pub jwt_audience: Vec<String>,
     pub jwt_issuers: Vec<String>,
+    #[cfg(not(feature = "standalone"))]
     pub api_url: String,
     #[cfg(feature = "local")]
     pub broker_endpoint: String,
@@ -127,6 +148,7 @@ impl Config {
     fn load() -> Result<Self, String> {
         let app_env = AppEnv::from_env();
         tracing::debug!(app_env = ?app_env, "resolved APP_ENV");
+        #[cfg(feature = "official")]
         let hps_endpoint =
             read_env_string("HPS_ENDPOINT").unwrap_or_else(|| DEFAULT_HPS_ENDPOINT.to_string());
 
@@ -140,36 +162,68 @@ impl Config {
         #[cfg(not(feature = "official"))]
         let issuers_env = "GAME_JWT_LOCAL_ISSUERS";
 
+        #[cfg(not(feature = "standalone"))]
         let jwt_audience =
             parse_list_env(audience_env)?.ok_or_else(|| format!("{audience_env} must be set"))?;
+        #[cfg(not(feature = "standalone"))]
         let jwt_issuers =
             parse_list_env(issuers_env)?.ok_or_else(|| format!("{issuers_env} must be set"))?;
+        #[cfg(feature = "standalone")]
+        let jwt_audience = parse_list_env(audience_env)?.unwrap_or_default();
+        #[cfg(feature = "standalone")]
+        let jwt_issuers = parse_list_env(issuers_env)?.unwrap_or_default();
 
         let listen_addr = std::env::var("LISTEN_ADDR")
             .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
             .parse::<SocketAddr>()
             .map_err(|e| format!("Invalid LISTEN_ADDR: {}", e))?;
+        #[cfg(feature = "standalone")]
+        let frontend_enable = parse_bool_env("FRONTEND_ENABLE").unwrap_or(true);
+        #[cfg(feature = "standalone")]
+        let frontend_listen_addr = std::env::var("FRONTEND_LISTEN_ADDR")
+            .unwrap_or_else(|_| DEFAULT_FRONTEND_LISTEN_ADDR.to_string())
+            .parse::<SocketAddr>()
+            .map_err(|e| format!("Invalid FRONTEND_LISTEN_ADDR: {}", e))?;
+        #[cfg(feature = "standalone")]
+        let frontend_dir = {
+            if frontend_enable {
+                resolve_standalone_frontend_dir()
+                    .map_err(|e| format!("Failed to resolve frontend directory: {}", e))?
+            } else if let Some(dir) = exe_dir() {
+                dir.join(DEFAULT_FRONTEND_DIR_RELATIVE_PATH)
+            } else {
+                PathBuf::from(DEFAULT_FRONTEND_DIR_RELATIVE_PATH)
+            }
+        };
 
         let raw_allow_origins = std::env::var("CORS_ALLOWED_ORIGINS").ok();
-
         #[cfg(feature = "local")]
+        let cors_allow_any = match raw_allow_origins.as_deref() {
+            None => true,
+            Some(raw) => {
+                let trimmed = raw.trim();
+                trimmed.is_empty()
+                    || trimmed == "*"
+                    || raw.split(',').any(|entry| entry.trim() == "*")
+            }
+        };
+
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         {
-            let has_wildcard = match raw_allow_origins.as_deref() {
-                None => true,
-                Some(raw) => {
-                    let trimmed = raw.trim();
-                    trimmed.is_empty()
-                        || trimmed == "*"
-                        || raw.split(',').any(|entry| entry.trim() == "*")
-                }
-            };
-            if has_wildcard {
+            if cors_allow_any {
                 return Err(
                     "CORS_ALLOWED_ORIGINS must contain explicit origins in local mode".into(),
                 );
             }
         }
 
+        #[cfg(feature = "standalone")]
+        let allow_origin = match raw_allow_origins.as_deref() {
+            Some(v) if !v.trim().is_empty() => parse_allow_origin(v)?,
+            _ => AllowOrigin::any(),
+        };
+
+        #[cfg(not(feature = "standalone"))]
         let allow_origin = match (app_env.is_production(), raw_allow_origins.as_deref()) {
             (true, None) => return Err("CORS_ALLOWED_ORIGINS must be set in production".into()),
             (true, Some(v)) if v.trim().is_empty() => {
@@ -203,18 +257,33 @@ impl Config {
             }
             tracks_dir
         };
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let tracks_dir = {
             let dir = resolve_local_tracks_cache_dir()
                 .map_err(|e| format!("Failed to resolve local tracks cache directory: {e}"))?;
             tracing::info!(path = %dir.display(), "using local tracks cache directory");
             dir
         };
+        #[cfg(all(feature = "local", feature = "standalone"))]
+        let tracks_dir = {
+            let tracks_rel = PathBuf::from("assets").join("tracks");
+            let tracks_dir = resolve_dir("TRACKS_DIR", tracks_rel)
+                .map_err(|e| format!("Failed to resolve tracks directory: {}", e))?;
+
+            tracing::debug!(
+                path = %tracks_dir.display(),
+                "using standalone tracks bundle directory"
+            );
+            tracks_dir
+        };
 
         let bolids_rel = PathBuf::from("assets").join("bolids");
         let bolids_dir = resolve_dir("BOLIDS_DIR", bolids_rel)
             .map_err(|e| format!("Failed to resolve bolids directory: {}", e))?;
 
+        #[cfg(feature = "standalone")]
+        tracing::debug!(path = %bolids_dir.display(), "using bolids directory");
+        #[cfg(not(feature = "standalone"))]
         tracing::info!(path = %bolids_dir.display(), "using bolids directory");
 
         if bolids_dir
@@ -234,7 +303,17 @@ impl Config {
             return Err("SIMULATION_HZ must be >= 1".into());
         }
 
+        #[cfg(feature = "standalone")]
+        tracing::debug!(simulation_hz, "server config");
+        #[cfg(not(feature = "standalone"))]
         tracing::info!(simulation_hz, "server config");
+        #[cfg(feature = "standalone")]
+        tracing::debug!(
+            frontend_enable,
+            frontend_listen_addr = %frontend_listen_addr,
+            frontend_dir = %frontend_dir.display(),
+            "standalone frontend config"
+        );
 
         let debug_drawer_enabled = if cfg!(debug_assertions) {
             parse_bool_env("BOINK_DEBUG_DRAWER").unwrap_or(false)
@@ -246,14 +325,22 @@ impl Config {
             tracing::info!("debug drawer enabled");
         }
 
+        #[cfg(not(feature = "standalone"))]
         let api_url = read_env_string("API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string());
+        #[cfg(not(feature = "standalone"))]
         let game_token_jwks_endpoint = to_game_token_jwks_endpoint(&api_url)?;
+        #[cfg(feature = "standalone")]
+        let game_token_jwks_endpoint = "http://127.0.0.1:65535/gametoken".to_string();
         #[cfg(feature = "official")]
         let game_token_issuer_endpoint = to_game_token_issuer_endpoint(&api_url)?;
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let broker_endpoint = to_broker_endpoint(&api_url)?;
-        #[cfg(feature = "local")]
+        #[cfg(all(feature = "local", not(feature = "standalone")))]
         let backend_endpoint = to_backend_endpoint(&api_url)?;
+        #[cfg(all(feature = "local", feature = "standalone"))]
+        let broker_endpoint = String::new();
+        #[cfg(all(feature = "local", feature = "standalone"))]
+        let backend_endpoint = String::new();
 
         #[cfg(feature = "local")]
         let local_sandbox_store_path = default_local_sandbox_store_path();
@@ -360,16 +447,26 @@ impl Config {
         Ok(Self {
             env: app_env,
             listen_addr,
+            #[cfg(feature = "standalone")]
+            frontend_enable,
+            #[cfg(feature = "standalone")]
+            frontend_listen_addr,
+            #[cfg(feature = "standalone")]
+            frontend_dir,
             allow_origin,
+            #[cfg(feature = "local")]
+            cors_allow_any,
             expose_headers,
             tracks_dir,
             bolids_dir,
             simulation_hz,
             debug_drawer_enabled,
+            #[cfg(feature = "official")]
             hps_endpoint,
             game_token_jwks_endpoint,
             jwt_audience,
             jwt_issuers,
+            #[cfg(not(feature = "standalone"))]
             api_url,
             #[cfg(feature = "local")]
             broker_endpoint,
@@ -435,12 +532,13 @@ fn default_local_sandbox_store_path() -> PathBuf {
     PathBuf::from(LOCAL_SANDBOX_STORE_RELATIVE_PATH)
 }
 
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 fn to_broker_endpoint(api_url: &str) -> Result<String, String> {
     let trimmed = validate_api_url(api_url)?;
     Ok(format!("{trimmed}/broker"))
 }
 
+#[cfg(not(feature = "standalone"))]
 fn to_game_token_jwks_endpoint(api_url: &str) -> Result<String, String> {
     let trimmed = validate_api_url(api_url)?;
     Ok(format!("{trimmed}/gametoken"))
@@ -452,12 +550,13 @@ fn to_game_token_issuer_endpoint(api_url: &str) -> Result<String, String> {
     Ok(format!("{trimmed}/gametoken"))
 }
 
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 fn to_backend_endpoint(api_url: &str) -> Result<String, String> {
     let trimmed = validate_api_url(api_url)?;
     Ok(format!("{trimmed}/backend"))
 }
 
+#[cfg(not(feature = "standalone"))]
 fn validate_api_url(api_url: &str) -> Result<&str, String> {
     let trimmed = api_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -501,7 +600,7 @@ fn exe_dir() -> Option<PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
-#[cfg(feature = "local")]
+#[cfg(all(feature = "local", not(feature = "standalone")))]
 fn resolve_local_tracks_cache_dir() -> anyhow::Result<PathBuf> {
     let path = if let Some(raw) = read_env_string("LOCAL_TRACKS_CACHE_DIR") {
         PathBuf::from(raw)
@@ -512,6 +611,70 @@ fn resolve_local_tracks_cache_dir() -> anyhow::Result<PathBuf> {
     };
     std::fs::create_dir_all(&path)?;
     Ok(path.canonicalize().unwrap_or(path))
+}
+
+#[cfg(feature = "standalone")]
+fn resolve_standalone_frontend_dir() -> anyhow::Result<PathBuf> {
+    let default_rel = PathBuf::from(DEFAULT_FRONTEND_DIR_RELATIVE_PATH);
+
+    if read_env_string("FRONTEND_DIR").is_some() {
+        return resolve_dir("FRONTEND_DIR", default_rel);
+    }
+
+    let base_err = resolve_dir(
+        "FRONTEND_DIR",
+        PathBuf::from(DEFAULT_FRONTEND_DIR_RELATIVE_PATH),
+    );
+    if let Ok(path) = base_err {
+        return Ok(path);
+    }
+
+    let base_err = base_err.expect_err("base_err should be error when path not resolved");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| manifest_dir.clone());
+    let mut tried: Vec<(PathBuf, &'static str)> = Vec::new();
+
+    let frontend_dist = workspace_root
+        .join("third_party")
+        .join("HackArena3.0-Frontend")
+        .join("dist");
+    tried.push((frontend_dist.clone(), "workspace_frontend_dist"));
+    if frontend_dist.is_dir() {
+        let path = frontend_dist.canonicalize().unwrap_or(frontend_dist);
+        tracing::debug!(
+            path = %path.display(),
+            source = "workspace_frontend_dist",
+            "dir resolved"
+        );
+        return Ok(path);
+    }
+
+    let workspace_frontend = workspace_root.join(DEFAULT_FRONTEND_DIR_RELATIVE_PATH);
+    tried.push((workspace_frontend.clone(), "workspace_frontend"));
+    if workspace_frontend.is_dir() {
+        let path = workspace_frontend
+            .canonicalize()
+            .unwrap_or(workspace_frontend);
+        tracing::debug!(
+            path = %path.display(),
+            source = "workspace_frontend",
+            "dir resolved"
+        );
+        return Ok(path);
+    }
+
+    let extra_tried = tried
+        .iter()
+        .map(|(p, s)| format!("{} ({s})", p.display()))
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Err(anyhow::anyhow!(
+        "{base_err}; additional standalone paths: {extra_tried}"
+    ))
 }
 
 fn resolve_dir<P: AsRef<Path>>(env_var: &str, default_rel: P) -> anyhow::Result<PathBuf> {

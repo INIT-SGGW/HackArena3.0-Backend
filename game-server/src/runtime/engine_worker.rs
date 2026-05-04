@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -54,6 +54,7 @@ const DEFAULT_GHOST_MODE_SETTINGS: GhostModeSettings = GhostModeSettings {
 pub enum EngineActivityKind {
     None,
     OfficialRace,
+    LocalRace,
     Sandbox,
 }
 
@@ -61,6 +62,7 @@ pub enum EngineActivityKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCommandTarget {
     OfficialRace,
+    LocalRace { race_id: String },
     Sandbox { sandbox_id: String },
 }
 
@@ -115,6 +117,16 @@ pub struct EngineActiveSandboxState {
     pub weather_now: Option<EngineRuntimeWeatherNow>,
 }
 
+/// Active standalone local race runtime details tracked by the engine worker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineActiveLocalRaceState {
+    pub race_id: String,
+    pub map_id: String,
+    pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
+    #[cfg(feature = "local")]
+    pub weather_now: Option<EngineRuntimeWeatherNow>,
+}
+
 struct EngineWorldSlot {
     engine: Engine,
     ghost_mode_settings: GhostModeSettings,
@@ -131,6 +143,7 @@ pub struct EngineRuntimeState {
     pub revision: u64,
     pub activity_kind: EngineActivityKind,
     pub map_id: String,
+    pub active_local_race: Option<EngineActiveLocalRaceState>,
     pub active_sandboxes: Vec<EngineActiveSandboxState>,
     pub time_of_day_preset: EngineRuntimeTimeOfDayPreset,
     pub pending_sandbox_activations: Vec<EnginePendingSandboxActivation>,
@@ -184,6 +197,12 @@ impl EngineClient {
     /// Spawns a vehicle in target sandbox runtime world.
     pub async fn spawn_sandbox_car(&self, sandbox_id: String) -> Result<u64, EngineWorkerError> {
         self.spawn_car_in(EngineCommandTarget::Sandbox { sandbox_id })
+            .await
+    }
+
+    /// Spawns a vehicle in target standalone local race runtime world.
+    pub async fn spawn_local_race_car(&self, race_id: String) -> Result<u64, EngineWorkerError> {
+        self.spawn_car_in(EngineCommandTarget::LocalRace { race_id })
             .await
     }
 
@@ -621,6 +640,73 @@ impl EngineClient {
             .map_err(|_| EngineWorkerError::WorkerStopped)?
     }
 
+    /// Activates a standalone local race engine world.
+    pub async fn activate_local_race(
+        &self,
+        expected_revision: u64,
+        race_id: String,
+        map_id: String,
+        time_of_day_preset: EngineRuntimeTimeOfDayPreset,
+        ghost_mode_settings: Option<GhostModeSettings>,
+    ) -> Result<EngineRuntimeState, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::ActivateLocalRace {
+                expected_revision,
+                race_id,
+                map_id,
+                time_of_day_preset,
+                ghost_mode_settings,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Deactivates the standalone local race engine world.
+    pub async fn deactivate_local_race(
+        &self,
+        expected_revision: u64,
+        race_id: String,
+    ) -> Result<EngineRuntimeState, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::DeactivateLocalRace {
+                expected_revision,
+                race_id,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
+    /// Bumps runtime revision for metadata-only updates outside the engine worker.
+    pub async fn bump_revision(
+        &self,
+        expected_revision: u64,
+    ) -> Result<EngineRuntimeState, EngineWorkerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::BumpRevision {
+                expected_revision,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?;
+
+        reply_rx
+            .await
+            .map_err(|_| EngineWorkerError::WorkerStopped)?
+    }
+
     /// Updates runtime time-of-day metadata without rebuilding the engine world.
     pub async fn set_runtime_time_of_day(
         &self,
@@ -824,13 +910,18 @@ pub async fn spawn(
         revision: 0,
         activity_kind: EngineActivityKind::None,
         map_id: DEFAULT_MAP_ID.to_string(),
+        active_local_race: None,
         active_sandboxes: Vec::new(),
         time_of_day_preset: EngineRuntimeTimeOfDayPreset::Unspecified,
         pending_sandbox_activations: Vec::new(),
     };
     let sandbox_engines: HashMap<String, SandboxEngineHandle> = HashMap::new();
     let official_engine: Option<EngineWorldSlot> = None;
+    let local_race_engines: HashMap<String, SandboxEngineHandle> = HashMap::new();
 
+    #[cfg(feature = "standalone")]
+    tracing::debug!("engine worker: startup runtime is idle");
+    #[cfg(not(feature = "standalone"))]
     tracing::info!("engine worker: startup runtime is idle");
 
     let simulation_dt_seconds = 1.0 / cfg.simulation_hz as f32;
@@ -838,6 +929,7 @@ pub async fn spawn(
     let handle = tokio::task::spawn_local(async move {
         run_worker(
             official_engine,
+            local_race_engines,
             &mut rx,
             &mut shutdown_rx,
             simulation_dt_seconds,
@@ -854,6 +946,7 @@ pub async fn spawn(
 
 async fn run_worker(
     mut official_engine: Option<EngineWorldSlot>,
+    mut local_race_engines: HashMap<String, SandboxEngineHandle>,
     rx: &mut mpsc::Receiver<EngineCommand>,
     shutdown_rx: &mut broadcast::Receiver<()>,
     simulation_dt_seconds: f32,
@@ -873,6 +966,9 @@ async fn run_worker(
         );
         weather_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        #[cfg(feature = "standalone")]
+        tracing::debug!("weather sync enabled (interval=60s)");
+        #[cfg(not(feature = "standalone"))]
         tracing::info!("weather sync enabled (interval=60s)");
         if matches!(
             runtime_state.activity_kind,
@@ -915,6 +1011,7 @@ async fn run_worker(
                         }
                     }
                     EngineActivityKind::Sandbox => {}
+                    EngineActivityKind::LocalRace => {}
                     EngineActivityKind::None => {}
                 }
 
@@ -957,6 +1054,7 @@ async fn run_worker(
                             tracing::warn!("engine worker: official runtime active without initialized engine");
                         }
                     }
+                    EngineActivityKind::LocalRace => {}
                     EngineActivityKind::Sandbox => {}
                     EngineActivityKind::None => {}
                 }
@@ -970,6 +1068,7 @@ async fn run_worker(
 
                 if let Err(err) = handle_command(
                     &mut official_engine,
+                    &mut local_race_engines,
                     &cfg,
                     &mut runtime_state,
                     &mut sandbox_engines,
@@ -996,6 +1095,9 @@ async fn run_worker(
     }
 
     for (_, handle) in sandbox_engines.drain() {
+        handle.step_task.abort();
+    }
+    for (_, handle) in local_race_engines.drain() {
         handle.step_task.abort();
     }
     tracing::info!("engine worker: stopped");
@@ -1078,6 +1180,7 @@ async fn with_target_slot_mut<R>(
     target: &EngineCommandTarget,
     runtime_state: &EngineRuntimeState,
     official_engine: &mut Option<EngineWorldSlot>,
+    local_race_engine: &HashMap<String, SandboxEngineHandle>,
     sandbox_engines: &HashMap<String, SandboxEngineHandle>,
     op: impl FnOnce(&mut EngineWorldSlot) -> Result<R, EngineWorkerError>,
 ) -> Result<R, EngineWorkerError> {
@@ -1098,15 +1201,37 @@ async fn with_target_slot_mut<R>(
             })?;
             op(official_slot)
         }
+        EngineCommandTarget::LocalRace { race_id } => {
+            if race_id.trim().is_empty() {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "race_id must be non-empty".to_string(),
+                ));
+            }
+            if runtime_state
+                .active_local_race
+                .as_ref()
+                .map(|race| race.race_id.as_str())
+                != Some(race_id.as_str())
+            {
+                return Err(EngineWorkerError::InvalidArgument(
+                    "race_id does not match active local race session".to_string(),
+                ));
+            }
+            let slot = local_race_engine
+                .get(race_id)
+                .map(|handle| Arc::clone(&handle.slot))
+                .ok_or_else(|| {
+                    EngineWorkerError::InvalidArgument(
+                        "local race runtime is not active".to_string(),
+                    )
+                })?;
+            let mut slot = slot.lock().await;
+            op(&mut slot)
+        }
         EngineCommandTarget::Sandbox { sandbox_id } => {
             if sandbox_id.trim().is_empty() {
                 return Err(EngineWorkerError::InvalidArgument(
                     "sandbox_id must be non-empty".to_string(),
-                ));
-            }
-            if !matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox) {
-                return Err(EngineWorkerError::InvalidArgument(
-                    "sandbox runtime is not active".to_string(),
                 ));
             }
             let slot = sandbox_engines
@@ -1125,6 +1250,7 @@ async fn with_target_slot_mut<R>(
 
 async fn handle_command(
     official_engine: &mut Option<EngineWorldSlot>,
+    local_race_engines: &mut HashMap<String, SandboxEngineHandle>,
     cfg: &Config,
     runtime_state: &mut EngineRuntimeState,
     sandbox_engines: &mut HashMap<String, SandboxEngineHandle>,
@@ -1140,6 +1266,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     let car_id = slot
@@ -1176,6 +1303,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1197,6 +1325,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1217,6 +1346,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1237,6 +1367,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1257,6 +1388,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1277,6 +1409,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1297,6 +1430,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1318,6 +1452,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1338,6 +1473,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1359,6 +1495,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1380,6 +1517,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1396,6 +1534,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1412,6 +1551,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| slot.engine.track_data().map_err(EngineWorkerError::Engine),
             )
@@ -1424,6 +1564,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1512,6 +1653,51 @@ async fn handle_command(
             let _ = reply_tx.send(result);
             Ok(())
         }
+        EngineCommand::ActivateLocalRace {
+            expected_revision,
+            race_id,
+            map_id,
+            time_of_day_preset,
+            ghost_mode_settings,
+            reply_tx,
+        } => {
+            let result = activate_local_race(
+                cfg,
+                runtime_state,
+                local_race_engines,
+                expected_revision,
+                race_id,
+                map_id,
+                time_of_day_preset,
+                ghost_mode_settings,
+                simulation_dt_seconds,
+                weather_sync,
+            );
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::DeactivateLocalRace {
+            expected_revision,
+            race_id,
+            reply_tx,
+        } => {
+            let result = deactivate_local_race(
+                runtime_state,
+                local_race_engines,
+                expected_revision,
+                &race_id,
+            );
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
+        EngineCommand::BumpRevision {
+            expected_revision,
+            reply_tx,
+        } => {
+            let result = bump_revision(runtime_state, expected_revision);
+            let _ = reply_tx.send(result);
+            Ok(())
+        }
         EngineCommand::SetGhostModeSettings {
             target,
             settings,
@@ -1521,6 +1707,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1548,6 +1735,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1581,6 +1769,7 @@ async fn handle_command(
                 &target,
                 runtime_state,
                 official_engine,
+                local_race_engines,
                 sandbox_engines,
                 |slot| {
                     slot.engine
@@ -1722,6 +1911,11 @@ fn switch_runtime(
                 .pending_sandbox_activations
                 .retain(|pending| pending.sandbox_id != sandbox_id);
         }
+        EngineActivityKind::LocalRace => {
+            return Err(EngineWorkerError::InvalidArgument(
+                "local race runtime must be activated with ActivateLocalRace".to_string(),
+            ));
+        }
     }
 
     runtime_state.revision = runtime_state.revision.saturating_add(1);
@@ -1793,8 +1987,14 @@ fn deactivate_sandbox(
     if runtime_state.active_sandboxes.is_empty()
         && matches!(runtime_state.activity_kind, EngineActivityKind::Sandbox)
     {
-        runtime_state.activity_kind = EngineActivityKind::None;
-        runtime_state.time_of_day_preset = EngineRuntimeTimeOfDayPreset::Unspecified;
+        if let Some(active_race) = runtime_state.active_local_race.as_ref() {
+            runtime_state.activity_kind = EngineActivityKind::LocalRace;
+            runtime_state.map_id = active_race.map_id.clone();
+            runtime_state.time_of_day_preset = active_race.time_of_day_preset;
+        } else {
+            runtime_state.activity_kind = EngineActivityKind::None;
+            runtime_state.time_of_day_preset = EngineRuntimeTimeOfDayPreset::Unspecified;
+        }
         *official_engine = None;
     }
 
@@ -1810,6 +2010,152 @@ fn deactivate_sandbox(
         "engine worker: sandbox deactivated"
     );
 
+    Ok(runtime_state.clone())
+}
+
+fn activate_local_race(
+    cfg: &Config,
+    runtime_state: &mut EngineRuntimeState,
+    local_race_engines: &mut HashMap<String, SandboxEngineHandle>,
+    expected_revision: u64,
+    race_id: String,
+    map_id: String,
+    time_of_day_preset: EngineRuntimeTimeOfDayPreset,
+    ghost_mode_settings: Option<GhostModeSettings>,
+    simulation_dt_seconds: f32,
+    weather_sync: &WeatherSyncState,
+) -> Result<EngineRuntimeState, EngineWorkerError> {
+    if runtime_state.revision != expected_revision {
+        return Err(EngineWorkerError::RevisionMismatch {
+            expected: expected_revision,
+            actual: runtime_state.revision,
+        });
+    }
+    if race_id.trim().is_empty() {
+        return Err(EngineWorkerError::InvalidArgument(
+            "race_id must be non-empty".to_string(),
+        ));
+    }
+    if runtime_state.active_local_race.is_some() {
+        return Err(EngineWorkerError::InvalidArgument(
+            "local race is already active".to_string(),
+        ));
+    }
+    if matches!(
+        time_of_day_preset,
+        EngineRuntimeTimeOfDayPreset::Unspecified
+    ) {
+        return Err(EngineWorkerError::InvalidArgument(
+            "time_of_day_preset must be specified for local race".to_string(),
+        ));
+    }
+    validate_map_id(&map_id)?;
+
+    let target_ghost_mode_settings = ghost_mode_settings.unwrap_or(DEFAULT_GHOST_MODE_SETTINGS);
+    let mut engine = build_engine(cfg, &map_id)?;
+    engine
+        .set_ghost_mode_settings(target_ghost_mode_settings)
+        .map_err(EngineWorkerError::Engine)?;
+    let slot = Arc::new(Mutex::new(EngineWorldSlot {
+        engine,
+        ghost_mode_settings: target_ghost_mode_settings,
+    }));
+    let step_task = tokio::task::spawn_local(run_sandbox_loop(
+        format!("local-race:{race_id}"),
+        Arc::clone(&slot),
+        simulation_dt_seconds,
+        weather_sync.clone(),
+    ));
+    if let Some(previous) =
+        local_race_engines.insert(race_id.clone(), SandboxEngineHandle { slot, step_task })
+    {
+        previous.step_task.abort();
+    }
+
+    runtime_state.active_local_race = Some(EngineActiveLocalRaceState {
+        race_id: race_id.clone(),
+        map_id: map_id.clone(),
+        time_of_day_preset,
+        #[cfg(feature = "local")]
+        weather_now: None,
+    });
+    if runtime_state.active_sandboxes.is_empty()
+        && !matches!(
+            runtime_state.activity_kind,
+            EngineActivityKind::OfficialRace
+        )
+    {
+        runtime_state.activity_kind = EngineActivityKind::LocalRace;
+        runtime_state.map_id = map_id;
+        runtime_state.time_of_day_preset = time_of_day_preset;
+    }
+    runtime_state.revision = runtime_state.revision.saturating_add(1);
+
+    tracing::info!(
+        revision = runtime_state.revision,
+        race_id = %race_id,
+        local_race_engines = local_race_engines.len(),
+        "engine worker: local race activated"
+    );
+
+    Ok(runtime_state.clone())
+}
+
+fn deactivate_local_race(
+    runtime_state: &mut EngineRuntimeState,
+    local_race_engines: &mut HashMap<String, SandboxEngineHandle>,
+    expected_revision: u64,
+    race_id: &str,
+) -> Result<EngineRuntimeState, EngineWorkerError> {
+    if runtime_state.revision != expected_revision {
+        return Err(EngineWorkerError::RevisionMismatch {
+            expected: expected_revision,
+            actual: runtime_state.revision,
+        });
+    }
+    if runtime_state
+        .active_local_race
+        .as_ref()
+        .map(|race| race.race_id.as_str())
+        != Some(race_id)
+    {
+        return Err(EngineWorkerError::InvalidArgument(
+            "race_id does not match active local race session".to_string(),
+        ));
+    }
+    runtime_state.active_local_race = None;
+    if let Some(handle) = local_race_engines.remove(race_id) {
+        handle.step_task.abort();
+    }
+    if runtime_state.active_sandboxes.is_empty()
+        && matches!(runtime_state.activity_kind, EngineActivityKind::LocalRace)
+    {
+        runtime_state.activity_kind = EngineActivityKind::None;
+        runtime_state.time_of_day_preset = EngineRuntimeTimeOfDayPreset::Unspecified;
+    }
+    runtime_state.revision = runtime_state.revision.saturating_add(1);
+
+    tracing::info!(
+        revision = runtime_state.revision,
+        race_id = %race_id,
+        local_race_engines = local_race_engines.len(),
+        "engine worker: local race deactivated"
+    );
+
+    Ok(runtime_state.clone())
+}
+
+fn bump_revision(
+    runtime_state: &mut EngineRuntimeState,
+    expected_revision: u64,
+) -> Result<EngineRuntimeState, EngineWorkerError> {
+    if runtime_state.revision != expected_revision {
+        return Err(EngineWorkerError::RevisionMismatch {
+            expected: expected_revision,
+            actual: runtime_state.revision,
+        });
+    }
+    runtime_state.revision = runtime_state.revision.saturating_add(1);
     Ok(runtime_state.clone())
 }
 
@@ -2115,7 +2461,7 @@ fn current_unix_ms() -> i64 {
     seconds.saturating_mul(1000).saturating_add(nanos_ms)
 }
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
     if map_id.trim().is_empty() {
         return Err(EngineWorkerError::InvalidArgument(
@@ -2130,7 +2476,7 @@ fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
     Ok(())
 }
 
-#[cfg(not(feature = "official"))]
+#[cfg(all(not(feature = "official"), not(feature = "standalone")))]
 fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
     if map_id.trim().is_empty() {
         return Err(EngineWorkerError::InvalidArgument(
@@ -2151,9 +2497,9 @@ fn validate_map_id(map_id: &str) -> Result<(), EngineWorkerError> {
 /// Builds the engine instance using server configuration defaults.
 fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError> {
     validate_map_id(map_id)?;
-    #[cfg(feature = "official")]
+    #[cfg(any(feature = "official", feature = "standalone"))]
     let track_glb = resolve_official_track_glb_path(&cfg.tracks_dir, map_id)?;
-    #[cfg(feature = "local")]
+    #[cfg(all(feature = "local", not(feature = "standalone")))]
     let track_glb = cfg.local_tracks_cache_dir.join(format!("{map_id}.glb"));
     tracing::info!(
         env = ?cfg.env,
@@ -2186,7 +2532,7 @@ fn build_engine(cfg: &Config, map_id: &str) -> Result<Engine, EngineWorkerError>
     builder.build().map_err(EngineWorkerError::Engine)
 }
 
-#[cfg(feature = "official")]
+#[cfg(any(feature = "official", feature = "standalone"))]
 fn resolve_official_track_glb_path(
     tracks_dir: &Path,
     storage_key: &str,

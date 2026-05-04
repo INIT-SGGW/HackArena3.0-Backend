@@ -33,6 +33,14 @@ impl TrackServiceImpl {
         runtime_state: &EngineRuntimeState,
         map_id: &str,
     ) -> Result<EngineCommandTarget, Status> {
+        if let Some(active) = runtime_state.active_local_race.as_ref() {
+            if active.map_id == map_id {
+                return Ok(EngineCommandTarget::LocalRace {
+                    race_id: active.race_id.clone(),
+                });
+            }
+        }
+
         match runtime_state.activity_kind {
             EngineActivityKind::OfficialRace => {
                 if runtime_state.map_id != map_id {
@@ -67,6 +75,7 @@ impl TrackServiceImpl {
                     sandbox_id: selected.sandbox_id.clone(),
                 })
             }
+            EngineActivityKind::LocalRace => Err(Status::not_found("track not found")),
             EngineActivityKind::None => Err(Status::failed_precondition(
                 "runtime is not active; cannot read track data",
             )),

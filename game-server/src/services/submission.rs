@@ -1291,7 +1291,8 @@ impl OfficialSandboxCommandServiceImpl {
                         );
                     }
                     Ok(Err(err)) => {
-                        if is_engine_resource_not_found(&err) || is_sandbox_runtime_not_active(&err) {
+                        if is_engine_resource_not_found(&err) || is_sandbox_runtime_not_active(&err)
+                        {
                             tracing::debug!(
                                 team_id = %team_id,
                                 sandbox_id = %sandbox_id,
@@ -3322,8 +3323,11 @@ async fn prepare_typescript_wrapper_package(
         )
         .await?
     {
-        emit_build_log_line(events_tx, format!("[wrapper-fetch/ts] cache hit `{cached_name}`"))
-            .await;
+        emit_build_log_line(
+            events_tx,
+            format!("[wrapper-fetch/ts] cache hit `{cached_name}`"),
+        )
+        .await;
         (cached_name, cached_bytes)
     } else {
         emit_build_log_line(events_tx, "[wrapper-fetch/ts] resolving release asset").await;
@@ -3349,8 +3353,11 @@ async fn prepare_typescript_wrapper_package(
             &downloaded,
         )
         .await?;
-        emit_build_log_line(events_tx, format!("[wrapper-fetch/ts] cached `{}`", asset.name))
-            .await;
+        emit_build_log_line(
+            events_tx,
+            format!("[wrapper-fetch/ts] cached `{}`", asset.name),
+        )
+        .await;
         (asset.name, downloaded)
     };
 
@@ -3528,7 +3535,10 @@ async fn load_cached_wrapper_asset_exact(
             continue;
         }
         let bytes = fs::read(&path).await.with_context(|| {
-            format!("wrapper-fetch: failed to read cached asset {}", path.display())
+            format!(
+                "wrapper-fetch: failed to read cached asset {}",
+                path.display()
+            )
         })?;
         return Ok(Some((file_name.to_string(), bytes)));
     }
@@ -5295,7 +5305,7 @@ async fn loaded_slot_for_team_for_active_runtime(
         EngineActivityKind::OfficialRace => race_bot_registry
             .get(team_id)
             .map(|entry| entry.value().slot_index),
-        EngineActivityKind::None => None,
+        EngineActivityKind::LocalRace | EngineActivityKind::None => None,
     }
 }
 

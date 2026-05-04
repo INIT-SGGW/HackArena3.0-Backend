@@ -6,6 +6,7 @@ mod mappers;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::local::local_race_state::LocalRaceStateStore;
 use crate::local::map_assets::LocalMapAssetsSync;
 use crate::local::sandbox_config_store::{
     LocalSandboxConfigRecord, LocalSandboxConfigStore, LocalTimeOfDaySettingsRecord,
@@ -49,9 +50,10 @@ pub struct LocalSandboxAdminServiceImpl {
     engine: EngineClient,
     runtime_store: Arc<RaceRuntimeStore>,
     max_active_sandboxes: u32,
-    map_assets_sync: Arc<LocalMapAssetsSync>,
+    map_assets_sync: Option<Arc<LocalMapAssetsSync>>,
     started_at_utc: Arc<RwLock<HashMap<String, prost_types::Timestamp>>>,
     weather_events: LocalWeatherEventHub,
+    local_race_state: LocalRaceStateStore,
 }
 
 impl LocalSandboxAdminServiceImpl {
@@ -63,8 +65,9 @@ impl LocalSandboxAdminServiceImpl {
         engine: EngineClient,
         runtime_store: Arc<RaceRuntimeStore>,
         max_active_sandboxes: u32,
-        map_assets_sync: Arc<LocalMapAssetsSync>,
+        map_assets_sync: Option<Arc<LocalMapAssetsSync>>,
         weather_events: LocalWeatherEventHub,
+        local_race_state: LocalRaceStateStore,
     ) -> Self {
         Self {
             store,
@@ -74,7 +77,15 @@ impl LocalSandboxAdminServiceImpl {
             map_assets_sync,
             started_at_utc: Arc::new(RwLock::new(HashMap::new())),
             weather_events,
+            local_race_state,
         }
+    }
+
+    async fn ensure_map_ready(&self, map_id: &str) -> Result<(), Status> {
+        if let Some(sync) = &self.map_assets_sync {
+            sync.ensure_map_cached(map_id).await?;
+        }
+        Ok(())
     }
 
     async fn require_sandbox_not_active(&self, sandbox_id: &str) -> Result<(), Status> {
@@ -193,6 +204,7 @@ impl LocalSandboxAdminServiceImpl {
         let snapshot = self.store.get_snapshot().await;
         let started_at = self.started_at_utc.read().await.clone();
         let active_car_counts = self.runtime_store.active_car_counts_by_sandbox();
+        let active_local_race_counts = self.runtime_store.active_car_counts_by_local_race();
 
         let mut active_sandboxes = Vec::with_capacity(runtime.active_sandboxes.len());
         for active in &runtime.active_sandboxes {
@@ -227,10 +239,19 @@ impl LocalSandboxAdminServiceImpl {
             });
         }
 
+        let active_race = self.local_race_state.active_race().await.map(|mut race| {
+            race.joined_participant_count = active_local_race_counts
+                .get(&race.race_id)
+                .copied()
+                .unwrap_or(race.joined_participant_count);
+            race
+        });
+
         Ok(LocalRuntimeState {
             revision: runtime.revision,
             server_time_utc: Some(utc_now_timestamp()),
             active_sandboxes,
+            active_race,
         })
     }
 }
@@ -270,9 +291,7 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
             sandbox_id: local_sandbox_id_v5(&config, request.expected_revision),
             config,
         };
-        self.map_assets_sync
-            .ensure_map_cached(&sandbox.config.map_id)
-            .await?;
+        self.ensure_map_ready(&sandbox.config.map_id).await?;
         let revision = self
             .store
             .create_config(request.expected_revision, sandbox.clone())
@@ -304,9 +323,7 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
             sandbox_id: request.sandbox_id,
             config,
         };
-        self.map_assets_sync
-            .ensure_map_cached(&sandbox.config.map_id)
-            .await?;
+        self.ensure_map_ready(&sandbox.config.map_id).await?;
 
         let revision = self
             .store
@@ -452,9 +469,7 @@ impl LocalSandboxAdminService for LocalSandboxAdminServiceImpl {
                         request.sandbox_id
                     ))
                 })?;
-            self.map_assets_sync
-                .ensure_map_cached(&sandbox.config.map_id)
-                .await?;
+            self.ensure_map_ready(&sandbox.config.map_id).await?;
 
             let runtime_before = self.engine.runtime_state().await.map_err(map_worker_err)?;
             if runtime_before.revision != request.expected_revision {

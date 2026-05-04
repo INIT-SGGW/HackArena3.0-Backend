@@ -128,6 +128,23 @@ pub enum EngineCommand {
         sandbox_id: String,
         reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
     },
+    ActivateLocalRace {
+        expected_revision: u64,
+        race_id: String,
+        map_id: String,
+        time_of_day_preset: EngineRuntimeTimeOfDayPreset,
+        ghost_mode_settings: Option<GhostModeSettings>,
+        reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
+    },
+    DeactivateLocalRace {
+        expected_revision: u64,
+        race_id: String,
+        reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
+    },
+    BumpRevision {
+        expected_revision: u64,
+        reply_tx: oneshot::Sender<Result<EngineRuntimeState, EngineWorkerError>>,
+    },
     SetGhostModeSettings {
         target: EngineCommandTarget,
         settings: GhostModeSettings,

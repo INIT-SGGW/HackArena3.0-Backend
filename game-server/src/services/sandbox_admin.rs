@@ -468,7 +468,9 @@ impl RuntimeAdminService for SandboxAdminServiceImpl {
                             .collect(),
                     },
                 )),
-                EngineActivityKind::None | EngineActivityKind::OfficialRace => None,
+                EngineActivityKind::None
+                | EngineActivityKind::OfficialRace
+                | EngineActivityKind::LocalRace => None,
             },
         };
         Ok(Response::new(GetAdminRuntimeStateResponse {
