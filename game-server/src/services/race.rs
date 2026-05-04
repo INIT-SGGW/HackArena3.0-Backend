@@ -694,12 +694,16 @@ impl RaceService for RaceServiceImpl {
         let car_owners = self.car_owners.clone();
         let car_engine_ids = self.car_engine_ids.clone();
         let car_targets = self.car_targets.clone();
+        #[cfg(feature = "local")]
+        let local_race_state = self.local_race_state.clone();
         let (tx, rx) = mpsc::channel(FRONTEND_STREAM_CHANNEL_CAPACITY);
 
         tokio::spawn(run_frontend_spectator_stream(
             engine,
             frame_hub,
             runtime_store,
+            #[cfg(feature = "local")]
+            local_race_state,
             simulation_hz,
             active_streams,
             known_cars,
@@ -1284,6 +1288,7 @@ async fn run_frontend_spectator_stream(
     engine: EngineClient,
     frame_hub: FrameHub,
     runtime_store: Arc<RaceRuntimeStore>,
+    #[cfg(feature = "local")] local_race_state: LocalRaceStateStore,
     simulation_hz: u32,
     active_streams: Arc<DashMap<u64, ()>>,
     known_cars: Arc<DashMap<u64, ()>>,
@@ -1486,7 +1491,17 @@ async fn run_frontend_spectator_stream(
                     None
                 }
             }
-            Some(EngineCommandTarget::LocalRace { .. }) => None,
+            Some(EngineCommandTarget::LocalRace { race_id }) => {
+                #[cfg(feature = "local")]
+                {
+                    local_race_remaining_sec(&local_race_state, race_id, frame.server_time_ms).await
+                }
+                #[cfg(not(feature = "local"))]
+                {
+                    let _ = race_id;
+                    None
+                }
+            }
             None => None,
         };
 
@@ -1525,6 +1540,33 @@ async fn run_frontend_spectator_stream(
 
     tracing::info!("frontend spectator stream ended");
     active_streams.remove(&stream_id);
+}
+
+#[cfg(feature = "local")]
+async fn local_race_remaining_sec(
+    local_race_state: &LocalRaceStateStore,
+    race_id: &str,
+    now_ms: u64,
+) -> Option<f32> {
+    let active_race = local_race_state.active_race().await?;
+    if active_race.race_id != race_id {
+        return None;
+    }
+    let planned_end_ms = timestamp_to_unix_ms(active_race.planned_end_at_utc.as_ref())?;
+    let remaining_ms = planned_end_ms.saturating_sub(now_ms);
+    Some(remaining_ms as f32 / 1_000.0)
+}
+
+#[cfg(feature = "local")]
+fn timestamp_to_unix_ms(value: Option<&prost_types::Timestamp>) -> Option<u64> {
+    let value = value?;
+    let seconds = u64::try_from(value.seconds).ok()?;
+    let nanos = u32::try_from(value.nanos).ok()?;
+    Some(
+        seconds
+            .saturating_mul(1_000)
+            .saturating_add(u64::from(nanos / 1_000_000)),
+    )
 }
 
 #[cfg(feature = "official")]
