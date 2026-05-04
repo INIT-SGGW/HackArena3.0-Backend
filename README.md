@@ -47,7 +47,7 @@ Important:
 
 Standalone updater:
 - on startup, `ha3-standalone.exe` can check GitHub Releases for a newer standalone package before booting the current version
-- `.\ha3-standalone.exe --update-to v0.2.0-beta.9` updates to an exact release tag before startup
+- `.\ha3-standalone.exe --update-to v0.2.0-beta.10` updates to an exact release tag before startup
 - `.\ha3-standalone.exe --ignore-update-cache` forces a fresh GitHub metadata check for that run
 - updater cache/state lives under `%LOCALAPPDATA%\HackArena\3_0\standalone\update-cache`
 - automatic update-check failures never block the current standalone from starting

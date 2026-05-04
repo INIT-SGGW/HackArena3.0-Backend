@@ -25,7 +25,7 @@ const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_API_TIMEOUT: Duration = Duration::from_secs(15);
 const STANDALONE_USER_AGENT: &str = "ha3-standalone-updater";
 const SHA256SUMS_ASSET_NAME: &str = "SHA256SUMS.txt";
-const MIN_SUPPORTED_TAG: &str = "v0.2.0-beta.9";
+const MIN_SUPPORTED_TAG: &str = "v0.2.0-beta.10";
 const USER_LOG_TARGET: &str = "ha3_standalone::user";
 const STANDALONE_UPDATE_BINARY_NAME: &str = "ha3-standalone-update.exe";
 pub const DEFAULT_UPDATE_CACHE_TTL_MINUTES: u64 = 30;
@@ -1041,6 +1041,9 @@ fn parse_single_release(release: CachedRelease) -> Option<ReleaseEntry> {
     if version < min_supported_version() {
         return None;
     }
+    if !release_has_supported_standalone_assets(&release) {
+        return None;
+    }
     let channel = if !version.pre.is_empty() || release.prerelease {
         ReleaseChannel::Prerelease
     } else {
@@ -1189,6 +1192,19 @@ fn active_rate_limit_reset(state: &UpdaterState) -> Option<u64> {
 
 fn expected_zip_asset_name(tag: &str) -> String {
     format!("ha3-standalone-x86_64-pc-windows-msvc-{tag}.zip")
+}
+
+fn release_has_supported_standalone_assets(release: &CachedRelease) -> bool {
+    let expected_zip_name = expected_zip_asset_name(&release.tag_name);
+    let has_zip = release
+        .assets
+        .iter()
+        .any(|asset| asset.name == expected_zip_name);
+    let has_checksums = release
+        .assets
+        .iter()
+        .any(|asset| asset.name.eq_ignore_ascii_case(SHA256SUMS_ASSET_NAME));
+    has_zip && has_checksums
 }
 
 fn parse_checksum_manifest(raw: &str) -> anyhow::Result<HashMap<String, String>> {
@@ -1647,6 +1663,23 @@ mod tests {
         CachedRelease {
             tag_name: tag.to_string(),
             prerelease,
+            assets: vec![
+                CachedAsset {
+                    name: expected_zip_asset_name(tag),
+                    browser_download_url: format!("https://example.invalid/{tag}.zip"),
+                },
+                CachedAsset {
+                    name: SHA256SUMS_ASSET_NAME.to_string(),
+                    browser_download_url: format!("https://example.invalid/{tag}.sha256"),
+                },
+            ],
+        }
+    }
+
+    fn release_without_assets(tag: &str, prerelease: bool) -> CachedRelease {
+        CachedRelease {
+            tag_name: tag.to_string(),
+            prerelease,
             assets: vec![],
         }
     }
@@ -1657,10 +1690,10 @@ mod tests {
             install_dir: PathBuf::from(r"C:\HackArena\standalone"),
             zip_path: cache_root
                 .join("downloads")
-                .join("v0.2.0-beta.9")
-                .join("ha3-standalone-x86_64-pc-windows-msvc-v0.2.0-beta.9.zip"),
-            staging_dir: cache_root.join("staging").join("v0.2.0-beta.9"),
-            tag: "v0.2.0-beta.9".to_string(),
+                .join("v0.2.0-beta.10")
+                .join("ha3-standalone-x86_64-pc-windows-msvc-v0.2.0-beta.10.zip"),
+            staging_dir: cache_root.join("staging").join("v0.2.0-beta.10"),
+            tag: "v0.2.0-beta.10".to_string(),
             auth_token: "test-token".to_string(),
         }
     }
@@ -1670,11 +1703,11 @@ mod tests {
         let parsed = parse_startup_args_from_iter([
             "ha3-standalone.exe",
             "--update-to",
-            "0.2.0-beta.9",
+            "0.2.0-beta.10",
             "--ignore-update-cache",
         ])
         .expect("args should parse");
-        assert_eq!(parsed.update_to.as_deref(), Some("v0.2.0-beta.9"));
+        assert_eq!(parsed.update_to.as_deref(), Some("v0.2.0-beta.10"));
         assert!(parsed.ignore_update_cache);
     }
 
@@ -1688,16 +1721,16 @@ mod tests {
             "--install-dir",
             r"C:\HackArena\standalone",
             "--zip-path",
-            r"C:\Users\test\AppData\Local\HackArena\3_0\standalone\update-cache\downloads\v0.2.0-beta.9\ha3-standalone-x86_64-pc-windows-msvc-v0.2.0-beta.9.zip",
+            r"C:\Users\test\AppData\Local\HackArena\3_0\standalone\update-cache\downloads\v0.2.0-beta.10\ha3-standalone-x86_64-pc-windows-msvc-v0.2.0-beta.10.zip",
             "--staging-dir",
-            r"C:\Users\test\AppData\Local\HackArena\3_0\standalone\update-cache\staging\v0.2.0-beta.9",
+            r"C:\Users\test\AppData\Local\HackArena\3_0\standalone\update-cache\staging\v0.2.0-beta.10",
             "--tag",
-            "0.2.0-beta.9",
+            "0.2.0-beta.10",
             "--auth-token",
             "abc123",
         ])
         .expect("apply args should parse");
-        assert_eq!(parsed.tag, "v0.2.0-beta.9");
+        assert_eq!(parsed.tag, "v0.2.0-beta.10");
         assert_eq!(parsed.auth_token, "abc123");
     }
 
@@ -1707,7 +1740,7 @@ mod tests {
         let releases = parse_release_entries(&[
             release("v0.2.1-beta.1", true),
             release("v0.2.1", false),
-            release("v0.2.0-beta.9", true),
+            release("v0.2.0-beta.10", true),
         ]);
         let candidates = select_automatic_candidates(&current, &releases, &BTreeSet::new());
         assert!(candidates.prerelease.is_none());
@@ -1722,9 +1755,9 @@ mod tests {
 
     #[test]
     fn selects_prerelease_and_stable_for_prerelease_current_version() {
-        let current = Version::parse("0.2.0-beta.8").expect("valid current version");
+        let current = Version::parse("0.2.0-beta.9").expect("valid current version");
         let releases = parse_release_entries(&[
-            release("v0.2.0-beta.9", true),
+            release("v0.2.0-beta.10", true),
             release("v0.2.0", false),
             release("v0.1.0", false),
         ]);
@@ -1734,7 +1767,7 @@ mod tests {
                 .prerelease
                 .as_ref()
                 .map(|entry| entry.tag_name.as_str()),
-            Some("v0.2.0-beta.9")
+            Some("v0.2.0-beta.10")
         );
         assert_eq!(
             candidates
@@ -1747,10 +1780,10 @@ mod tests {
 
     #[test]
     fn skip_state_is_exact_tag_based() {
-        let current = Version::parse("0.2.0-beta.8").expect("valid current version");
+        let current = Version::parse("0.2.0-beta.9").expect("valid current version");
         let releases =
-            parse_release_entries(&[release("v0.2.0-beta.9", true), release("v0.2.0", false)]);
-        let skipped_tags = BTreeSet::from(["v0.2.0-beta.9".to_string()]);
+            parse_release_entries(&[release("v0.2.0-beta.10", true), release("v0.2.0", false)]);
+        let skipped_tags = BTreeSet::from(["v0.2.0-beta.10".to_string()]);
         let candidates = select_automatic_candidates(&current, &releases, &skipped_tags);
         assert!(candidates.prerelease.is_none());
         assert_eq!(
@@ -1765,12 +1798,22 @@ mod tests {
     #[test]
     fn ignores_invalid_or_too_old_tags() {
         let releases = parse_release_entries(&[
-            release("not-a-version", false),
-            release("v0.2.0-beta.8", true),
+            release_without_assets("not-a-version", false),
             release("v0.2.0-beta.9", true),
+            release("v0.2.0-beta.10", true),
         ]);
         assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0].tag_name, "v0.2.0-beta.9");
+        assert_eq!(releases[0].tag_name, "v0.2.0-beta.10");
+    }
+
+    #[test]
+    fn ignores_release_without_required_standalone_assets() {
+        let releases = parse_release_entries(&[
+            release_without_assets("v0.2.0-beta.11", true),
+            release("v0.2.0-beta.10", true),
+        ]);
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].tag_name, "v0.2.0-beta.10");
     }
 
     #[test]
