@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::local::local_race_state::LocalRaceStateStore;
+use crate::local::local_race_state::{LocalRaceReconcileOutcome, current_unix_ms};
 use crate::local::map_assets::LocalMapAssetsSync;
 use crate::local::sandbox_config_store::{
     LocalSandboxConfigRecord, LocalSandboxConfigStore, LocalTimeOfDaySettingsRecord,
@@ -16,6 +17,7 @@ use crate::runtime::engine_worker::{EngineActivityKind, EngineClient};
 use crate::services::error_map::map_worker_err;
 use crate::services::race::RaceRuntimeStore;
 use crate::services::weather::{LocalWeatherEvent, LocalWeatherEventHub, LocalWeatherEventKind};
+use boink::model::{Controls, GearShift as EngineGearShift};
 use proto::race::v1::local_sandbox_admin_service_server::LocalSandboxAdminService;
 use proto::race::v1::{
     CreateLocalSandboxConfigRequest, CreateLocalSandboxConfigResponse,
@@ -31,7 +33,7 @@ use proto::race::v1::{
 };
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
-use tokio::time::Duration;
+use tokio::time::{Duration, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -69,7 +71,7 @@ impl LocalSandboxAdminServiceImpl {
         weather_events: LocalWeatherEventHub,
         local_race_state: LocalRaceStateStore,
     ) -> Self {
-        Self {
+        let service = Self {
             store,
             engine,
             runtime_store,
@@ -78,7 +80,9 @@ impl LocalSandboxAdminServiceImpl {
             started_at_utc: Arc::new(RwLock::new(HashMap::new())),
             weather_events,
             local_race_state,
-        }
+        };
+        service.spawn_local_race_lifecycle_task();
+        service
     }
 
     async fn ensure_map_ready(&self, map_id: &str) -> Result<(), Status> {
@@ -254,6 +258,152 @@ impl LocalSandboxAdminServiceImpl {
             active_race,
         })
     }
+
+    fn spawn_local_race_lifecycle_task(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut ticker =
+                tokio::time::interval(Duration::from_millis(Self::RUNTIME_STREAM_POLL_INTERVAL_MS));
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                ticker.tick().await;
+                service.reconcile_local_race_lifecycle_tick().await;
+            }
+        });
+    }
+
+    async fn reconcile_local_race_lifecycle_tick(&self) {
+        if let Some(outcome) = self
+            .local_race_state
+            .reconcile_active_race(current_unix_ms())
+            .await
+        {
+            self.log_local_race_reconcile(&outcome);
+            self.bump_local_runtime_revision(outcome.race.race_id.as_str())
+                .await;
+        }
+
+        let Some(race) = self
+            .local_race_state
+            .finished_race_pending_soft_freeze()
+            .await
+        else {
+            return;
+        };
+
+        if self
+            .apply_finished_local_race_soft_freeze(race.race_id.as_str())
+            .await
+        {
+            if let Err(err) = self
+                .local_race_state
+                .mark_finish_soft_freeze_applied(race.race_id.as_str())
+                .await
+            {
+                tracing::warn!(
+                    race_id = %race.race_id,
+                    error = ?err,
+                    "failed to mark standalone local race soft freeze as applied"
+                );
+            }
+        }
+    }
+
+    fn log_local_race_reconcile(&self, outcome: &LocalRaceReconcileOutcome) {
+        tracing::info!(
+            race_id = %outcome.race.race_id,
+            previous_phase = ?outcome.previous_phase,
+            current_phase = ?outcome.current_phase,
+            "standalone local race lifecycle advanced"
+        );
+    }
+
+    async fn bump_local_runtime_revision(&self, race_id: &str) {
+        let runtime = match self.engine.runtime_state().await {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                tracing::warn!(
+                    race_id,
+                    error = %err,
+                    "failed to read runtime state after local race lifecycle transition"
+                );
+                return;
+            }
+        };
+
+        let runtime_matches_race = runtime
+            .active_local_race
+            .as_ref()
+            .map(|race| race.race_id.as_str() == race_id)
+            .unwrap_or(false);
+        if !runtime_matches_race {
+            return;
+        }
+
+        if let Err(err) = self.engine.bump_revision(runtime.revision).await {
+            tracing::warn!(
+                race_id,
+                runtime_revision = runtime.revision,
+                error = %err,
+                "failed to bump runtime revision after local race lifecycle transition"
+            );
+        }
+    }
+
+    async fn apply_finished_local_race_soft_freeze(&self, race_id: &str) -> bool {
+        let target = crate::runtime::engine_worker::EngineCommandTarget::LocalRace {
+            race_id: race_id.to_string(),
+        };
+        let car_targets = self.runtime_store.car_targets();
+        let car_engine_ids = self.runtime_store.car_engine_ids();
+        let local_race_cars: Vec<(u64, u64)> = car_targets
+            .iter()
+            .filter_map(|entry| match entry.value() {
+                crate::runtime::engine_worker::EngineCommandTarget::LocalRace {
+                    race_id: entry_race_id,
+                } if entry_race_id == race_id => {
+                    let public_car_id = *entry.key();
+                    car_engine_ids
+                        .get(&public_car_id)
+                        .map(|engine_id| (public_car_id, *engine_id.value()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut all_applied = true;
+        for (public_car_id, engine_car_id) in local_race_cars {
+            if let Err(err) = self
+                .engine
+                .set_controls_in(
+                    target.clone(),
+                    engine_car_id,
+                    finished_local_race_controls(),
+                )
+                .await
+            {
+                tracing::warn!(
+                    race_id,
+                    public_car_id,
+                    engine_car_id,
+                    error = %err,
+                    "failed to apply standalone local race finish soft freeze controls"
+                );
+                all_applied = false;
+                continue;
+            }
+
+            self.runtime_store
+                .set_controls_input(public_car_id, 0.0, 1.0, 0.5, 0.0);
+        }
+
+        all_applied
+    }
+}
+
+fn finished_local_race_controls() -> Controls {
+    Controls::new(0.0, 1.0, 0.5, 0.0, 0.0, EngineGearShift::None)
 }
 
 #[tonic::async_trait]

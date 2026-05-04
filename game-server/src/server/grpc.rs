@@ -344,6 +344,8 @@ pub async fn serve_grpc(
         official_race_bots.clone(),
         #[cfg(feature = "local")]
         local_sandbox_store.clone(),
+        #[cfg(feature = "local")]
+        local_race_state.clone(),
     );
     let race_participant_impl = RaceParticipantServiceImpl::new(
         engine.clone(),

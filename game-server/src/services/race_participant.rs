@@ -2938,12 +2938,16 @@ impl RaceParticipantService for RaceParticipantServiceImpl {
         let frame_hub = self.frame_hub.clone();
         let runtime_store = self.runtime_store.clone();
         let simulation_hz = self.simulation_hz;
+        #[cfg(feature = "local")]
+        let local_race_state = self.local_race_state.clone();
 
         tokio::spawn(async move {
             run_participant_stream(
                 engine,
                 frame_hub,
                 runtime_store,
+                #[cfg(feature = "local")]
+                local_race_state,
                 simulation_hz,
                 scopes,
                 stream_id,
@@ -3244,6 +3248,19 @@ fn emit_participant_terminal_error(
     }
 }
 
+#[cfg(feature = "local")]
+async fn local_race_gameplay_closed(
+    local_race_state: &LocalRaceStateStore,
+    target: &EngineCommandTarget,
+) -> bool {
+    let EngineCommandTarget::LocalRace { race_id } = target else {
+        return false;
+    };
+    local_race_state
+        .gameplay_commands_closed(race_id.as_str())
+        .await
+}
+
 async fn cleanup_participant_car(
     reason: &'static str,
     engine: &EngineClient,
@@ -3454,6 +3471,7 @@ async fn run_participant_stream(
     engine: EngineClient,
     frame_hub: FrameHub,
     runtime_store: Arc<RaceRuntimeStore>,
+    #[cfg(feature = "local")] local_race_state: LocalRaceStateStore,
     simulation_hz: u32,
     scopes: Vec<String>,
     stream_id: u64,
@@ -3650,6 +3668,36 @@ async fn run_participant_stream(
 
                         let (client_seq, requested_controls) = controls;
                         let frame = frame_hub.latest();
+                        #[cfg(feature = "local")]
+                        if local_race_gameplay_closed(&local_race_state, &self_target).await {
+                            runtime_store.last_client_seq().insert(self_public_car_id, client_seq);
+                            runtime_store
+                                .set_controls_input(self_public_car_id, 0.0, 1.0, 0.5, 0.0);
+                            let ack = participant_ack(
+                                client_seq,
+                                frame.tick,
+                                engine_gear_shift_to_proto(EngineGearShift::None),
+                            );
+                            if !send_participant_event(
+                                &tx,
+                                &mut server_seq,
+                                ParticipantServerPayload::Ack(ack),
+                            )
+                            .await
+                            {
+                                cleanup_participant_car(
+                                    "ack-send-failed",
+                                    &engine,
+                                    runtime_store.as_ref(),
+                                    self_public_car_id,
+                                    &self_target,
+                                    self_engine_car_id,
+                                )
+                                .await;
+                                break;
+                            }
+                            continue;
+                        }
                         let pit_state = runtime_store
                             .pit_state_snapshot(self_public_car_id, frame.server_time_ms);
                         let applied_controls = if pit_state.emergency_lock_remaining_ms > 0 {
@@ -3731,6 +3779,36 @@ async fn run_participant_stream(
 
                         let frame = frame_hub.latest();
                         let applies_from_tick = frame.tick;
+                        #[cfg(feature = "local")]
+                        if local_race_gameplay_closed(&local_race_state, &self_target).await {
+                            let ack = participant_command_ack(
+                                command.client_seq,
+                                ParticipantCommandType::BackToTrack,
+                                ParticipantCommandStatus::Rejected,
+                                applies_from_tick,
+                                ParticipantCommandRejectReason::NotAllowed,
+                                0,
+                            );
+                            if !send_participant_event(
+                                &tx,
+                                &mut server_seq,
+                                ParticipantServerPayload::CommandAck(ack),
+                            )
+                            .await
+                            {
+                                cleanup_participant_car(
+                                    "command-ack-send-failed",
+                                    &engine,
+                                    runtime_store.as_ref(),
+                                    self_public_car_id,
+                                    &self_target,
+                                    self_engine_car_id,
+                                )
+                                .await;
+                                break;
+                            }
+                            continue;
+                        }
                         #[cfg(feature = "official")]
                         {
                             let cooldown_remaining_ms = runtime_store
@@ -3881,6 +3959,36 @@ async fn run_participant_stream(
 
                         let frame = frame_hub.latest();
                         let applies_from_tick = frame.tick;
+                        #[cfg(feature = "local")]
+                        if local_race_gameplay_closed(&local_race_state, &self_target).await {
+                            let ack = participant_command_ack(
+                                command.client_seq,
+                                ParticipantCommandType::EmergencyPitstop,
+                                ParticipantCommandStatus::Rejected,
+                                applies_from_tick,
+                                ParticipantCommandRejectReason::NotAllowed,
+                                0,
+                            );
+                            if !send_participant_event(
+                                &tx,
+                                &mut server_seq,
+                                ParticipantServerPayload::CommandAck(ack),
+                            )
+                            .await
+                            {
+                                cleanup_participant_car(
+                                    "command-ack-send-failed",
+                                    &engine,
+                                    runtime_store.as_ref(),
+                                    self_public_car_id,
+                                    &self_target,
+                                    self_engine_car_id,
+                                )
+                                .await;
+                                break;
+                            }
+                            continue;
+                        }
                         #[cfg(feature = "official")]
                         {
                             let in_pit = frame
@@ -4030,6 +4138,36 @@ async fn run_participant_stream(
                         }
 
                         let applies_from_tick = frame_hub.latest().tick;
+                        #[cfg(feature = "local")]
+                        if local_race_gameplay_closed(&local_race_state, &self_target).await {
+                            let ack = participant_command_ack(
+                                command.client_seq,
+                                ParticipantCommandType::SetNextPitTireType,
+                                ParticipantCommandStatus::Rejected,
+                                applies_from_tick,
+                                ParticipantCommandRejectReason::NotAllowed,
+                                0,
+                            );
+                            if !send_participant_event(
+                                &tx,
+                                &mut server_seq,
+                                ParticipantServerPayload::CommandAck(ack),
+                            )
+                            .await
+                            {
+                                cleanup_participant_car(
+                                    "command-ack-send-failed",
+                                    &engine,
+                                    runtime_store.as_ref(),
+                                    self_public_car_id,
+                                    &self_target,
+                                    self_engine_car_id,
+                                )
+                                .await;
+                                break;
+                            }
+                            continue;
+                        }
                         let ack = match runtime_tire_type_from_proto(command.next_tire_type) {
                             Ok(next_tire_type) => {
                                 runtime_store

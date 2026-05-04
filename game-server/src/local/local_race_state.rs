@@ -19,6 +19,7 @@ struct LocalRaceState {
     active: Option<LocalRaceRuntimeInfo>,
     participants: HashMap<u64, LocalRaceParticipantRecord>,
     next_participant_index: u32,
+    finish_soft_freeze_applied: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -45,6 +46,7 @@ impl LocalRaceStateStore {
         state.active = Some(normalize_race_phase(race));
         state.participants.clear();
         state.next_participant_index = 1;
+        state.finish_soft_freeze_applied = false;
     }
 
     pub async fn update_active_race(
@@ -80,6 +82,7 @@ impl LocalRaceStateStore {
         state.active = None;
         state.participants.clear();
         state.next_participant_index = 1;
+        state.finish_soft_freeze_applied = false;
         Ok(())
     }
 
@@ -143,6 +146,75 @@ impl LocalRaceStateStore {
             race.joined_participant_count = joined_after;
         }
     }
+
+    pub async fn reconcile_active_race(&self, now_ms: u64) -> Option<LocalRaceReconcileOutcome> {
+        let mut state = self.state.write().await;
+        let race = state.active.as_mut()?;
+        let previous_phase = race_phase(race.phase);
+        let normalized = normalize_race_phase_at(race.clone(), now_ms);
+        if *race == normalized {
+            return None;
+        }
+
+        let current_phase = race_phase(normalized.phase);
+        *race = normalized.clone();
+        if current_phase == LocalRacePhase::Finished {
+            state.finish_soft_freeze_applied = false;
+        }
+
+        let mut race = normalized;
+        race.joined_participant_count = joined_count_for_race(&state, &race.race_id);
+        Some(LocalRaceReconcileOutcome {
+            race,
+            previous_phase,
+            current_phase,
+        })
+    }
+
+    pub async fn finished_race_pending_soft_freeze(&self) -> Option<LocalRaceRuntimeInfo> {
+        let state = self.state.read().await;
+        let race = state.active.as_ref()?;
+        if state.finish_soft_freeze_applied {
+            return None;
+        }
+        let race = normalize_race_phase(race.clone());
+        if race_phase(race.phase) != LocalRacePhase::Finished {
+            return None;
+        }
+        let mut race = race;
+        race.joined_participant_count = joined_count_for_race(&state, &race.race_id);
+        Some(race)
+    }
+
+    pub async fn mark_finish_soft_freeze_applied(
+        &self,
+        race_id: &str,
+    ) -> Result<(), LocalRaceStateError> {
+        let mut state = self.state.write().await;
+        let race = state
+            .active
+            .as_ref()
+            .ok_or(LocalRaceStateError::NoActiveRace)?;
+        if race.race_id != race_id {
+            return Err(LocalRaceStateError::RaceMismatch);
+        }
+        state.finish_soft_freeze_applied = true;
+        Ok(())
+    }
+
+    pub async fn gameplay_commands_closed(&self, race_id: &str) -> bool {
+        let state = self.state.read().await;
+        let Some(race) = state.active.as_ref() else {
+            return false;
+        };
+        if race.race_id != race_id {
+            return false;
+        }
+        matches!(
+            race_phase(normalize_race_phase(race.clone()).phase),
+            LocalRacePhase::Finished | LocalRacePhase::Aborted
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +225,13 @@ pub enum LocalRaceStateError {
     ParticipantLimitReached,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalRaceReconcileOutcome {
+    pub race: LocalRaceRuntimeInfo,
+    pub previous_phase: LocalRacePhase,
+    pub current_phase: LocalRacePhase,
+}
+
 fn joined_count_for_race(state: &LocalRaceState, race_id: &str) -> u32 {
     if state.active.as_ref().map(|race| race.race_id.as_str()) != Some(race_id) {
         return 0;
@@ -160,8 +239,11 @@ fn joined_count_for_race(state: &LocalRaceState, race_id: &str) -> u32 {
     state.participants.len().min(u32::MAX as usize) as u32
 }
 
-fn normalize_race_phase(mut race: LocalRaceRuntimeInfo) -> LocalRaceRuntimeInfo {
-    let now_ms = current_unix_ms();
+fn normalize_race_phase(race: LocalRaceRuntimeInfo) -> LocalRaceRuntimeInfo {
+    normalize_race_phase_at(race, current_unix_ms())
+}
+
+fn normalize_race_phase_at(mut race: LocalRaceRuntimeInfo, now_ms: u64) -> LocalRaceRuntimeInfo {
     match LocalRacePhase::try_from(race.phase).unwrap_or(LocalRacePhase::Unspecified) {
         LocalRacePhase::Countdown => {
             if timestamp_ms(race.countdown_end_at_utc.as_ref()).is_some_and(|end| now_ms >= end) {
@@ -188,6 +270,10 @@ fn normalize_race_phase(mut race: LocalRaceRuntimeInfo) -> LocalRaceRuntimeInfo 
     race
 }
 
+fn race_phase(raw: i32) -> LocalRacePhase {
+    LocalRacePhase::try_from(raw).unwrap_or(LocalRacePhase::Unspecified)
+}
+
 pub fn timestamp_from_ms(ms: u64) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: (ms / 1_000).min(i64::MAX as u64) as i64,
@@ -212,4 +298,95 @@ fn timestamp_ms(value: Option<&prost_types::Timestamp>) -> Option<u64> {
             .saturating_mul(1_000)
             .saturating_add(u64::from(nanos / 1_000_000)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_race(phase: LocalRacePhase, now_ms: u64) -> LocalRaceRuntimeInfo {
+        LocalRaceRuntimeInfo {
+            race_id: "race-1".to_string(),
+            race_name: "Race".to_string(),
+            map_id: "map".to_string(),
+            race_duration_sec: 10,
+            time_of_day: None,
+            active_time_of_day_preset: 0,
+            ghost_mode: None,
+            weather: None,
+            phase: phase as i32,
+            created_at_utc: Some(timestamp_from_ms(now_ms.saturating_sub(5_000))),
+            countdown_end_at_utc: None,
+            running_started_at_utc: None,
+            planned_end_at_utc: None,
+            joined_participant_count: 0,
+            max_participants: 4,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_transitions_countdown_to_running() {
+        let store = LocalRaceStateStore::new();
+        let now_ms = current_unix_ms().saturating_add(10_000);
+        let mut race = sample_race(LocalRacePhase::Countdown, now_ms);
+        race.countdown_end_at_utc = Some(timestamp_from_ms(now_ms.saturating_sub(1)));
+        store.set_active_race(race).await;
+
+        let outcome = store
+            .reconcile_active_race(now_ms)
+            .await
+            .expect("countdown should transition");
+
+        assert_eq!(outcome.previous_phase, LocalRacePhase::Countdown);
+        assert_eq!(outcome.current_phase, LocalRacePhase::Running);
+        assert_eq!(race_phase(outcome.race.phase), LocalRacePhase::Running);
+        assert_eq!(
+            timestamp_ms(outcome.race.running_started_at_utc.as_ref()),
+            Some(now_ms.saturating_sub(1))
+        );
+        assert_eq!(
+            timestamp_ms(outcome.race.planned_end_at_utc.as_ref()),
+            Some(now_ms.saturating_sub(1).saturating_add(10_000))
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_transitions_running_to_finished() {
+        let store = LocalRaceStateStore::new();
+        let now_ms = current_unix_ms().saturating_add(10_000);
+        let mut race = sample_race(LocalRacePhase::Running, now_ms);
+        race.running_started_at_utc = Some(timestamp_from_ms(now_ms.saturating_sub(11_000)));
+        race.planned_end_at_utc = Some(timestamp_from_ms(now_ms.saturating_sub(1)));
+        store.set_active_race(race).await;
+
+        let outcome = store
+            .reconcile_active_race(now_ms)
+            .await
+            .expect("running should transition");
+
+        assert_eq!(outcome.previous_phase, LocalRacePhase::Running);
+        assert_eq!(outcome.current_phase, LocalRacePhase::Finished);
+        assert!(store.finished_race_pending_soft_freeze().await.is_some());
+        assert!(store.gameplay_commands_closed("race-1").await);
+    }
+
+    #[tokio::test]
+    async fn finished_race_stays_active_until_cleared() {
+        let store = LocalRaceStateStore::new();
+        let now_ms = current_unix_ms().saturating_add(10_000);
+        let mut race = sample_race(LocalRacePhase::Running, now_ms);
+        race.running_started_at_utc = Some(timestamp_from_ms(now_ms.saturating_sub(11_000)));
+        race.planned_end_at_utc = Some(timestamp_from_ms(now_ms.saturating_sub(1)));
+        store.set_active_race(race).await;
+
+        let _ = store.reconcile_active_race(now_ms).await;
+        let active = store.active_race().await.expect("race should stay active");
+        assert_eq!(race_phase(active.phase), LocalRacePhase::Finished);
+
+        store
+            .clear_active_race("race-1")
+            .await
+            .expect("finished race should clear");
+        assert!(store.active_race().await.is_none());
+    }
 }

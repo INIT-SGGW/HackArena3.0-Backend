@@ -49,6 +49,8 @@ use crate::auth::game_token::GameTokenValidator;
 use crate::auth::game_token::parse_game_token;
 use crate::config::AppEnv;
 #[cfg(feature = "local")]
+use crate::local::local_race_state::LocalRaceStateStore;
+#[cfg(feature = "local")]
 use crate::local::sandbox_config_store::{LocalSandboxConfigStore, LocalSandboxSpawnModeRecord};
 use crate::runtime::engine_worker::{
     EngineActiveSandboxState, EngineActivityKind, EngineClient, EngineCommandTarget,
@@ -127,6 +129,8 @@ pub struct RaceServiceImpl {
     official_race_bots: OfficialRaceBotRegistry,
     #[cfg(feature = "local")]
     local_sandbox_store: LocalSandboxConfigStore,
+    #[cfg(feature = "local")]
+    local_race_state: LocalRaceStateStore,
 }
 
 impl RaceServiceImpl {
@@ -143,6 +147,7 @@ impl RaceServiceImpl {
         #[cfg(feature = "official")] official_sandbox_joins: OfficialSandboxJoinRegistry,
         #[cfg(feature = "official")] official_race_bots: OfficialRaceBotRegistry,
         #[cfg(feature = "local")] local_sandbox_store: LocalSandboxConfigStore,
+        #[cfg(feature = "local")] local_race_state: LocalRaceStateStore,
     ) -> Self {
         Self {
             engine,
@@ -168,7 +173,37 @@ impl RaceServiceImpl {
             official_race_bots,
             #[cfg(feature = "local")]
             local_sandbox_store,
+            #[cfg(feature = "local")]
+            local_race_state,
         }
+    }
+
+    #[cfg(feature = "local")]
+    async fn ensure_local_race_gameplay_open(
+        &self,
+        target: &EngineCommandTarget,
+    ) -> Result<(), Status> {
+        let EngineCommandTarget::LocalRace { race_id } = target else {
+            return Ok(());
+        };
+        if self
+            .local_race_state
+            .gameplay_commands_closed(race_id.as_str())
+            .await
+        {
+            return Err(Status::failed_precondition(
+                "standalone local race is finished",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "local"))]
+    async fn ensure_local_race_gameplay_open(
+        &self,
+        _target: &EngineCommandTarget,
+    ) -> Result<(), Status> {
+        Ok(())
     }
 }
 
@@ -212,6 +247,7 @@ impl RaceService for RaceServiceImpl {
         let controls = proto_dev_to_controls(&req)?;
         let target = self.target_for_car(req.target_car_id)?;
         let engine_car_id = self.engine_car_id_for(req.target_car_id)?;
+        self.ensure_local_race_gameplay_open(&target).await?;
 
         let accepted_controls = self
             .engine
