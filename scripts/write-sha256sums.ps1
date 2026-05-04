@@ -24,9 +24,9 @@ if (-not (Test-Path $releaseVersionDir)) {
     throw "Release directory not found: $releaseVersionDir"
 }
 
-$releaseFiles = Get-ChildItem -Path $releaseVersionDir -File |
+$releaseFiles = @(Get-ChildItem -Path $releaseVersionDir -File |
     Where-Object { $_.Name -ne "SHA256SUMS.txt" } |
-    Sort-Object Name
+    Sort-Object Name)
 if ($releaseFiles.Count -eq 0) {
     throw "No release files found in: $releaseVersionDir"
 }
