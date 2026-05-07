@@ -29,6 +29,7 @@ const MIN_SUPPORTED_TAG: &str = "v0.2.0-beta.10";
 const USER_LOG_TARGET: &str = "ha3_standalone::user";
 const STANDALONE_UPDATE_BINARY_NAME: &str = "ha3-standalone-update.exe";
 pub const DEFAULT_UPDATE_CACHE_TTL_MINUTES: u64 = 30;
+const CACHE_STALE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StartupArgs {
@@ -79,6 +80,10 @@ struct UpdaterState {
     skipped_tags: BTreeSet<String>,
     #[serde(default)]
     rate_limit_reset_unix_secs: Option<u64>,
+    #[serde(default)]
+    current_installed_tag: Option<String>,
+    #[serde(default)]
+    previous_installed_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +305,7 @@ pub fn run_apply_update(args: &ApplyUpdateArgs) -> anyhow::Result<()> {
     wait_for_process_exit(args.old_pid, Duration::from_secs(60))?;
     prepare_staging_dir(&args.staging_dir, &args.zip_path)?;
     apply_staged_update(&args.install_dir, &args.staging_dir)?;
+    cleanup_staging_dir_after_apply(&args.staging_dir);
     relaunch_standalone(&args.install_dir)
 }
 
@@ -358,8 +364,9 @@ impl StandaloneUpdater {
         ignore_update_cache: bool,
     ) -> anyhow::Result<StartupUpdateOutcome> {
         self.ensure_cache_root()?;
-
         let mut state = self.load_state_or_default();
+        self.reconcile_installed_tags(&mut state, current_tag)?;
+        self.run_cache_maintenance(&state);
         let maybe_releases = self
             .load_releases_for_automatic_check(&mut state, ignore_update_cache)
             .await?;
@@ -422,7 +429,9 @@ impl StandaloneUpdater {
         target_tag: &str,
     ) -> anyhow::Result<StartupUpdateOutcome> {
         self.ensure_cache_root()?;
-
+        let mut state = self.load_state_or_default();
+        self.reconcile_installed_tags(&mut state, current_tag)?;
+        self.run_cache_maintenance(&state);
         let normalized_tag = normalize_release_tag_input(target_tag)?;
         tracing::info!(
             target: USER_LOG_TARGET,
@@ -464,6 +473,230 @@ impl StandaloneUpdater {
                 display_path(&self.cache_root)
             )
         })
+    }
+
+    fn reconcile_installed_tags(
+        &self,
+        state: &mut UpdaterState,
+        current_tag: &str,
+    ) -> anyhow::Result<()> {
+        let normalized_current = normalize_release_tag_input(current_tag)?;
+        let changed = match state.current_installed_tag.as_deref() {
+            Some(existing) if existing == normalized_current => false,
+            Some(existing) => {
+                state.previous_installed_tag = Some(existing.to_string());
+                state.current_installed_tag = Some(normalized_current);
+                true
+            }
+            None => {
+                state.current_installed_tag = Some(normalized_current);
+                true
+            }
+        };
+        if changed {
+            self.save_state(state)?;
+        }
+        Ok(())
+    }
+
+    fn run_cache_maintenance(&self, state: &UpdaterState) {
+        if let Err(err) = self.try_run_cache_maintenance(state) {
+            tracing::warn!(error = %err, "standalone updater cache maintenance failed");
+        }
+    }
+
+    fn try_run_cache_maintenance(&self, state: &UpdaterState) -> anyhow::Result<()> {
+        self.ensure_cache_root()?;
+        let protected = self.cleanup_pending_apply_dir()?;
+        self.cleanup_download_cache(state, &protected)?;
+        self.cleanup_staging_cache(&protected)?;
+        self.cleanup_runner_dir()?;
+        Ok(())
+    }
+
+    fn cleanup_pending_apply_dir(&self) -> anyhow::Result<BTreeSet<String>> {
+        let pending_dir = self.cache_root.join("pending-apply");
+        let mut protected_tags = BTreeSet::new();
+        if !pending_dir.is_dir() {
+            return Ok(protected_tags);
+        }
+
+        for entry in fs::read_dir(&pending_dir).with_context(|| {
+            format!(
+                "failed to read apply authorization directory {}",
+                display_path(&pending_dir)
+            )
+        })? {
+            let entry = match entry {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %display_path(&pending_dir),
+                        error = %err,
+                        "failed to inspect standalone updater pending-apply entry"
+                    );
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let metadata = match fs::metadata(&path) {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %display_path(&path),
+                        error = %err,
+                        "failed to read standalone updater pending-apply metadata"
+                    );
+                    let _ = remove_file_best_effort(&path);
+                    continue;
+                }
+            };
+
+            let raw = match fs::read_to_string(&path) {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %display_path(&path),
+                        error = %err,
+                        "failed to read standalone updater pending-apply file; removing it"
+                    );
+                    let _ = remove_file_best_effort(&path);
+                    continue;
+                }
+            };
+            let authorization: ApplyAuthorization = match serde_json::from_str(&raw) {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %display_path(&path),
+                        error = %err,
+                        "failed to decode standalone updater pending-apply file; removing it"
+                    );
+                    let _ = remove_file_best_effort(&path);
+                    continue;
+                }
+            };
+
+            let auth_age = now_unix_secs().saturating_sub(authorization.created_at_unix_secs);
+            if auth_age > CACHE_STALE_MAX_AGE.as_secs() {
+                tracing::debug!(
+                    path = %display_path(&path),
+                    tag = %authorization.tag,
+                    "removing stale standalone updater pending-apply authorization"
+                );
+                let _ = remove_file_best_effort(&path);
+                continue;
+            }
+
+            if !metadata.is_file() {
+                continue;
+            }
+            protected_tags.insert(authorization.tag);
+        }
+
+        Ok(protected_tags)
+    }
+
+    fn cleanup_download_cache(
+        &self,
+        state: &UpdaterState,
+        protected_tags: &BTreeSet<String>,
+    ) -> anyhow::Result<()> {
+        let downloads_dir = self.cache_root.join("downloads");
+        if !downloads_dir.is_dir() {
+            return Ok(());
+        }
+
+        let retained_tags = retained_cached_download_tags(state, protected_tags);
+        for entry in fs::read_dir(&downloads_dir).with_context(|| {
+            format!(
+                "failed to read standalone updater downloads cache {}",
+                display_path(&downloads_dir)
+            )
+        })? {
+            let entry = match entry {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %display_path(&downloads_dir),
+                        error = %err,
+                        "failed to inspect standalone updater downloads cache entry"
+                    );
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(tag) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if retained_tags.contains(tag) {
+                continue;
+            }
+            tracing::debug!(
+                path = %display_path(&path),
+                tag,
+                "removing standalone updater cached download directory"
+            );
+            let _ = remove_dir_best_effort(&path);
+        }
+
+        Ok(())
+    }
+
+    fn cleanup_staging_cache(&self, protected_tags: &BTreeSet<String>) -> anyhow::Result<()> {
+        let staging_dir = self.cache_root.join("staging");
+        if !staging_dir.is_dir() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(&staging_dir).with_context(|| {
+            format!(
+                "failed to read standalone updater staging cache {}",
+                display_path(&staging_dir)
+            )
+        })? {
+            let entry = match entry {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %display_path(&staging_dir),
+                        error = %err,
+                        "failed to inspect standalone updater staging cache entry"
+                    );
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(tag) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if protected_tags.contains(tag) {
+                continue;
+            }
+            tracing::debug!(
+                path = %display_path(&path),
+                tag,
+                "removing standalone updater staging directory"
+            );
+            let _ = remove_dir_best_effort(&path);
+        }
+
+        Ok(())
+    }
+
+    fn cleanup_runner_dir(&self) -> anyhow::Result<()> {
+        let runner_dir = self.cache_root.join("runner");
+        cleanup_runner_dir_with_max_age(&runner_dir, CACHE_STALE_MAX_AGE)
     }
 
     fn load_state_or_default(&self) -> UpdaterState {
@@ -1397,6 +1630,59 @@ fn apply_staged_update(install_dir: &Path, staging_dir: &Path) -> anyhow::Result
     Ok(())
 }
 
+fn cleanup_staging_dir_after_apply(staging_dir: &Path) {
+    if !staging_dir.is_dir() {
+        return;
+    }
+    if let Err(err) = remove_dir_best_effort(staging_dir) {
+        tracing::warn!(
+            path = %display_path(staging_dir),
+            error = %err,
+            "failed to remove standalone updater staging directory after apply"
+        );
+    }
+}
+
+fn cleanup_runner_dir_with_max_age(runner_dir: &Path, max_age: Duration) -> anyhow::Result<()> {
+    if !runner_dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(runner_dir).with_context(|| {
+        format!(
+            "failed to read standalone updater runner cache {}",
+            display_path(runner_dir)
+        )
+    })? {
+        let entry = match entry {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(
+                    path = %display_path(runner_dir),
+                    error = %err,
+                    "failed to inspect standalone updater runner entry"
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_old = file_modified_before(&path, max_age).unwrap_or(false);
+        if !is_old {
+            continue;
+        }
+        tracing::debug!(
+            path = %display_path(&path),
+            "removing stale standalone updater runner binary"
+        );
+        let _ = remove_file_best_effort(&path);
+    }
+
+    Ok(())
+}
+
 fn remove_obsolete_root_dlls(install_dir: &Path, staging_dir: &Path) -> anyhow::Result<()> {
     let new_dlls = root_file_names_with_extension(staging_dir, "dll")?;
     for existing in root_file_names_with_extension(install_dir, "dll")? {
@@ -1630,6 +1916,51 @@ fn updater_cache_root_from_env() -> anyhow::Result<PathBuf> {
         .join("update-cache"))
 }
 
+fn retained_cached_download_tags(
+    state: &UpdaterState,
+    protected_tags: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut retained = protected_tags.clone();
+    if let Some(tag) = state.current_installed_tag.as_ref() {
+        retained.insert(tag.clone());
+    }
+    if let Some(tag) = state.previous_installed_tag.as_ref() {
+        retained.insert(tag.clone());
+    }
+    retained
+}
+
+fn file_modified_before(path: &Path, max_age: Duration) -> anyhow::Result<bool> {
+    let modified_at = fs::metadata(path)
+        .with_context(|| format!("failed to read metadata for {}", display_path(path)))?
+        .modified()
+        .with_context(|| {
+            format!(
+                "failed to read modification time for {}",
+                display_path(path)
+            )
+        })?;
+    let age = SystemTime::now()
+        .duration_since(modified_at)
+        .unwrap_or_default();
+    Ok(age > max_age)
+}
+
+fn remove_dir_best_effort(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(path)
+        .with_context(|| format!("failed to remove directory {}", display_path(path)))
+}
+
+fn remove_file_best_effort(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(path).with_context(|| format!("failed to remove file {}", display_path(path)))
+}
+
 fn apply_authorization_path(cache_root: &Path, token: &str) -> PathBuf {
     cache_root
         .join("pending-apply")
@@ -1657,6 +1988,7 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
     use tempfile::TempDir;
 
     fn release(tag: &str, prerelease: bool) -> CachedRelease {
@@ -1696,6 +2028,45 @@ mod tests {
             tag: "v0.2.0-beta.10".to_string(),
             auth_token: "test-token".to_string(),
         }
+    }
+
+    fn test_updater(temp: &TempDir) -> StandaloneUpdater {
+        let cache_root = temp.path().join("update-cache");
+        StandaloneUpdater {
+            state_path: cache_root.join("state.json"),
+            install_dir: temp.path().join("install"),
+            cache_root,
+            metadata_ttl: Duration::from_secs(30 * 60),
+            http_client: reqwest::Client::builder()
+                .build()
+                .expect("test updater client"),
+        }
+    }
+
+    fn write_pending_apply(
+        cache_root: &Path,
+        token: &str,
+        tag: &str,
+        created_at_unix_secs: u64,
+    ) -> PathBuf {
+        let path = apply_authorization_path(cache_root, token);
+        fs::create_dir_all(path.parent().expect("pending-apply parent")).expect("auth dir");
+        let authorization = ApplyAuthorization {
+            install_dir: PathBuf::from(r"C:\HackArena\standalone"),
+            zip_path: cache_root
+                .join("downloads")
+                .join(tag)
+                .join(expected_zip_asset_name(tag)),
+            staging_dir: cache_root.join("staging").join(tag),
+            tag: tag.to_string(),
+            created_at_unix_secs,
+        };
+        fs::write(
+            &path,
+            serde_json::to_string(&authorization).expect("authorization json"),
+        )
+        .expect("authorization file");
+        path
     }
 
     #[test]
@@ -1925,5 +2296,140 @@ mod tests {
                 .contains("`--zip-path` must point inside the updater download cache"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn cache_maintenance_keeps_current_and_previous_installed_downloads() {
+        let temp = TempDir::new().expect("temp dir");
+        let updater = test_updater(&temp);
+        for tag in ["v0.2.0-beta.10", "v0.2.0-beta.11", "v0.2.0-beta.12"] {
+            fs::create_dir_all(updater.download_dir(tag)).expect("download dir");
+        }
+        let state = UpdaterState {
+            current_installed_tag: Some("v0.2.0-beta.12".to_string()),
+            previous_installed_tag: Some("v0.2.0-beta.10".to_string()),
+            ..UpdaterState::default()
+        };
+
+        updater
+            .try_run_cache_maintenance(&state)
+            .expect("maintenance should succeed");
+
+        assert!(updater.download_dir("v0.2.0-beta.10").exists());
+        assert!(!updater.download_dir("v0.2.0-beta.11").exists());
+        assert!(updater.download_dir("v0.2.0-beta.12").exists());
+    }
+
+    #[test]
+    fn reconcile_installed_tags_tracks_current_and_previous_versions() {
+        let temp = TempDir::new().expect("temp dir");
+        let updater = test_updater(&temp);
+        let mut state = UpdaterState::default();
+
+        updater
+            .reconcile_installed_tags(&mut state, "v0.2.0-beta.11")
+            .expect("first reconcile should succeed");
+        assert_eq!(
+            state.current_installed_tag.as_deref(),
+            Some("v0.2.0-beta.11")
+        );
+        assert!(state.previous_installed_tag.is_none());
+
+        updater
+            .reconcile_installed_tags(&mut state, "v0.2.0-beta.12")
+            .expect("second reconcile should succeed");
+        assert_eq!(
+            state.current_installed_tag.as_deref(),
+            Some("v0.2.0-beta.12")
+        );
+        assert_eq!(
+            state.previous_installed_tag.as_deref(),
+            Some("v0.2.0-beta.11")
+        );
+    }
+
+    #[test]
+    fn cache_maintenance_preserves_pending_apply_tag() {
+        let temp = TempDir::new().expect("temp dir");
+        let updater = test_updater(&temp);
+        for tag in ["v0.2.0-beta.10", "v0.2.0-beta.11", "v0.2.0-beta.12"] {
+            fs::create_dir_all(updater.download_dir(tag)).expect("download dir");
+            fs::create_dir_all(updater.staging_dir(tag)).expect("staging dir");
+        }
+        write_pending_apply(
+            &updater.cache_root,
+            "protect-old",
+            "v0.2.0-beta.10",
+            now_unix_secs(),
+        );
+        let state = UpdaterState {
+            current_installed_tag: Some("v0.2.0-beta.12".to_string()),
+            previous_installed_tag: Some("v0.2.0-beta.11".to_string()),
+            ..UpdaterState::default()
+        };
+
+        updater
+            .try_run_cache_maintenance(&state)
+            .expect("maintenance should succeed");
+
+        assert!(updater.download_dir("v0.2.0-beta.10").exists());
+        assert!(updater.download_dir("v0.2.0-beta.11").exists());
+        assert!(updater.download_dir("v0.2.0-beta.12").exists());
+        assert!(updater.staging_dir("v0.2.0-beta.10").exists());
+        assert!(!updater.staging_dir("v0.2.0-beta.11").exists());
+        assert!(!updater.staging_dir("v0.2.0-beta.12").exists());
+    }
+
+    #[test]
+    fn cache_maintenance_removes_stale_and_invalid_pending_apply_files() {
+        let temp = TempDir::new().expect("temp dir");
+        let updater = test_updater(&temp);
+        let stale_path = write_pending_apply(
+            &updater.cache_root,
+            "stale",
+            "v0.2.0-beta.10",
+            now_unix_secs().saturating_sub(CACHE_STALE_MAX_AGE.as_secs() + 1),
+        );
+        let invalid_path = apply_authorization_path(&updater.cache_root, "invalid");
+        fs::create_dir_all(invalid_path.parent().expect("pending-apply parent")).expect("auth dir");
+        fs::write(&invalid_path, "{not-json").expect("invalid auth file");
+
+        let protected = updater
+            .cleanup_pending_apply_dir()
+            .expect("pending cleanup should succeed");
+
+        assert!(protected.is_empty());
+        assert!(!stale_path.exists());
+        assert!(!invalid_path.exists());
+    }
+
+    #[test]
+    fn cleanup_runner_dir_removes_old_files_and_keeps_fresh_ones() {
+        let temp = TempDir::new().expect("temp dir");
+        let runner_dir = temp.path().join("runner");
+        fs::create_dir_all(&runner_dir).expect("runner dir");
+        let old_runner = runner_dir.join("old.exe");
+        let fresh_runner = runner_dir.join("fresh.exe");
+        fs::write(&old_runner, b"old").expect("old runner");
+        thread::sleep(Duration::from_millis(1100));
+        fs::write(&fresh_runner, b"fresh").expect("fresh runner");
+
+        cleanup_runner_dir_with_max_age(&runner_dir, Duration::from_secs(1))
+            .expect("runner cleanup should succeed");
+
+        assert!(!old_runner.exists());
+        assert!(fresh_runner.exists());
+    }
+
+    #[test]
+    fn cleanup_staging_dir_after_apply_removes_directory() {
+        let temp = TempDir::new().expect("temp dir");
+        let staging_dir = temp.path().join("staging").join("v0.2.0-beta.12");
+        fs::create_dir_all(&staging_dir).expect("staging dir");
+        fs::write(staging_dir.join("ha3-standalone.exe"), b"binary").expect("staged file");
+
+        cleanup_staging_dir_after_apply(&staging_dir);
+
+        assert!(!staging_dir.exists());
     }
 }
