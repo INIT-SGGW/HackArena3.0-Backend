@@ -5,9 +5,6 @@ config_version = 1
 # Logging verbosity: minimal | verbose | debug | info | warn | error
 log_level = "info"
 
-# Metadata cache TTL for GitHub update checks. Default: 30
-# update_check_cache_ttl_minutes = 30
-
 # gRPC / gRPC-web endpoint used by wrappers and frontend
 listen_addr = "0.0.0.0:50051"
 

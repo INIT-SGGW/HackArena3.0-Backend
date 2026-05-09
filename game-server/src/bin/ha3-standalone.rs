@@ -12,12 +12,8 @@ compile_error!("feature `ide` is for editor use only; do not enable in release b
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use game_server::config::Config;
-use game_server::standalone_updater::{
-    DEFAULT_UPDATE_CACHE_TTL_MINUTES, StartupArgs, StartupUpdateOutcome, UpdaterConfig,
-};
 use serde::Deserialize;
 
 const STANDALONE_CONFIG_FILENAME: &str = "standalone.toml";
@@ -37,13 +33,11 @@ struct StandaloneTomlConfig {
     tracks_dir: Option<String>,
     bolids_dir: Option<String>,
     simulation_hz: Option<u32>,
-    update_check_cache_ttl_minutes: Option<toml::Value>,
 }
 
 #[derive(Debug)]
 struct StandaloneTomlResolvedConfig {
     default_log_filter: &'static str,
-    update_check_cache_ttl: Duration,
     warnings: Vec<String>,
 }
 
@@ -53,7 +47,6 @@ struct StandaloneEnvLoadSummary {
     legacy_env: Option<PathBuf>,
     fallback_env: Option<PathBuf>,
     default_log_filter: &'static str,
-    update_check_cache_ttl: Duration,
     warnings: Vec<String>,
 }
 
@@ -64,9 +57,6 @@ impl Default for StandaloneEnvLoadSummary {
             legacy_env: None,
             fallback_env: None,
             default_log_filter: "info",
-            update_check_cache_ttl: Duration::from_secs(
-                DEFAULT_UPDATE_CACHE_TTL_MINUTES.saturating_mul(60),
-            ),
             warnings: Vec::new(),
         }
     }
@@ -74,30 +64,12 @@ impl Default for StandaloneEnvLoadSummary {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let startup_args = StartupArgs::parse_from_env()?;
-    if startup_args.show_help {
-        StartupArgs::print_help("ha3-standalone.exe");
-        return Ok(());
-    }
-
     let load_summary = load_standalone_process_env()?;
     let _tracing_guard = game_server::init_tracing_with_default_filter(
         "ha3-standalone",
         Some(load_summary.default_log_filter),
     )?;
     log_standalone_startup_summary(&load_summary);
-
-    if let StartupUpdateOutcome::ExitForUpdate =
-        game_server::standalone_updater::run_startup_update(
-            &startup_args,
-            UpdaterConfig {
-                metadata_ttl: load_summary.update_check_cache_ttl,
-            },
-        )
-        .await?
-    {
-        return Ok(());
-    }
 
     let cfg = Arc::new(Config::load_or_exit());
 
@@ -110,7 +82,6 @@ fn load_standalone_process_env() -> Result<StandaloneEnvLoadSummary, Box<dyn Err
     if let Some(path) = find_file_upwards(STANDALONE_CONFIG_FILENAME) {
         let resolved = apply_standalone_toml(&path)?;
         summary.default_log_filter = resolved.default_log_filter;
-        summary.update_check_cache_ttl = resolved.update_check_cache_ttl;
         summary.warnings.extend(resolved.warnings);
         summary.standalone_toml = Some(path);
     }
@@ -154,13 +125,9 @@ fn apply_standalone_toml(path: &Path) -> Result<StandaloneTomlResolvedConfig, Bo
     set_env_if_missing("BOLIDS_DIR", config.bolids_dir);
     set_env_if_missing("SIMULATION_HZ", config.simulation_hz.map(|v| v.to_string()));
 
-    let (update_check_cache_ttl, warnings) =
-        parse_update_check_cache_ttl(config.update_check_cache_ttl_minutes.as_ref());
-
     Ok(StandaloneTomlResolvedConfig {
         default_log_filter: standalone_log_filter(config.log_level.as_deref())?,
-        update_check_cache_ttl,
-        warnings,
+        warnings: Vec::new(),
     })
 }
 
@@ -199,29 +166,6 @@ fn standalone_log_filter(value: Option<&str>) -> Result<&'static str, Box<dyn Er
         )
         .into()),
     }
-}
-
-fn parse_update_check_cache_ttl(value: Option<&toml::Value>) -> (Duration, Vec<String>) {
-    let default_ttl = Duration::from_secs(DEFAULT_UPDATE_CACHE_TTL_MINUTES.saturating_mul(60));
-    let Some(value) = value else {
-        return (default_ttl, Vec::new());
-    };
-
-    let invalid_message = format!(
-        "invalid `update_check_cache_ttl_minutes` in {STANDALONE_CONFIG_FILENAME}; using default of {DEFAULT_UPDATE_CACHE_TTL_MINUTES} minutes"
-    );
-
-    let Some(minutes) = value.as_integer() else {
-        return (default_ttl, vec![invalid_message]);
-    };
-    if minutes <= 0 {
-        return (default_ttl, vec![invalid_message]);
-    }
-    let Ok(minutes) = u64::try_from(minutes) else {
-        return (default_ttl, vec![invalid_message]);
-    };
-
-    (Duration::from_secs(minutes.saturating_mul(60)), Vec::new())
 }
 
 fn log_standalone_startup_summary(load_summary: &StandaloneEnvLoadSummary) {
@@ -301,31 +245,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ttl_defaults_when_missing() {
-        let (ttl, warnings) = parse_update_check_cache_ttl(None);
-        assert_eq!(
-            ttl,
-            Duration::from_secs(DEFAULT_UPDATE_CACHE_TTL_MINUTES.saturating_mul(60))
+    fn standalone_log_filter_rejects_invalid_values() {
+        let err = standalone_log_filter(Some("loud")).expect_err("should reject invalid value");
+        assert!(
+            err.to_string().contains("invalid standalone log_level"),
+            "unexpected error: {err}"
         );
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn ttl_uses_positive_integer_minutes() {
-        let value = toml::Value::Integer(45);
-        let (ttl, warnings) = parse_update_check_cache_ttl(Some(&value));
-        assert_eq!(ttl, Duration::from_secs(45 * 60));
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn ttl_warns_on_invalid_values() {
-        let zero = toml::Value::Integer(0);
-        let (ttl, warnings) = parse_update_check_cache_ttl(Some(&zero));
-        assert_eq!(
-            ttl,
-            Duration::from_secs(DEFAULT_UPDATE_CACHE_TTL_MINUTES.saturating_mul(60))
-        );
-        assert_eq!(warnings.len(), 1);
     }
 }

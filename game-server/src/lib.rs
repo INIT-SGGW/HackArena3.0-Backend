@@ -15,8 +15,6 @@ pub mod local;
 pub mod runtime;
 pub mod server;
 pub mod services;
-#[cfg(feature = "standalone")]
-pub mod standalone_updater;
 
 use std::error::Error;
 use std::sync::Arc;
