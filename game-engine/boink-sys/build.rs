@@ -64,12 +64,26 @@ fn setup_linux(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
 
     emit_rerun_for_dir(&lib_dir);
 
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    let Some(versioned_runtime) = select_linux_versioned_runtime(&lib_dir) else {
+        if profile == "release" {
+            panic!(
+                "boink-sys: no versioned Linux runtime artifact matching libboink.so.<major>.<minor>... in {}",
+                lib_dir.display()
+            );
+        } else {
+            println!(
+                "cargo:warning=boink-sys: no versioned Linux runtime artifact matching libboink.so.<major>.<minor>... in {}",
+                lib_dir.display()
+            );
+            return;
+        }
+    };
+    let link_dir = materialize_linux_runtime_aliases(&versioned_runtime);
+
+    println!("cargo:rustc-link-search=native={}", link_dir.display());
     println!("cargo:rustc-link-lib=dylib=boink");
     // Make runtime loader search next to the executable in release artifacts.
     println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
-    copy_runtime_lib(&lib_dir, "libboink.so");
-    copy_optional_runtime_lib(&lib_dir, "libboink.so.1");
 }
 
 fn setup_macos(manifest_dir: &PathBuf, target_arch: &str, profile: &str) {
@@ -165,6 +179,99 @@ fn copy_optional_runtime_lib(lib_dir: &Path, file_name: &str) {
             "Failed to copy {} to {}: {}",
             source.display(),
             profile_dir.display(),
+            err
+        );
+    }
+}
+
+fn select_linux_versioned_runtime(lib_dir: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<(Vec<u64>, PathBuf)> = fs::read_dir(lib_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_file() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?;
+            let version = parse_linux_runtime_version(name)?;
+            Some((version, path))
+        })
+        .collect();
+
+    candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
+    candidates.pop().map(|(_, path)| path)
+}
+
+fn parse_linux_runtime_version(file_name: &str) -> Option<Vec<u64>> {
+    let suffix = file_name.strip_prefix("libboink.so.")?;
+    let segments: Vec<u64> = suffix
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if segments.len() < 2 {
+        return None;
+    }
+    Some(segments)
+}
+
+fn materialize_linux_runtime_aliases(source: &Path) -> PathBuf {
+    let versioned_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("boink-sys: Linux runtime source file name is not valid UTF-8");
+    let major = parse_linux_runtime_version(versioned_name)
+        .and_then(|segments| segments.first().copied())
+        .expect("boink-sys: failed to derive Linux runtime major version");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let link_dir = out_dir.join("boink-linux-runtime");
+    if link_dir.exists() {
+        fs::remove_dir_all(&link_dir).unwrap_or_else(|err| {
+            panic!(
+                "Failed to clean Linux boink staging dir {}: {}",
+                link_dir.display(),
+                err
+            )
+        });
+    }
+    fs::create_dir_all(&link_dir).unwrap_or_else(|err| {
+        panic!(
+            "Failed to create Linux boink staging dir {}: {}",
+            link_dir.display(),
+            err
+        )
+    });
+
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("Unexpected OUT_DIR layout (target/<profile>/build/..)");
+
+    for file_name in [
+        versioned_name.to_string(),
+        format!("libboink.so.{major}"),
+        "libboink.so".to_string(),
+    ] {
+        copy_file(source, &link_dir.join(&file_name));
+        copy_file(source, &profile_dir.join(&file_name));
+    }
+
+    link_dir
+}
+
+fn copy_file(source: &Path, destination: &Path) {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|err| {
+            panic!("Failed to create parent dir {}: {}", parent.display(), err)
+        });
+    }
+    if let Err(err) = fs::copy(source, destination) {
+        panic!(
+            "Failed to copy {} to {}: {}",
+            source.display(),
+            destination.display(),
             err
         );
     }

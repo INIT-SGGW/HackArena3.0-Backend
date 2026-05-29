@@ -128,6 +128,32 @@ EOF
   chmod +x "$launcher_path"
 }
 
+normalize_linux_boink_runtime_aliases() {
+  local package_root="$1"
+  local versioned_name
+  versioned_name="$(
+    find "$package_root" -maxdepth 1 -type f -name 'libboink.so.*.*' -printf '%f\n' \
+      | sort -V \
+      | tail -n 1
+  )"
+
+  if [[ -z "$versioned_name" ]]; then
+    echo "Missing versioned Linux boink runtime in $package_root (expected libboink.so.<major>.<minor>...)" >&2
+    exit 1
+  fi
+
+  if [[ ! "$versioned_name" =~ ^libboink\.so\.([0-9]+)\.[0-9].*$ ]]; then
+    echo "Invalid Linux boink runtime filename: $versioned_name" >&2
+    exit 1
+  fi
+
+  local major="${BASH_REMATCH[1]}"
+  local versioned_path="$package_root/$versioned_name"
+
+  cp -f "$versioned_path" "$package_root/libboink.so.$major"
+  cp -f "$versioned_path" "$package_root/libboink.so"
+}
+
 copy_required_files() {
   local package_root="$1"
   local bin_path="$2"
@@ -152,10 +178,7 @@ copy_required_files() {
       \( -name "*.so" -o -name "*.so.*" \) \
       -exec cp -a {} "$package_root/" \;
   fi
-
-  if [[ -f "$package_root/libboink.so" && ! -e "$package_root/libboink.so.1" ]]; then
-    cp -f "$package_root/libboink.so" "$package_root/libboink.so.1"
-  fi
+  normalize_linux_boink_runtime_aliases "$package_root"
 
   local bolids_source="$REPO_ROOT/game-server/assets/bolids"
   if [[ -d "$bolids_source" ]]; then
