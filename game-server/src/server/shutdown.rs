@@ -1,5 +1,6 @@
 //! Graceful shutdown handling for server tasks.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::broadcast;
@@ -14,15 +15,43 @@ pub async fn shutdown_signal(shutdown_rx: &mut broadcast::Receiver<()>) {
 
 /// Coordinates shutdown sequencing and timeouts.
 pub async fn orchestrate_shutdown(
+    grpc_task: JoinHandle<()>,
+    engine_task: JoinHandle<()>,
+    grpc_shutdown_tx: broadcast::Sender<()>,
+    engine_shutdown_tx: broadcast::Sender<()>,
+    active_connections: Arc<AtomicUsize>,
+) {
+    orchestrate_shutdown_with_signal(
+        grpc_task,
+        engine_task,
+        grpc_shutdown_tx,
+        engine_shutdown_tx,
+        active_connections,
+        std::future::pending::<()>(),
+    )
+    .await;
+}
+
+/// Coordinates shutdown sequencing and timeouts with an additional external trigger.
+pub async fn orchestrate_shutdown_with_signal<F>(
     mut grpc_task: JoinHandle<()>,
     mut engine_task: JoinHandle<()>,
     grpc_shutdown_tx: broadcast::Sender<()>,
     engine_shutdown_tx: broadcast::Sender<()>,
     active_connections: Arc<AtomicUsize>,
-) {
+    external_shutdown: F,
+) where
+    F: Future<Output = ()>,
+{
+    tokio::pin!(external_shutdown);
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("shutdown signal (Ctrl+C) received");
+            graceful_grpc_shutdown(&mut grpc_task, &grpc_shutdown_tx, &active_connections).await;
+            shutdown_engine(&mut engine_task, &engine_shutdown_tx).await;
+        }
+        _ = &mut external_shutdown => {
+            tracing::info!("external shutdown requested");
             graceful_grpc_shutdown(&mut grpc_task, &grpc_shutdown_tx, &active_connections).await;
             shutdown_engine(&mut engine_task, &engine_shutdown_tx).await;
         }

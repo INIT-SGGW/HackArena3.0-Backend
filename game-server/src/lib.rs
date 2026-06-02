@@ -17,6 +17,7 @@ pub mod server;
 pub mod services;
 
 use std::error::Error;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -37,10 +38,23 @@ const USER_LOG_TARGET: &str = "ha3_standalone::user";
 
 /// Run the game server using the provided configuration.
 pub async fn run(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
+    run_until_shutdown(cfg, std::future::pending::<()>()).await
+}
+
+/// Run the game server until Ctrl+C, internal task exit, or an external shutdown signal.
+pub async fn run_until_shutdown<F>(
+    cfg: Arc<Config>,
+    shutdown_signal: F,
+) -> Result<(), Box<dyn Error>>
+where
+    F: Future<Output = ()> + 'static,
+{
     #[cfg(not(feature = "standalone"))]
     tracing::info!("gRPC bind address: {}", cfg.listen_addr);
     let local = LocalSet::new();
-    local.run_until(async move { run_app(cfg).await }).await
+    local
+        .run_until(async move { run_app(cfg, shutdown_signal).await })
+        .await
 }
 
 /// Initialize tracing with environment-configured filters and file persistence.
@@ -85,7 +99,10 @@ pub fn init_tracing_with_default_filter(
     Ok(guard)
 }
 
-async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
+async fn run_app<F>(cfg: Arc<Config>, shutdown_signal: F) -> Result<(), Box<dyn Error>>
+where
+    F: Future<Output = ()>,
+{
     #[cfg(feature = "official")]
     let db_pool = {
         let pool = crate::db::connect_and_migrate(
@@ -179,12 +196,13 @@ async fn run_app(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
             }
         }
     });
-    crate::server::shutdown::orchestrate_shutdown(
+    crate::server::shutdown::orchestrate_shutdown_with_signal(
         grpc_task,
         engine_task,
         grpc_shutdown_tx,
         engine_shutdown_tx,
         active_connections,
+        shutdown_signal,
     )
     .await;
 
