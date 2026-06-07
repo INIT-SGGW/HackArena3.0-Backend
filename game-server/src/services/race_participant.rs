@@ -3809,85 +3809,81 @@ async fn run_participant_stream(
                             }
                             continue;
                         }
-                        #[cfg(feature = "official")]
-                        {
-                            let cooldown_remaining_ms = runtime_store
-                                .back_to_track_cooldown_remaining_ms(
+                        let cooldown_remaining_ms = runtime_store
+                            .back_to_track_cooldown_remaining_ms(
+                                self_public_car_id,
+                                frame.server_time_ms,
+                            );
+                        if cooldown_remaining_ms > 0 {
+                            let ack = participant_command_ack(
+                                command.client_seq,
+                                ParticipantCommandType::BackToTrack,
+                                ParticipantCommandStatus::Rejected,
+                                applies_from_tick,
+                                ParticipantCommandRejectReason::CooldownActive,
+                                cooldown_remaining_ms,
+                            );
+
+                            if !send_participant_event(
+                                &tx,
+                                &mut server_seq,
+                                ParticipantServerPayload::CommandAck(ack),
+                            )
+                            .await
+                            {
+                                cleanup_participant_car(
+                                    "command-ack-send-failed",
+                                    &engine,
+                                    runtime_store.as_ref(),
                                     self_public_car_id,
-                                    frame.server_time_ms,
-                                );
-                            if cooldown_remaining_ms > 0 {
-                                let ack = participant_command_ack(
-                                    command.client_seq,
-                                    ParticipantCommandType::BackToTrack,
-                                    ParticipantCommandStatus::Rejected,
-                                    applies_from_tick,
-                                    ParticipantCommandRejectReason::CooldownActive,
-                                    cooldown_remaining_ms,
-                                );
-
-                                if !send_participant_event(
-                                    &tx,
-                                    &mut server_seq,
-                                    ParticipantServerPayload::CommandAck(ack),
+                                    &self_target,
+                                    self_engine_car_id,
                                 )
-                                .await
-                                {
-                                    cleanup_participant_car(
-                                        "command-ack-send-failed",
-                                        &engine,
-                                        runtime_store.as_ref(),
-                                        self_public_car_id,
-                                        &self_target,
-                                        self_engine_car_id,
-                                    )
-                                    .await;
-                                    break;
-                                }
-                                continue;
+                                .await;
+                                break;
                             }
-                            let in_pit = frame
-                                .cars
-                                .get(&self_public_car_id)
-                                .map(|car| car.state.pitstop_state.is_in_any_zone())
-                                .unwrap_or(false);
-                            if in_pit {
-                                let ack = participant_command_ack(
-                                    command.client_seq,
-                                    ParticipantCommandType::BackToTrack,
-                                    ParticipantCommandStatus::Rejected,
-                                    applies_from_tick,
-                                    ParticipantCommandRejectReason::InPit,
-                                    0,
-                                );
+                            continue;
+                        }
+                        let in_pit = frame
+                            .cars
+                            .get(&self_public_car_id)
+                            .map(|car| car.state.pitstop_state.is_in_any_zone())
+                            .unwrap_or(false);
+                        if in_pit {
+                            let ack = participant_command_ack(
+                                command.client_seq,
+                                ParticipantCommandType::BackToTrack,
+                                ParticipantCommandStatus::Rejected,
+                                applies_from_tick,
+                                ParticipantCommandRejectReason::InPit,
+                                0,
+                            );
 
-                                if !send_participant_event(
-                                    &tx,
-                                    &mut server_seq,
-                                    ParticipantServerPayload::CommandAck(ack),
+                            if !send_participant_event(
+                                &tx,
+                                &mut server_seq,
+                                ParticipantServerPayload::CommandAck(ack),
+                            )
+                            .await
+                            {
+                                cleanup_participant_car(
+                                    "command-ack-send-failed",
+                                    &engine,
+                                    runtime_store.as_ref(),
+                                    self_public_car_id,
+                                    &self_target,
+                                    self_engine_car_id,
                                 )
-                                .await
-                                {
-                                    cleanup_participant_car(
-                                        "command-ack-send-failed",
-                                        &engine,
-                                        runtime_store.as_ref(),
-                                        self_public_car_id,
-                                        &self_target,
-                                        self_engine_car_id,
-                                    )
-                                    .await;
-                                    break;
-                                }
-                                continue;
+                                .await;
+                                break;
                             }
+                            continue;
                         }
                         let ack = match engine
                             .set_car_back_to_track_in(self_target.clone(), self_engine_car_id)
                             .await
                         {
                             Ok(()) => {
-                                #[cfg(feature = "official")]
                                 runtime_store.mark_back_to_track_applied(
                                     self_public_car_id,
                                     frame.server_time_ms,
