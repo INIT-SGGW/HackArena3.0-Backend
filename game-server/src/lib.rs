@@ -32,9 +32,19 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use runtime::engine_worker::EngineClient;
 
 use crate::config::Config;
+#[cfg(feature = "standalone")]
+use crate::services::race::{FrameHub, RaceRuntimeStore};
 
 #[cfg(feature = "standalone")]
 const USER_LOG_TARGET: &str = "ha3_standalone::user";
+
+#[cfg(feature = "standalone")]
+#[derive(Clone)]
+pub struct StandaloneAutomationHandles {
+    pub engine: EngineClient,
+    pub runtime_store: Arc<RaceRuntimeStore>,
+    pub frame_hub: FrameHub,
+}
 
 /// Run the game server using the provided configuration.
 pub async fn run(cfg: Arc<Config>) -> Result<(), Box<dyn Error>> {
@@ -53,7 +63,31 @@ where
     tracing::info!("gRPC bind address: {}", cfg.listen_addr);
     let local = LocalSet::new();
     local
-        .run_until(async move { run_app(cfg, shutdown_signal).await })
+        .run_until(async move {
+            #[cfg(feature = "standalone")]
+            {
+                run_app(cfg, shutdown_signal, None).await
+            }
+            #[cfg(not(feature = "standalone"))]
+            {
+                run_app(cfg, shutdown_signal).await
+            }
+        })
+        .await
+}
+
+#[cfg(feature = "standalone")]
+pub async fn run_until_shutdown_with_automation<F>(
+    cfg: Arc<Config>,
+    shutdown_signal: F,
+    automation_handles_tx: tokio::sync::oneshot::Sender<StandaloneAutomationHandles>,
+) -> Result<(), Box<dyn Error>>
+where
+    F: Future<Output = ()> + 'static,
+{
+    let local = LocalSet::new();
+    local
+        .run_until(async move { run_app(cfg, shutdown_signal, Some(automation_handles_tx)).await })
         .await
 }
 
@@ -99,7 +133,13 @@ pub fn init_tracing_with_default_filter(
     Ok(guard)
 }
 
-async fn run_app<F>(cfg: Arc<Config>, shutdown_signal: F) -> Result<(), Box<dyn Error>>
+async fn run_app<F>(
+    cfg: Arc<Config>,
+    shutdown_signal: F,
+    #[cfg(feature = "standalone")] automation_handles_tx: Option<
+        tokio::sync::oneshot::Sender<StandaloneAutomationHandles>,
+    >,
+) -> Result<(), Box<dyn Error>>
 where
     F: Future<Output = ()>,
 {
@@ -186,6 +226,8 @@ where
                 db_pool.clone(),
                 grpc_shutdown_rx,
                 active_connections,
+                #[cfg(feature = "standalone")]
+                automation_handles_tx,
                 #[cfg(all(feature = "local", not(feature = "standalone")))]
                 broker_registration_state.clone(),
             )

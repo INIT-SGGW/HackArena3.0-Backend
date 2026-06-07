@@ -210,10 +210,7 @@ impl LocalRaceStateStore {
         if race.race_id != race_id {
             return false;
         }
-        matches!(
-            race_phase(normalize_race_phase(race.clone()).phase),
-            LocalRacePhase::Finished | LocalRacePhase::Aborted
-        )
+        race_phase(normalize_race_phase(race.clone()).phase) != LocalRacePhase::Running
     }
 }
 

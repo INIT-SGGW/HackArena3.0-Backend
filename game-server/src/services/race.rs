@@ -192,7 +192,7 @@ impl RaceServiceImpl {
             .await
         {
             return Err(Status::failed_precondition(
-                "standalone local race is finished",
+                "standalone local race accepts gameplay commands only while running",
             ));
         }
         Ok(())

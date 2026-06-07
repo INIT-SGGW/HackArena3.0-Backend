@@ -9,6 +9,7 @@ compile_error!("ha3-standalone cannot be built with --features official");
 #[cfg(all(feature = "ide", not(debug_assertions)))]
 compile_error!("feature `ide` is for editor use only; do not enable in release builds");
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::io;
@@ -17,15 +18,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use game_server::StandaloneAutomationHandles;
 use game_server::config::Config;
 use proto::race::v1::local_race_admin_service_client::LocalRaceAdminServiceClient;
 use proto::race::v1::local_sandbox_admin_service_client::LocalSandboxAdminServiceClient;
 use proto::race::v1::race_table_query_service_client::RaceTableQueryServiceClient;
 use proto::race::v1::{
     CloseLocalRaceRequest, CreateLocalRaceRequest, GetLocalRuntimeStateRequest,
-    GetRaceTableRequest, LocalRaceConfigInput, LocalRacePhase, LocalRaceTableSnapshot,
-    LocalRaceTableTarget, LocalRuntimeState, RaceTableEntryStatus, RaceTableTarget,
-    StartLocalRaceCountdownRequest, race_table_snapshot, race_table_target,
+    GetRaceTableRequest, GhostModeSettings, LocalRaceConfigInput, LocalRacePhase,
+    LocalRaceTableSnapshot, LocalRaceTableTarget, LocalRuntimeState, RaceTableEntryStatus,
+    RaceTableTarget, StartLocalRaceCountdownRequest, race_table_snapshot, race_table_target,
 };
 use serde::{Deserialize, Serialize};
 use tonic::transport::{Channel, Endpoint};
@@ -71,9 +73,28 @@ struct RunRaceScenarioFile {
     race_name: Option<String>,
     countdown_seconds: Option<u32>,
     max_participants: Option<u32>,
+    ghost_mode: Option<RunRaceGhostModeFile>,
+    auto_back_to_track: Option<RunRaceAutoBackToTrackFile>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize)]
+struct RunRaceGhostModeFile {
+    enabled: bool,
+    enter_speed_max_mps: f32,
+    exit_speed_min_mps: f32,
+    enter_delay_ms: u32,
+    exit_delay_ms: u32,
+    until_completed_laps: u32,
+    vehicle_overlap_exit_delay_ms: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunRaceAutoBackToTrackFile {
+    speed_kmh_below: f32,
+    stuck_for_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct RunRaceScenario {
     map_id: String,
     race_duration_sec: u32,
@@ -81,6 +102,20 @@ struct RunRaceScenario {
     race_name: String,
     countdown_seconds: u32,
     max_participants: u32,
+    ghost_mode: Option<GhostModeSettings>,
+    auto_back_to_track: Option<RunRaceAutoBackToTrackConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RunRaceAutoBackToTrackConfig {
+    speed_kmh_below: f32,
+    stuck_for_seconds: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RunRaceAutoBackToTrackCarState {
+    stuck_since_server_ms: Option<u64>,
+    accepted_count: u32,
 }
 
 #[derive(Debug)]
@@ -100,6 +135,7 @@ struct StandaloneLocalRaceResultsFile {
     status: String,
     expected_participants: u32,
     joined_participants: u32,
+    auto_back_to_track_enabled: bool,
     participants: Vec<StandaloneLocalRaceResultParticipant>,
 }
 
@@ -112,6 +148,7 @@ struct StandaloneLocalRaceResultParticipant {
     gap_to_leader_ms: Option<u32>,
     laps_behind: u32,
     in_pit: bool,
+    auto_back_to_track_count: u32,
     status: String,
 }
 
@@ -442,6 +479,14 @@ fn normalize_run_race_scenario(
         )
         .into());
     }
+    let ghost_mode = file
+        .ghost_mode
+        .map(normalize_run_race_ghost_mode)
+        .transpose()?;
+    let auto_back_to_track = file
+        .auto_back_to_track
+        .map(normalize_auto_back_to_track_config)
+        .transpose()?;
 
     Ok(RunRaceScenario {
         map_id,
@@ -450,27 +495,102 @@ fn normalize_run_race_scenario(
         race_name,
         countdown_seconds: file.countdown_seconds.unwrap_or(0),
         max_participants,
+        ghost_mode,
+        auto_back_to_track,
+    })
+}
+
+fn normalize_run_race_ghost_mode(
+    file: RunRaceGhostModeFile,
+) -> Result<GhostModeSettings, Box<dyn Error>> {
+    if !file.enter_speed_max_mps.is_finite() || file.enter_speed_max_mps < 0.0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ghost_mode.enter_speed_max_mps must be finite and >= 0",
+        )
+        .into());
+    }
+    if !file.exit_speed_min_mps.is_finite() || file.exit_speed_min_mps < 0.0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ghost_mode.exit_speed_min_mps must be finite and >= 0",
+        )
+        .into());
+    }
+    if file.enter_speed_max_mps > file.exit_speed_min_mps {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ghost_mode.enter_speed_max_mps must be <= ghost_mode.exit_speed_min_mps",
+        )
+        .into());
+    }
+
+    Ok(GhostModeSettings {
+        enabled: file.enabled,
+        enter_speed_max_mps: file.enter_speed_max_mps,
+        exit_speed_min_mps: file.exit_speed_min_mps,
+        enter_delay_ms: file.enter_delay_ms,
+        exit_delay_ms: file.exit_delay_ms,
+        until_completed_laps: file.until_completed_laps,
+        vehicle_overlap_exit_delay_ms: file.vehicle_overlap_exit_delay_ms,
+    })
+}
+
+fn normalize_auto_back_to_track_config(
+    file: RunRaceAutoBackToTrackFile,
+) -> Result<RunRaceAutoBackToTrackConfig, Box<dyn Error>> {
+    if !file.speed_kmh_below.is_finite() || file.speed_kmh_below <= 0.0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "auto_back_to_track.speed_kmh_below must be greater than zero",
+        )
+        .into());
+    }
+    if file.stuck_for_seconds == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "auto_back_to_track.stuck_for_seconds must be greater than zero",
+        )
+        .into());
+    }
+
+    Ok(RunRaceAutoBackToTrackConfig {
+        speed_kmh_below: file.speed_kmh_below,
+        stuck_for_seconds: file.stuck_for_seconds,
     })
 }
 
 async fn run_race_mode(cfg: Arc<Config>, args: RunRaceArgs) -> Result<(), Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (automation_tx, automation_rx) =
+        tokio::sync::oneshot::channel::<StandaloneAutomationHandles>();
     let controller_cfg = cfg.clone();
     let controller_future = async move {
-        let result = run_race_controller(controller_cfg, args).await;
+        let automation = automation_rx
+            .await
+            .map_err(|_| io::Error::other("standalone automation handles were not initialized"))?;
+        let result = run_race_controller(controller_cfg, args, automation).await;
         let _ = shutdown_tx.send(());
         result
     };
-    let run_future = game_server::run_until_shutdown(cfg, async move {
-        let _ = shutdown_rx.await;
-    });
+    let run_future = game_server::run_until_shutdown_with_automation(
+        cfg,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+        automation_tx,
+    );
     let (controller_result, run_result) = tokio::join!(controller_future, run_future);
 
     run_result?;
     controller_result
 }
 
-async fn run_race_controller(cfg: Arc<Config>, args: RunRaceArgs) -> Result<(), Box<dyn Error>> {
+async fn run_race_controller(
+    cfg: Arc<Config>,
+    args: RunRaceArgs,
+    automation: StandaloneAutomationHandles,
+) -> Result<(), Box<dyn Error>> {
     let scenario = load_run_race_scenario(&args.scenario_path)?;
     let endpoint_url = standalone_grpc_endpoint_url(cfg.listen_addr);
 
@@ -496,7 +616,7 @@ async fn run_race_controller(cfg: Arc<Config>, args: RunRaceArgs) -> Result<(), 
                 map_id: scenario.map_id.clone(),
                 race_duration_sec: scenario.race_duration_sec,
                 time_of_day: None,
-                ghost_mode: None,
+                ghost_mode: scenario.ghost_mode.clone(),
                 weather: None,
                 max_participants: scenario.max_participants,
             }),
@@ -543,8 +663,13 @@ async fn run_race_controller(cfg: Arc<Config>, args: RunRaceArgs) -> Result<(), 
         })
         .await?;
 
-    let finished_state =
-        wait_for_finished_race(&mut sandbox_client, created_race.race_id.as_str()).await?;
+    let (finished_state, auto_back_to_track_counts) = wait_for_finished_race(
+        &mut sandbox_client,
+        created_race.race_id.as_str(),
+        scenario.auto_back_to_track.as_ref(),
+        &automation,
+    )
+    .await?;
     let active_race = finished_state.active_race.as_ref().ok_or_else(|| {
         io::Error::other("finished local race disappeared before results collection")
     })?;
@@ -559,6 +684,8 @@ async fn run_race_controller(cfg: Arc<Config>, args: RunRaceArgs) -> Result<(), 
         snapshot,
         scenario.expected_participants,
         finalized_at_unix_ms,
+        scenario.auto_back_to_track.is_some(),
+        &auto_back_to_track_counts,
     );
 
     print_run_race_results(&results);
@@ -667,7 +794,10 @@ async fn wait_for_expected_participants(
 async fn wait_for_finished_race(
     client: &mut LocalSandboxAdminServiceClient<Channel>,
     race_id: &str,
-) -> Result<LocalRuntimeState, Box<dyn Error>> {
+    auto_back_to_track: Option<&RunRaceAutoBackToTrackConfig>,
+    automation: &StandaloneAutomationHandles,
+) -> Result<(LocalRuntimeState, HashMap<u64, u32>), Box<dyn Error>> {
+    let mut auto_back_to_track_state: HashMap<u64, RunRaceAutoBackToTrackCarState> = HashMap::new();
     loop {
         let state = get_local_runtime_state(client).await?;
         let race = state
@@ -678,14 +808,112 @@ async fn wait_for_finished_race(
             return Err(io::Error::other("active local race id changed before finishing").into());
         }
         match parse_local_race_phase(race.phase)? {
-            LocalRacePhase::Finished => return Ok(state),
+            LocalRacePhase::Finished => {
+                let accepted_counts = auto_back_to_track_state
+                    .into_iter()
+                    .map(|(car_id, state)| (car_id, state.accepted_count))
+                    .collect();
+                return Ok((state, accepted_counts));
+            }
             LocalRacePhase::Aborted => {
                 return Err(io::Error::other("local race was aborted before finishing").into());
+            }
+            LocalRacePhase::Running => {
+                if let Some(auto_back_to_track) = auto_back_to_track {
+                    apply_auto_back_to_track(
+                        automation,
+                        race_id,
+                        auto_back_to_track,
+                        &mut auto_back_to_track_state,
+                    )
+                    .await;
+                }
+                tokio::time::sleep(Duration::from_millis(RUN_RACE_POLL_INTERVAL_MS)).await;
             }
             _ => {
                 tokio::time::sleep(Duration::from_millis(RUN_RACE_POLL_INTERVAL_MS)).await;
             }
         }
+    }
+}
+
+async fn apply_auto_back_to_track(
+    automation: &StandaloneAutomationHandles,
+    race_id: &str,
+    config: &RunRaceAutoBackToTrackConfig,
+    states: &mut HashMap<u64, RunRaceAutoBackToTrackCarState>,
+) {
+    let frame = automation.frame_hub.latest();
+    let now_ms = frame.server_time_ms;
+    let speed_mps_below = config.speed_kmh_below / 3.6_f32;
+    let stuck_window_ms = u64::from(config.stuck_for_seconds) * 1_000;
+
+    for car in frame.cars.values() {
+        if !matches!(
+            &car.target,
+            game_server::runtime::engine_worker::EngineCommandTarget::LocalRace { race_id: car_race_id }
+                if car_race_id == race_id
+        ) {
+            continue;
+        }
+
+        let state = states.entry(car.public_car_id).or_default();
+        let in_pit = car.state.pitstop_state.is_in_any_zone();
+        let speed_mps = car.state.speed.abs();
+        if in_pit || speed_mps >= speed_mps_below {
+            state.stuck_since_server_ms = None;
+            continue;
+        }
+
+        let Some(stuck_since_server_ms) = state.stuck_since_server_ms else {
+            state.stuck_since_server_ms = Some(now_ms);
+            continue;
+        };
+        if now_ms.saturating_sub(stuck_since_server_ms) < stuck_window_ms {
+            continue;
+        }
+
+        let cooldown_remaining_ms = automation
+            .runtime_store
+            .back_to_track_cooldown_remaining_ms(car.public_car_id, now_ms);
+        if cooldown_remaining_ms > 0 {
+            state.stuck_since_server_ms = None;
+            continue;
+        }
+
+        match automation
+            .engine
+            .set_car_back_to_track_in(car.target.clone(), car.engine_car_id)
+            .await
+        {
+            Ok(()) => {
+                automation
+                    .runtime_store
+                    .mark_back_to_track_applied(car.public_car_id, now_ms);
+                state.accepted_count = state.accepted_count.saturating_add(1);
+                tracing::info!(
+                    target: USER_LOG_TARGET,
+                    race_id,
+                    public_car_id = car.public_car_id,
+                    engine_car_id = car.engine_car_id,
+                    auto_back_to_track_count = state.accepted_count,
+                    speed_kmh = speed_mps * 3.6_f32,
+                    "Standalone auto back-to-track applied"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: USER_LOG_TARGET,
+                    race_id,
+                    public_car_id = car.public_car_id,
+                    engine_car_id = car.engine_car_id,
+                    error = %err,
+                    "Standalone auto back-to-track rejected"
+                );
+            }
+        }
+
+        state.stuck_since_server_ms = None;
     }
 }
 
@@ -717,6 +945,8 @@ fn build_results_file(
     snapshot: LocalRaceTableSnapshot,
     expected_participants: u32,
     finalized_at_unix_ms: u64,
+    auto_back_to_track_enabled: bool,
+    auto_back_to_track_counts: &HashMap<u64, u32>,
 ) -> StandaloneLocalRaceResultsFile {
     let participants = snapshot
         .entries
@@ -735,6 +965,10 @@ fn build_results_file(
                 gap_to_leader_ms: entry.gap_to_leader_ms,
                 laps_behind: entry.laps_behind,
                 in_pit: entry.in_pit,
+                auto_back_to_track_count: auto_back_to_track_counts
+                    .get(&entry.car_id)
+                    .copied()
+                    .unwrap_or(0),
                 status: race_table_status_name(entry.status),
             }
         })
@@ -751,6 +985,7 @@ fn build_results_file(
         status: "finished".to_string(),
         expected_participants,
         joined_participants: race.joined_participant_count,
+        auto_back_to_track_enabled,
         participants,
     }
 }
@@ -762,8 +997,15 @@ fn print_run_race_results(results: &StandaloneLocalRaceResultsFile) {
         results.race_name, results.race_id, results.map_id
     );
     println!(
-        "{:<8} {:<24} {:<12} {:<8} {:<12} {:<16} {}",
-        "position", "display_name", "participant", "car_id", "laps_behind", "gap_ms", "status"
+        "{:<8} {:<24} {:<12} {:<8} {:<12} {:<12} {:<16} {}",
+        "position",
+        "display_name",
+        "participant",
+        "car_id",
+        "laps_behind",
+        "auto_btt",
+        "gap_ms",
+        "status"
     );
     for participant in &results.participants {
         let gap = participant
@@ -771,12 +1013,13 @@ fn print_run_race_results(results: &StandaloneLocalRaceResultsFile) {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<8} {:<24} {:<12} {:<8} {:<12} {:<16} {}",
+            "{:<8} {:<24} {:<12} {:<8} {:<12} {:<12} {:<16} {}",
             participant.position,
             truncate_for_table(&participant.display_name, 24),
             participant.participant_index,
             participant.car_id,
             participant.laps_behind,
+            participant.auto_back_to_track_count,
             gap,
             participant.status
         );
@@ -908,6 +1151,8 @@ mod tests {
             race_name: None,
             countdown_seconds: None,
             max_participants: None,
+            ghost_mode: None,
+            auto_back_to_track: None,
         })
         .expect("scenario should normalize");
 
@@ -920,6 +1165,8 @@ mod tests {
                 race_name: "Local race".to_string(),
                 countdown_seconds: 0,
                 max_participants: 8,
+                ghost_mode: None,
+                auto_back_to_track: None,
             }
         );
     }
@@ -933,6 +1180,8 @@ mod tests {
             race_name: None,
             countdown_seconds: None,
             max_participants: Some(5),
+            ghost_mode: None,
+            auto_back_to_track: None,
         })
         .expect_err("scenario should reject max_participants < expected_participants");
 
@@ -941,6 +1190,92 @@ mod tests {
                 "max_participants must be greater than or equal to expected_participants"
             ),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_run_race_scenario_accepts_auto_back_to_track() {
+        let scenario = normalize_run_race_scenario(RunRaceScenarioFile {
+            map_id: "ovalis_04".to_string(),
+            race_duration_sec: 60,
+            expected_participants: 8,
+            race_name: Some("Replay".to_string()),
+            countdown_seconds: Some(3),
+            max_participants: Some(10),
+            ghost_mode: None,
+            auto_back_to_track: Some(RunRaceAutoBackToTrackFile {
+                speed_kmh_below: 5.0,
+                stuck_for_seconds: 5,
+            }),
+        })
+        .expect("scenario should normalize");
+
+        assert_eq!(
+            scenario.auto_back_to_track,
+            Some(RunRaceAutoBackToTrackConfig {
+                speed_kmh_below: 5.0,
+                stuck_for_seconds: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_run_race_scenario_rejects_invalid_auto_back_to_track_values() {
+        let err = normalize_run_race_scenario(RunRaceScenarioFile {
+            map_id: "ovalis_04".to_string(),
+            race_duration_sec: 60,
+            expected_participants: 8,
+            race_name: None,
+            countdown_seconds: None,
+            max_participants: None,
+            ghost_mode: None,
+            auto_back_to_track: Some(RunRaceAutoBackToTrackFile {
+                speed_kmh_below: 0.0,
+                stuck_for_seconds: 5,
+            }),
+        })
+        .expect_err("zero speed threshold should fail");
+
+        assert!(
+            err.to_string()
+                .contains("auto_back_to_track.speed_kmh_below must be greater than zero"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_run_race_scenario_accepts_ghost_mode() {
+        let scenario = normalize_run_race_scenario(RunRaceScenarioFile {
+            map_id: "ovalis_04".to_string(),
+            race_duration_sec: 60,
+            expected_participants: 8,
+            race_name: None,
+            countdown_seconds: None,
+            max_participants: None,
+            ghost_mode: Some(RunRaceGhostModeFile {
+                enabled: true,
+                enter_speed_max_mps: 13.888889,
+                exit_speed_min_mps: 13.888889,
+                enter_delay_ms: 500,
+                exit_delay_ms: 500,
+                until_completed_laps: 1,
+                vehicle_overlap_exit_delay_ms: 800,
+            }),
+            auto_back_to_track: None,
+        })
+        .expect("scenario should normalize");
+
+        assert_eq!(
+            scenario.ghost_mode,
+            Some(GhostModeSettings {
+                enabled: true,
+                enter_speed_max_mps: 13.888889,
+                exit_speed_min_mps: 13.888889,
+                enter_delay_ms: 500,
+                exit_delay_ms: 500,
+                until_completed_laps: 1,
+                vehicle_overlap_exit_delay_ms: 800,
+            })
         );
     }
 

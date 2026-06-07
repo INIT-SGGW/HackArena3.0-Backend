@@ -46,6 +46,8 @@ use tonic_health::server::health_reporter;
 use tonic_web::GrpcWebLayer;
 use tower_http::trace::TraceLayer;
 
+#[cfg(feature = "standalone")]
+use crate::StandaloneAutomationHandles;
 #[cfg(feature = "official")]
 use crate::auth::auth_claims::TokenValidator;
 use crate::config::Config;
@@ -112,6 +114,9 @@ pub async fn serve_grpc(
     #[cfg(feature = "official")] official_db_pool: sqlx::PgPool,
     mut shutdown_rx: broadcast::Receiver<()>,
     active_connections: Arc<AtomicUsize>,
+    #[cfg(feature = "standalone")] automation_handles_tx: Option<
+        tokio::sync::oneshot::Sender<StandaloneAutomationHandles>,
+    >,
     #[cfg(all(feature = "local", not(feature = "standalone")))]
     broker_registration_state: BrokerRegistrationState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -311,6 +316,14 @@ pub async fn serve_grpc(
         cfg.simulation_hz,
         shutdown_rx.resubscribe(),
     );
+    #[cfg(feature = "standalone")]
+    if let Some(automation_handles_tx) = automation_handles_tx {
+        let _ = automation_handles_tx.send(StandaloneAutomationHandles {
+            engine: engine.clone(),
+            runtime_store: race_runtime_store.clone(),
+            frame_hub: frame_hub.clone(),
+        });
+    }
     #[cfg(feature = "local")]
     let local_sandbox_store =
         LocalSandboxConfigStore::load_or_create(cfg.local_sandbox_store_path.clone()).await?;
