@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use game_server::StandaloneAutomationHandles;
 use game_server::config::Config;
+use game_server::runtime::engine_worker::EngineCommandTarget;
 use proto::race::v1::local_race_admin_service_client::LocalRaceAdminServiceClient;
 use proto::race::v1::local_sandbox_admin_service_client::LocalSandboxAdminServiceClient;
 use proto::race::v1::race_table_query_service_client::RaceTableQueryServiceClient;
@@ -124,7 +125,7 @@ struct StandaloneTomlResolvedConfig {
     warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 struct StandaloneLocalRaceResultsFile {
     mode: String,
     race_id: String,
@@ -139,7 +140,7 @@ struct StandaloneLocalRaceResultsFile {
     participants: Vec<StandaloneLocalRaceResultParticipant>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 struct StandaloneLocalRaceResultParticipant {
     position: u32,
     car_id: u64,
@@ -147,6 +148,9 @@ struct StandaloneLocalRaceResultParticipant {
     participant_index: u32,
     gap_to_leader_ms: Option<u32>,
     laps_behind: u32,
+    completed_laps: u32,
+    current_lap_distance_m: Option<f32>,
+    total_distance_m: Option<f32>,
     in_pit: bool,
     auto_back_to_track_count: u32,
     status: String,
@@ -676,12 +680,14 @@ async fn run_race_controller(
 
     let snapshot =
         get_local_race_table_snapshot(&mut race_table_client, created_race.race_id.clone()).await?;
+    let frame = automation.frame_hub.latest();
     let finalized_at_unix_ms =
         current_unix_ms_from_timestamp(active_race.planned_end_at_utc.as_ref())
             .unwrap_or_else(current_unix_ms);
     let results = build_results_file(
         active_race,
         snapshot,
+        frame.as_ref(),
         scenario.expected_participants,
         finalized_at_unix_ms,
         scenario.auto_back_to_track.is_some(),
@@ -943,16 +949,33 @@ async fn get_local_race_table_snapshot(
 fn build_results_file(
     race: &proto::race::v1::LocalRaceRuntimeInfo,
     snapshot: LocalRaceTableSnapshot,
+    frame: &game_server::services::race::frame_hub::RuntimeFrame,
     expected_participants: u32,
     finalized_at_unix_ms: u64,
     auto_back_to_track_enabled: bool,
     auto_back_to_track_counts: &HashMap<u64, u32>,
 ) -> StandaloneLocalRaceResultsFile {
+    let lap_length_m = frame
+        .local_race_lap_length_m
+        .get(&race.race_id)
+        .copied()
+        .unwrap_or(0.0)
+        .max(0.0);
     let participants = snapshot
         .entries
         .into_iter()
         .map(|entry| {
             let participant = entry.participant.unwrap_or_default();
+            let metrics = frame
+                .cars
+                .get(&entry.car_id)
+                .filter(|car| {
+                    matches!(
+                        &car.target,
+                        EngineCommandTarget::LocalRace { race_id } if race_id == &race.race_id
+                    )
+                })
+                .and_then(|car| car.race_metrics);
             StandaloneLocalRaceResultParticipant {
                 position: entry.position,
                 car_id: entry.car_id,
@@ -964,6 +987,11 @@ fn build_results_file(
                 participant_index: participant.participant_index,
                 gap_to_leader_ms: entry.gap_to_leader_ms,
                 laps_behind: entry.laps_behind,
+                completed_laps: metrics.map(|value| value.completed_laps).unwrap_or(0),
+                current_lap_distance_m: metrics.map(|value| value.lap_progress_m.max(0.0)),
+                total_distance_m: metrics.map(|value| {
+                    value.completed_laps as f32 * lap_length_m + value.lap_progress_m.max(0.0)
+                }),
                 in_pit: entry.in_pit,
                 auto_back_to_track_count: auto_back_to_track_counts
                     .get(&entry.car_id)
