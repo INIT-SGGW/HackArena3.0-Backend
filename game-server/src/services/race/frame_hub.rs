@@ -448,7 +448,10 @@ async fn collect_frame(
 
         #[cfg(feature = "local")]
         {
-            if matches!(&target, EngineCommandTarget::Sandbox { .. }) {
+            if matches!(
+                &target,
+                EngineCommandTarget::Sandbox { .. } | EngineCommandTarget::LocalRace { .. }
+            ) {
                 let in_stationary_fix = state.pitstop_state.has_zone(PitstopZone::Fix)
                     && state.pitstop_state.wheels_in_pitstop == 4
                     && state.speed == 0.0;
