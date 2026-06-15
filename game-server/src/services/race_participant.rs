@@ -3489,6 +3489,9 @@ async fn run_participant_stream(
     let runtime_map_id = resolve_runtime_map_id(&frame_hub, &self_target);
     let mut initialized = false;
     let mut server_seq = 1_u64;
+    let mut self_seen_once = false;
+    let mut self_missing_ticks = 0_u32;
+    let max_initial_self_missing_ticks = effective_hz.saturating_mul(3);
 
     tracing::info!(
         stream_id,
@@ -4215,6 +4218,19 @@ async fn run_participant_stream(
 
                 let frame = frame_hub.latest();
                 let Some(self_car) = frame.cars.get(&self_public_car_id).cloned() else {
+                    self_missing_ticks = self_missing_ticks.saturating_add(1);
+                    if !self_seen_once && self_missing_ticks <= max_initial_self_missing_ticks {
+                        tracing::warn!(
+                            stream_id,
+                            self_public_car_id,
+                            self_engine_car_id,
+                            self_missing_ticks,
+                            max_initial_self_missing_ticks,
+                            target = ?self_target,
+                            "participant self car not visible yet; waiting before cleanup"
+                        );
+                        continue;
+                    }
                     emit_participant_terminal_error(
                         &tx,
                         Status::not_found("participant car is no longer active"),
@@ -4229,6 +4245,8 @@ async fn run_participant_stream(
                     ).await;
                     break;
                 };
+                self_seen_once = true;
+                self_missing_ticks = 0;
                 if self_car.target != self_target {
                     emit_participant_terminal_error(
                         &tx,
