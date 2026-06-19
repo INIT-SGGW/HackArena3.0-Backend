@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  envoy-gateway:
+    build: ./envoy
+    container_name: envoy-gateway
+    ports:
+      - "50051:50051"    # HTTP / gRPC-Web entrypoint
+      - "9901:9901"    # Envoy admin interface
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on:
+      - game-server
+    networks:
+      - envoymesh
+
+  game-server:
+    image: game-server:latest
+    container_name: game-server
+    expose:
+      - "50051"
+    networks:
+      - envoymesh
+
+networks:
+  envoymesh:
+    driver: bridge
